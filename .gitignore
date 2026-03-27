@@ -1,0 +1,11 @@
+# Rust build artifacts
+/target/
+
+# Claude Code local settings
+.claude/
+
+# Editor directories
+.idea/
+.vscode/
+*.swp
+*.swo
