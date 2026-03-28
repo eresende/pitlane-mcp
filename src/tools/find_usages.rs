@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader};
+use std::collections::HashSet;
 use std::path::Path;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -63,8 +63,7 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
             }
         }
 
-        // Search lines for symbol name
-        match search_file_for_name(path, &symbol_name) {
+        match search_file_ast(path, &symbol_name) {
             Ok(hits) => {
                 for (line_num, col, snippet) in hits {
                     let rel = path.strip_prefix(&project_path).unwrap_or(path);
@@ -88,40 +87,225 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
     }))
 }
 
-fn search_file_for_name(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize, String)>> {
-    let file = std::fs::File::open(path)?;
-    let reader = BufReader::new(file);
+/// Searches `path` for AST nodes whose text equals `name`. Only true identifier
+/// nodes are matched — string literals, comments, and substrings of longer
+/// identifiers are never returned.
+fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize, String)>> {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+
+    let ts_lang: tree_sitter::Language = match ext {
+        "rs" => tree_sitter_rust::LANGUAGE.into(),
+        "py" => tree_sitter_python::LANGUAGE.into(),
+        _ => return Ok(vec![]),
+    };
+
+    // Skip oversized files (same guard as the indexer)
+    if path.metadata().map(|m| m.len()).unwrap_or(0) > 1024 * 1024 {
+        return Ok(vec![]);
+    }
+
+    let source = std::fs::read(path)?;
+    let source_str = std::str::from_utf8(&source).unwrap_or("");
+    let lines: Vec<&str> = source_str.lines().collect();
+
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&ts_lang)?;
+
+    let tree = match parser.parse(&source, None) {
+        Some(t) => t,
+        None => return Ok(vec![]),
+    };
+
     let mut hits = Vec::new();
+    let mut seen = HashSet::new();
 
-    for (i, line_result) in reader.lines().enumerate() {
-        let line = line_result?;
-        let line_num = i + 1;
+    collect_identifier_nodes(
+        tree.root_node(),
+        &source,
+        name,
+        &lines,
+        &mut hits,
+        &mut seen,
+    );
 
-        // Find all occurrences of name in the line
-        let mut search_start = 0;
-        while let Some(pos) = line[search_start..].find(name) {
-            let abs_pos = search_start + pos;
+    hits.sort_unstable();
 
-            // Check word boundaries (simple check: surrounding chars are not word chars)
-            let before_ok = abs_pos == 0 || {
-                let c = line.as_bytes()[abs_pos - 1] as char;
-                !c.is_alphanumeric() && c != '_'
-            };
-            let after_ok = abs_pos + name.len() >= line.len() || {
-                let c = line.as_bytes()[abs_pos + name.len()] as char;
-                !c.is_alphanumeric() && c != '_'
-            };
+    Ok(hits)
+}
 
-            if before_ok && after_ok {
-                hits.push((line_num, abs_pos + 1, line.trim().to_string()));
-            }
-
-            search_start = abs_pos + 1;
-            if search_start >= line.len() {
-                break;
-            }
+/// Recursively walks the AST and collects all identifier nodes whose text
+/// matches `name`. Covers Rust's `identifier`, `type_identifier`, and
+/// `field_identifier` node kinds, and Python's `identifier`.
+fn collect_identifier_nodes(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    name: &str,
+    lines: &[&str],
+    hits: &mut Vec<(usize, usize, String)>,
+    seen: &mut HashSet<(usize, usize)>,
+) {
+    if matches!(
+        node.kind(),
+        "identifier" | "type_identifier" | "field_identifier"
+    ) && node.utf8_text(source).ok() == Some(name)
+    {
+        let row = node.start_position().row;
+        let col = node.start_position().column;
+        if seen.insert((row, col)) {
+            let snippet = lines
+                .get(row)
+                .map(|l| l.trim().to_string())
+                .unwrap_or_default();
+            hits.push((row + 1, col + 1, snippet));
         }
     }
 
-    Ok(hits)
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_identifier_nodes(child, source, name, lines, hits, seen);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write(dir: &TempDir, name: &str, content: &str) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    // ── Rust ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_rs_finds_definition_and_call() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "lib.rs", "fn foo() {}\nfn bar() { foo(); }\n");
+        let hits = search_file_ast(&path, "foo").unwrap();
+        let lines: Vec<usize> = hits.iter().map(|(l, _, _)| *l).collect();
+        assert!(lines.contains(&1), "definition on line 1");
+        assert!(lines.contains(&2), "call on line 2");
+    }
+
+    #[test]
+    fn test_rs_ignores_string_literal() {
+        let dir = TempDir::new().unwrap();
+        // "foo" in a string must not be returned
+        let path = write(
+            &dir,
+            "lib.rs",
+            "fn foo() {}\nfn bar() { let _s = \"foo\"; }\n",
+        );
+        let hits = search_file_ast(&path, "foo").unwrap();
+        // Only the definition on line 1; the string on line 2 must be absent
+        assert!(
+            hits.iter().all(|(l, _, _)| *l == 1),
+            "string literal must not be returned: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn test_rs_ignores_comment() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "lib.rs", "// foo is mentioned here\nfn bar() {}\n");
+        let hits = search_file_ast(&path, "foo").unwrap();
+        assert!(hits.is_empty(), "comment mention must not be returned");
+    }
+
+    #[test]
+    fn test_rs_no_partial_match() {
+        let dir = TempDir::new().unwrap();
+        // searching for `fo` must not match `foo`
+        let path = write(&dir, "lib.rs", "fn foo() {}\nfn bar() { foo(); }\n");
+        let hits = search_file_ast(&path, "fo").unwrap();
+        assert!(hits.is_empty(), "partial name must not match");
+    }
+
+    #[test]
+    fn test_rs_type_identifier() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "lib.rs",
+            "struct Foo {}\nfn bar(_x: Foo) {}\nfn baz() -> Foo { Foo {} }\n",
+        );
+        let hits = search_file_ast(&path, "Foo").unwrap();
+        // definition + two uses as type + one constructor = 4
+        assert!(hits.len() >= 3, "expected ≥3 hits, got {hits:?}");
+    }
+
+    #[test]
+    fn test_rs_field_identifier() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "lib.rs",
+            "struct S { val: u32 }\nfn f(s: S) -> u32 { s.val }\n",
+        );
+        let hits = search_file_ast(&path, "val").unwrap();
+        // struct field declaration + field access
+        assert!(hits.len() >= 2, "expected ≥2 hits, got {hits:?}");
+    }
+
+    // ── Python ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_py_finds_definition_and_call() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "mod.py",
+            "def foo():\n    pass\n\ndef bar():\n    foo()\n",
+        );
+        let hits = search_file_ast(&path, "foo").unwrap();
+        let lines: Vec<usize> = hits.iter().map(|(l, _, _)| *l).collect();
+        assert!(lines.contains(&1), "definition on line 1");
+        assert!(lines.contains(&5), "call on line 5");
+    }
+
+    #[test]
+    fn test_py_ignores_string_literal() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "mod.py", "def foo():\n    pass\n\nx = \"foo\"\n");
+        let hits = search_file_ast(&path, "foo").unwrap();
+        assert!(
+            hits.iter().all(|(l, _, _)| *l == 1),
+            "string literal must not be returned: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn test_py_ignores_comment() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "mod.py",
+            "# foo mentioned here\ndef bar():\n    pass\n",
+        );
+        let hits = search_file_ast(&path, "foo").unwrap();
+        assert!(hits.is_empty(), "comment mention must not be returned");
+    }
+
+    // ── Edge cases ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_unknown_extension_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "notes.txt", "foo bar baz");
+        let hits = search_file_ast(&path, "foo").unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn test_oversized_file_skipped() {
+        let dir = TempDir::new().unwrap();
+        let big_content = "fn foo() {}\n".repeat(100_000);
+        let path = write(&dir, "big.rs", &big_content);
+        // File must exceed 1 MiB for the guard to trigger
+        assert!(std::fs::metadata(&path).unwrap().len() > 1024 * 1024);
+        let hits = search_file_ast(&path, "foo").unwrap();
+        assert!(hits.is_empty(), "oversized file must be skipped");
+    }
 }
