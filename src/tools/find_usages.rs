@@ -106,6 +106,15 @@ fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize,
 
     let source = std::fs::read(path)?;
     let source_str = std::str::from_utf8(&source).unwrap_or("");
+
+    // Fast pre-filter: if the symbol name doesn't appear anywhere in the file
+    // as a substring it cannot appear as an identifier — skip the tree-sitter
+    // parse entirely.  False positives (name in a comment, string literal, or
+    // as part of a longer identifier) are fine; the AST pass handles those.
+    if !source_str.contains(name) {
+        return Ok(vec![]);
+    }
+
     let lines: Vec<&str> = source_str.lines().collect();
 
     let mut parser = tree_sitter::Parser::new();

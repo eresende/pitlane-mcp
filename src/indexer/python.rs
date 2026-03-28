@@ -57,6 +57,74 @@ fn get_doc_comment(source: &[u8], node: Node) -> Option<String> {
     None
 }
 
+/// Returns `(byte_end, line_end)` for a Python class symbol.
+/// For classes with methods, trims to just the header + docstring so that
+/// `get_symbol` returns only the declaration, not the full body.
+/// Classes with no methods (attribute-only) are returned at full extent.
+fn class_symbol_end(source: &[u8], node: Node) -> (usize, u32) {
+    let full = (node.end_byte(), node.end_position().row as u32 + 1);
+
+    let Some(body) = node.child_by_field_name("body") else {
+        return full;
+    };
+
+    // Only trim classes that actually contain methods.
+    let has_methods = {
+        let mut cursor = body.walk();
+        let x = body.children(&mut cursor).any(|child| {
+            child.kind() == "function_definition"
+                || (child.kind() == "decorated_definition" && {
+                    let mut ic = child.walk();
+                    let y = child
+                        .children(&mut ic)
+                        .any(|c| c.kind() == "function_definition");
+                    y
+                })
+        });
+        x
+    };
+
+    if !has_methods {
+        return full;
+    }
+
+    // Has methods: trim to header + optional docstring.
+    let mut cursor = body.walk();
+    if let Some(first) = body.children(&mut cursor).next() {
+        if first.kind() == "expression_statement" {
+            let mut ic = first.walk();
+            for inner in first.children(&mut ic) {
+                if inner.kind() == "string" {
+                    return (inner.end_byte(), inner.end_position().row as u32 + 1);
+                }
+            }
+        }
+    }
+
+    // No docstring: trim to the end of the class header line (the line with `:`)
+    let body_start_row = body.start_position().row;
+    let class_start_row = node.start_position().row;
+
+    // Single-line class (e.g. `class Foo: pass`) — body on same row, keep full.
+    if body_start_row == class_start_row {
+        return full;
+    }
+
+    let target_row = body_start_row - 1; // row of the colon
+    let class_source = &source[node.start_byte()..node.end_byte()];
+    let mut current_row = class_start_row;
+    for (i, &b) in class_source.iter().enumerate() {
+        if b == b'\n' {
+            if current_row == target_row {
+                return (node.start_byte() + i + 1, target_row as u32 + 1);
+            }
+            current_row += 1;
+        }
+    }
+
+    full
+}
+
 fn extract_from_node(
     source: &[u8],
     node: Node,
@@ -102,7 +170,7 @@ fn extract_from_node(
                 let doc = get_doc_comment(source, node);
                 let signature = get_signature(source, node);
                 let start_pos = node.start_position();
-                let end_pos = node.end_position();
+                let (byte_end, line_end) = class_symbol_end(source, node);
 
                 symbols.push(Symbol {
                     id,
@@ -112,9 +180,9 @@ fn extract_from_node(
                     language: Language::Python,
                     file: Arc::new(path.to_path_buf()),
                     byte_start: node.start_byte(),
-                    byte_end: node.end_byte(),
+                    byte_end,
                     line_start: start_pos.row as u32 + 1,
-                    line_end: end_pos.row as u32 + 1,
+                    line_end,
                     signature,
                     doc,
                 });
@@ -246,5 +314,53 @@ mod tests {
         assert_eq!(symbols.len(), 1);
         let sig = symbols[0].signature.as_deref().unwrap_or("");
         assert_eq!(sig, "def greet(name: str) -> str:");
+    }
+
+    /// A class with methods should have its symbol trimmed to just the header line,
+    /// not the full body — this is the Python token-efficiency optimization.
+    #[test]
+    fn test_class_with_methods_trimmed_to_header() {
+        let source = b"class Greeter:\n    def hello(self):\n        pass\n";
+        let symbols = parse_and_extract(source);
+        let class_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Class))
+            .unwrap();
+        // Class symbol should end on line 1 (the header line), not line 3.
+        assert_eq!(class_sym.line_start, 1);
+        assert_eq!(class_sym.line_end, 1, "class symbol should be trimmed to header only");
+        // The source read via byte range should be just the header line.
+        let source_str = std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(source_str.starts_with("class Greeter:"), "got: {source_str:?}");
+        assert!(!source_str.contains("def hello"), "body should not be included");
+    }
+
+    /// A class with a docstring and methods should trim to header + docstring.
+    #[test]
+    fn test_class_with_docstring_trimmed_to_docstring() {
+        let source = b"class Greeter:\n    \"\"\"Greets people.\"\"\"\n    def hello(self):\n        pass\n";
+        let symbols = parse_and_extract(source);
+        let class_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Class))
+            .unwrap();
+        // Class symbol should end on line 2 (docstring line).
+        assert_eq!(class_sym.line_end, 2, "class symbol should include docstring");
+        let source_str = std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(source_str.contains("Greets people"), "docstring should be included");
+        assert!(!source_str.contains("def hello"), "body should not be included");
+    }
+
+    /// A class without methods (attribute-only) should NOT be trimmed.
+    #[test]
+    fn test_attribute_only_class_not_trimmed() {
+        let source = b"class Config:\n    debug: bool = False\n    title: str = \"App\"\n";
+        let symbols = parse_and_extract(source);
+        assert_eq!(symbols.len(), 1);
+        let class_sym = &symbols[0];
+        // No methods — full class should be returned.
+        assert!(class_sym.line_end > 1, "attribute-only class should not be trimmed");
+        let source_str = std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(source_str.contains("debug"), "attributes should be included");
     }
 }

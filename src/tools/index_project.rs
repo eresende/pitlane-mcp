@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
@@ -37,17 +38,20 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     let index_path = idx_dir.join("index.bin");
     let meta_path = idx_dir.join("meta.json");
 
-    // Check if we can use cached index
+    // Check if we can use the up-to-date on-disk index.
     if !force && index_path.exists() && meta_path.exists() {
         if let Ok(meta) = load_meta(&meta_path) {
             if is_index_up_to_date(&canonical, &meta) {
-                // Load and return the existing index stats
                 if let Ok(index) = crate::index::format::load_index(&index_path) {
+                    let symbol_count = index.symbol_count();
+                    let file_count = index.file_count();
+                    // Populate the in-memory cache so subsequent queries skip disk I/O.
+                    crate::cache::insert(canonical.clone(), index);
                     let elapsed = start.elapsed().as_millis() as u64;
                     return Ok(json!({
                         "status": "cached",
-                        "symbol_count": index.symbol_count(),
-                        "file_count": index.file_count(),
+                        "symbol_count": symbol_count,
+                        "file_count": file_count,
                         "index_path": index_path.display().to_string(),
                         "elapsed_ms": elapsed,
                     }));
@@ -82,7 +86,7 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
         }
     }
 
-    // Save index
+    // Save index to disk, then populate the in-memory cache.
     save_index(&index, &index_path)?;
 
     // Save meta
@@ -92,6 +96,8 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     let mut meta = IndexMeta::new(&canonical_for_meta);
     meta.file_mtimes = file_mtimes;
     save_meta(&meta, &meta_path)?;
+
+    crate::cache::insert(canonical_for_meta, index);
 
     let elapsed = start.elapsed().as_millis() as u64;
 
@@ -139,12 +145,23 @@ fn is_index_up_to_date(project_path: &Path, meta: &IndexMeta) -> bool {
     meta.project_path == project_path.display().to_string()
 }
 
-/// Load an index from disk for a project path
-pub fn load_project_index(project: &str) -> anyhow::Result<SymbolIndex> {
+/// Load an index for a project path, returning a shared `Arc`.
+///
+/// Checks the in-memory cache first. On a miss, deserializes from disk,
+/// populates the cache, and returns the new Arc. Subsequent calls for the
+/// same project return the cached Arc immediately without any disk I/O.
+pub fn load_project_index(project: &str) -> anyhow::Result<Arc<SymbolIndex>> {
     let path = Path::new(project);
     let canonical = path
         .canonicalize()
         .with_context(|| format!("Cannot canonicalize path: {}", project))?;
+
+    // Cache hit — no disk I/O needed.
+    if let Some(cached) = crate::cache::get(&canonical) {
+        return Ok(cached);
+    }
+
+    // Cache miss — load from disk and populate the cache.
     let idx_dir = index_dir(&canonical)?;
     let index_path = idx_dir.join("index.bin");
 
@@ -155,5 +172,54 @@ pub fn load_project_index(project: &str) -> anyhow::Result<SymbolIndex> {
         );
     }
 
-    crate::index::format::load_index(&index_path)
+    let index = crate::index::format::load_index(&index_path)?;
+    Ok(crate::cache::insert(canonical, index))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::format::{index_dir, save_index};
+    use crate::indexer::{registry, Indexer};
+    use tempfile::TempDir;
+
+    /// Helper: index a temp project to disk and return its path string.
+    fn setup_project_on_disk(dir: &TempDir) -> String {
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        dir.path().to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn test_load_project_index_cache_miss_then_hit() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn foo() {}").unwrap();
+        let project = setup_project_on_disk(&dir);
+        let canonical = dir.path().canonicalize().unwrap();
+
+        // Ensure no stale entry from a previous run.
+        crate::cache::invalidate(&canonical);
+
+        // First call: cache miss — loads from disk.
+        let arc1 = load_project_index(&project).unwrap();
+        assert!(arc1.symbol_count() > 0, "index should have symbols");
+
+        // Delete the on-disk index. A second call must still succeed via cache.
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::remove_file(idx_dir.join("index.bin")).unwrap();
+
+        // Second call: cache hit — no disk I/O.
+        let arc2 = load_project_index(&project).unwrap();
+        assert_eq!(arc1.symbol_count(), arc2.symbol_count());
+
+        // Both calls return the same Arc allocation.
+        assert!(Arc::ptr_eq(&arc1, &arc2), "cache hit must return the same Arc");
+
+        // Clean up.
+        crate::cache::invalidate(&canonical);
+    }
 }

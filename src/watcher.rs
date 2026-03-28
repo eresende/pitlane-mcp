@@ -133,6 +133,10 @@ async fn reindex_batch(
         if let Err(e) = save_index(&idx, index_path) {
             eprintln!("pitlane-mcp: failed to flush index to disk: {}", e);
         }
+
+        // Invalidate the in-memory cache so the next query reloads the fresh
+        // snapshot from disk rather than serving stale data.
+        crate::cache::invalidate(root);
     }
 
     // Update file_mtimes in meta for the changed paths so is_index_up_to_date

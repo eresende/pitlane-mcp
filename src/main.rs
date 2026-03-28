@@ -1,10 +1,6 @@
-mod index;
-mod indexer;
-mod tools;
-mod watcher;
-
 use std::sync::Arc;
 
+use pitlane_mcp::tools;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
@@ -12,7 +8,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::tools::watch_project::WatcherRegistry;
+use pitlane_mcp::tools::watch_project::WatcherRegistry;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IndexProjectRequest {
@@ -122,12 +118,12 @@ impl PitlaneMcp {
         description = "Parse and index all supported source files under a given path. Returns symbol count, file count, index path, and elapsed time."
     )]
     async fn index_project(&self, Parameters(req): Parameters<IndexProjectRequest>) -> String {
-        let params = crate::tools::index_project::IndexProjectParams {
+        let params = tools::index_project::IndexProjectParams {
             path: req.path,
             exclude: req.exclude,
             force: req.force,
         };
-        match crate::tools::index_project::index_project(params).await {
+        match tools::index_project::index_project(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }
@@ -137,7 +133,7 @@ impl PitlaneMcp {
         description = "Search indexed symbols by name, kind, language, or file pattern. Returns matching symbols with their IDs, names, kinds, and locations."
     )]
     async fn search_symbols(&self, Parameters(req): Parameters<SearchSymbolsRequest>) -> String {
-        let params = crate::tools::search_symbols::SearchSymbolsParams {
+        let params = tools::search_symbols::SearchSymbolsParams {
             project: req.project,
             query: req.query,
             kind: req.kind,
@@ -145,7 +141,7 @@ impl PitlaneMcp {
             file: req.file,
             limit: req.limit,
         };
-        match crate::tools::search_symbols::search_symbols(params).await {
+        match tools::search_symbols::search_symbols(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }
@@ -155,13 +151,13 @@ impl PitlaneMcp {
         description = "Retrieve the full source of a single symbol by its stable ID. Much more token-efficient than reading the whole file."
     )]
     async fn get_symbol(&self, Parameters(req): Parameters<GetSymbolRequest>) -> String {
-        let params = crate::tools::get_symbol::GetSymbolParams {
+        let params = tools::get_symbol::GetSymbolParams {
             project: req.project,
             symbol_id: req.symbol_id,
             include_context: req.include_context,
             signature_only: req.signature_only,
         };
-        match crate::tools::get_symbol::get_symbol(params).await {
+        match tools::get_symbol::get_symbol(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }
@@ -171,11 +167,11 @@ impl PitlaneMcp {
         description = "List all symbols in a file with their kinds and line numbers, without returning source code."
     )]
     async fn get_file_outline(&self, Parameters(req): Parameters<GetFileOutlineRequest>) -> String {
-        let params = crate::tools::get_file_outline::GetFileOutlineParams {
+        let params = tools::get_file_outline::GetFileOutlineParams {
             project: req.project,
             file_path: req.file_path,
         };
-        match crate::tools::get_file_outline::get_file_outline(params).await {
+        match tools::get_file_outline::get_file_outline(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }
@@ -188,11 +184,11 @@ impl PitlaneMcp {
         &self,
         Parameters(req): Parameters<GetProjectOutlineRequest>,
     ) -> String {
-        let params = crate::tools::get_project_outline::GetProjectOutlineParams {
+        let params = tools::get_project_outline::GetProjectOutlineParams {
             project: req.project,
             depth: req.depth,
         };
-        match crate::tools::get_project_outline::get_project_outline(params).await {
+        match tools::get_project_outline::get_project_outline(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }
@@ -202,12 +198,12 @@ impl PitlaneMcp {
         description = "Find all locations in the project that reference a given symbol by name. Returns file, line, column, and surrounding snippet."
     )]
     async fn find_usages(&self, Parameters(req): Parameters<FindUsagesRequest>) -> String {
-        let params = crate::tools::find_usages::FindUsagesParams {
+        let params = tools::find_usages::FindUsagesParams {
             project: req.project,
             symbol_id: req.symbol_id,
             scope: req.scope,
         };
-        match crate::tools::find_usages::find_usages(params).await {
+        match tools::find_usages::find_usages(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }
@@ -217,11 +213,11 @@ impl PitlaneMcp {
         description = "Start or stop incremental background re-indexing when source files change. Use stop=true to stop an existing watcher."
     )]
     async fn watch_project(&self, Parameters(req): Parameters<WatchProjectRequest>) -> String {
-        let params = crate::tools::watch_project::WatchProjectParams {
+        let params = tools::watch_project::WatchProjectParams {
             project: req.project,
             stop: req.stop,
         };
-        match crate::tools::watch_project::watch_project(params, &self.watcher_registry).await {
+        match tools::watch_project::watch_project(params, &self.watcher_registry).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }

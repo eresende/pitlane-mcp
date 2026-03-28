@@ -44,8 +44,11 @@ impl WatcherRegistry {
         }
 
         // Load existing index for the watcher to maintain incrementally.
+        // load_project_index returns an Arc<SymbolIndex> (immutable snapshot).
+        // The watcher needs its own mutable copy to apply incremental updates,
+        // so we clone the snapshot once here at startup.
         let existing_index = load_project_index(project)?;
-        let project_index_arc = Arc::new(RwLock::new(existing_index));
+        let project_index_arc = Arc::new(RwLock::new((*existing_index).clone()));
 
         // Resolve disk paths so the watcher can flush updates after each batch.
         let idx_dir = index_dir(&canonical)?;

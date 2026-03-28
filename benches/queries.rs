@@ -1,0 +1,260 @@
+/// Benchmarks for query tools (search_symbols, get_symbol, find_usages,
+/// get_file_outline, get_project_outline) on real-world repos.
+///
+/// Each iteration includes loading the index from disk, reflecting end-to-end
+/// latency a client experiences per tool call.
+///
+/// Prerequisites: run `bench/setup.sh` first to clone the benchmark repositories.
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use pitlane_mcp::{
+    indexer::language::SymbolKind,
+    tools::{
+        find_usages::{find_usages, FindUsagesParams},
+        get_file_outline::{get_file_outline, GetFileOutlineParams},
+        get_project_outline::{get_project_outline, GetProjectOutlineParams},
+        get_symbol::{get_symbol, GetSymbolParams},
+        index_project::{index_project, load_project_index, IndexProjectParams},
+        search_symbols::{search_symbols, SearchSymbolsParams},
+    },
+};
+use std::{fs, time::Duration};
+use tokio::runtime::Runtime;
+
+const REPOS: &[&str] = &["bench/repos/ripgrep", "bench/repos/fastapi"];
+
+struct Setup {
+    project: String,
+    symbol_id: String,
+    search_query: String,
+    /// Relative path of the file containing the benchmark target symbol.
+    /// Derived from the symbol_id prefix (format: `path/to/file::Name#kind`).
+    file_path: String,
+}
+
+/// Index the repo (if not already up-to-date), load the index, and pick a
+/// representative struct/class as the benchmark target symbol.
+///
+/// Also reports the median token efficiency across all struct/class symbols,
+/// which is more representative than the largest-symbol outlier.
+fn prepare(path: &str, rt: &Runtime) -> Option<Setup> {
+    if !std::path::Path::new(path).exists() {
+        eprintln!("Skipping {path}: not found — run bench/setup.sh first");
+        return None;
+    }
+
+    // Ensure the on-disk index exists (uses cache if already up-to-date).
+    rt.block_on(index_project(IndexProjectParams {
+        path: path.to_string(),
+        exclude: None,
+        force: Some(false),
+    }))
+    .ok()?;
+
+    let index = load_project_index(path).ok()?;
+    let label = path.split('/').last().unwrap_or(path);
+
+    // Collect all struct/class symbols with their file sizes for efficiency stats.
+    let mut candidates: Vec<(&pitlane_mcp::indexer::language::Symbol, usize)> = index
+        .symbols
+        .values()
+        .filter(|s| matches!(s.kind, SymbolKind::Struct | SymbolKind::Class))
+        .filter_map(|s| {
+            let sym_bytes = s.byte_end.saturating_sub(s.byte_start);
+            if sym_bytes == 0 {
+                return None;
+            }
+            let file_bytes = fs::metadata(&*s.file).map(|m| m.len() as usize).unwrap_or(0);
+            Some((s, file_bytes))
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        eprintln!("No struct/class symbols found in {path}");
+        return None;
+    }
+
+    // Median token efficiency across all candidates.
+    let mut ratios: Vec<f64> = candidates
+        .iter()
+        .map(|(s, file_bytes)| {
+            let sym_bytes = s.byte_end.saturating_sub(s.byte_start);
+            *file_bytes as f64 / sym_bytes.max(1) as f64
+        })
+        .collect();
+    ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = ratios[ratios.len() / 2];
+
+    // Pick the largest symbol as the benchmark target (most demanding workload).
+    candidates.sort_by_key(|(s, _)| s.byte_end.saturating_sub(s.byte_start));
+    let (target, file_bytes) = candidates.last().unwrap();
+    let sym_bytes = target.byte_end.saturating_sub(target.byte_start);
+
+    // Extract relative file path from the symbol_id (format: "rel/path::Name#kind").
+    let file_path = target
+        .id
+        .splitn(2, "::")
+        .next()
+        .unwrap_or("")
+        .to_string();
+
+    println!("[{label}] benchmark symbol: {}", target.id);
+    println!(
+        "[{label}] benchmark file:   {file_path}"
+    );
+    println!(
+        "[{label}] token efficiency — largest: {:.1}x  (symbol {} B vs file {} B)  |  median: {:.1}x",
+        *file_bytes as f64 / sym_bytes.max(1) as f64,
+        sym_bytes,
+        file_bytes,
+        median
+    );
+
+    Some(Setup {
+        project: path.to_string(),
+        symbol_id: target.id.clone(),
+        search_query: target.name.clone(),
+        file_path,
+    })
+}
+
+fn bench_search_symbols(c: &mut Criterion, setups: &[(&str, Setup)]) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("search_symbols");
+    for (label, setup) in setups {
+        group.bench_with_input(
+            BenchmarkId::new("search", label),
+            &setup.search_query,
+            |b, query| {
+                b.iter(|| {
+                    rt.block_on(search_symbols(SearchSymbolsParams {
+                        project: setup.project.clone(),
+                        query: query.clone(),
+                        kind: None,
+                        language: None,
+                        file: None,
+                        limit: Some(20),
+                    }))
+                    .unwrap()
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_get_symbol(c: &mut Criterion, setups: &[(&str, Setup)]) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("get_symbol");
+    for (label, setup) in setups {
+        group.bench_with_input(
+            BenchmarkId::new("get", label),
+            &setup.symbol_id,
+            |b, id| {
+                b.iter(|| {
+                    rt.block_on(get_symbol(GetSymbolParams {
+                        project: setup.project.clone(),
+                        symbol_id: id.clone(),
+                        include_context: None,
+                        signature_only: None,
+                    }))
+                    .unwrap()
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_get_file_outline(c: &mut Criterion, setups: &[(&str, Setup)]) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("get_file_outline");
+    for (label, setup) in setups {
+        group.bench_with_input(
+            BenchmarkId::new("outline", label),
+            &setup.file_path,
+            |b, file_path| {
+                b.iter(|| {
+                    rt.block_on(get_file_outline(GetFileOutlineParams {
+                        project: setup.project.clone(),
+                        file_path: file_path.clone(),
+                    }))
+                    .unwrap()
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_get_project_outline(c: &mut Criterion, setups: &[(&str, Setup)]) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("get_project_outline");
+    for (label, setup) in setups {
+        group.bench_with_input(
+            BenchmarkId::new("outline", label),
+            &setup.project,
+            |b, project| {
+                b.iter(|| {
+                    rt.block_on(get_project_outline(GetProjectOutlineParams {
+                        project: project.clone(),
+                        depth: Some(2),
+                    }))
+                    .unwrap()
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_find_usages(c: &mut Criterion, setups: &[(&str, Setup)]) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("find_usages");
+    // find_usages traverses all project files via AST; needs more time per sample.
+    group.measurement_time(Duration::from_secs(45));
+    group.sample_size(10);
+    for (label, setup) in setups {
+        group.bench_with_input(
+            BenchmarkId::new("find", label),
+            &setup.symbol_id,
+            |b, id| {
+                b.iter(|| {
+                    rt.block_on(find_usages(FindUsagesParams {
+                        project: setup.project.clone(),
+                        symbol_id: id.clone(),
+                        scope: None,
+                    }))
+                    .unwrap()
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn query_benchmarks(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+
+    // Prepare all repos once, up front.
+    let setups: Vec<(&str, Setup)> = REPOS
+        .iter()
+        .filter_map(|path| {
+            let label = path.split('/').last().unwrap_or(path);
+            prepare(path, &rt).map(|s| (label, s))
+        })
+        .collect();
+
+    if setups.is_empty() {
+        eprintln!("No repos available — run bench/setup.sh first");
+        return;
+    }
+
+    bench_search_symbols(c, &setups);
+    bench_get_symbol(c, &setups);
+    bench_get_file_outline(c, &setups);
+    bench_get_project_outline(c, &setups);
+    bench_find_usages(c, &setups);
+}
+
+criterion_group!(benches, query_benchmarks);
+criterion_main!(benches);

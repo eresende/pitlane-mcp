@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use rayon::prelude::*;
 use walkdir::WalkDir;
 
 use crate::index::SymbolIndex;
@@ -48,10 +49,9 @@ impl Indexer {
         exclude_patterns: &[String],
     ) -> anyhow::Result<(SymbolIndex, usize)> {
         let exclude_set = Self::build_exclude_set(exclude_patterns)?;
-        let mut index = SymbolIndex::new();
-        let mut file_count = 0usize;
 
-        for entry in WalkDir::new(root)
+        // Phase 1 — collect eligible file paths (sequential: WalkDir is not parallel).
+        let eligible: Vec<std::path::PathBuf> = WalkDir::new(root)
             .follow_links(false)
             .into_iter()
             .filter_entry(|e| {
@@ -60,21 +60,17 @@ impl Indexer {
                     Ok(r) => r,
                     Err(_) => return true,
                 };
-                // Always include root itself
                 if rel == Path::new("") {
                     return true;
                 }
                 let rel_str = rel.to_string_lossy();
-                // Exclude if matches any glob pattern
                 if exclude_set.is_match(rel_str.as_ref()) {
                     return false;
                 }
-                // For directories: check trailing-slash variant and well-known names
                 if e.file_type().is_dir() {
                     if exclude_set.is_match(format!("{}/", rel_str).as_str()) {
                         return false;
                     }
-                    // Exclude any directory whose name is a well-known dependency/build dir
                     if rel
                         .components()
                         .any(|c| c.as_os_str().to_str().is_some_and(is_excluded_dir_name))
@@ -85,40 +81,47 @@ impl Indexer {
                 true
             })
             .filter_map(|e| e.ok())
-        {
-            let path = entry.path();
-            if !path.is_file() {
-                continue;
-            }
-
-            // Check file extension
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-
-            if !self.ext_map.contains_key(ext) {
-                continue;
-            }
-
-            // Check file-level exclusion
-            let rel = path.strip_prefix(root).unwrap_or(path);
-            let rel_str = rel.to_string_lossy();
-            if exclude_set.is_match(rel_str.as_ref()) || exclude_set.is_match(path) {
-                continue;
-            }
-
-            // Skip files that exceed the size limit
-            if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES {
-                eprintln!(
-                    "pitlane-mcp: skipping oversized file {} ({} byte limit)",
-                    rel_str, MAX_FILE_BYTES
-                );
-                continue;
-            }
-
-            if let Ok(symbols) = self.parse_file(path, root) {
-                for symbol in symbols {
-                    index.insert(symbol);
+            .filter(|e| {
+                let path = e.path();
+                if !path.is_file() {
+                    return false;
                 }
-                file_count += 1;
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !self.ext_map.contains_key(ext) {
+                    return false;
+                }
+                let rel = path.strip_prefix(root).unwrap_or(path);
+                let rel_str = rel.to_string_lossy();
+                if exclude_set.is_match(rel_str.as_ref()) || exclude_set.is_match(path) {
+                    return false;
+                }
+                if e.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES {
+                    eprintln!(
+                        "pitlane-mcp: skipping oversized file {} ({} byte limit)",
+                        rel_str, MAX_FILE_BYTES
+                    );
+                    return false;
+                }
+                true
+            })
+            .map(|e| e.into_path())
+            .collect();
+
+        // Phase 2 — parse files in parallel.
+        // Each parse_file call is CPU-bound and independent: it creates its own
+        // tree-sitter Parser and reads a single file. Rayon distributes the work
+        // across all available cores.
+        let parsed: Vec<Vec<language::Symbol>> = eligible
+            .par_iter()
+            .filter_map(|path| self.parse_file(path, root).ok())
+            .collect();
+
+        // Phase 3 — insert symbols into the index (sequential: SymbolIndex is &mut).
+        let mut index = SymbolIndex::new();
+        let file_count = parsed.len();
+        for symbols in parsed {
+            for symbol in symbols {
+                index.insert(symbol);
             }
         }
 
