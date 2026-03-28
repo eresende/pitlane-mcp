@@ -825,6 +825,7 @@ dependencies = [
  "blake3",
  "criterion",
  "globset",
+ "libc",
  "notify",
  "rayon",
  "rmcp",

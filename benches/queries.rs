@@ -63,7 +63,9 @@ fn prepare(path: &str, rt: &Runtime) -> Option<Setup> {
             if sym_bytes == 0 {
                 return None;
             }
-            let file_bytes = fs::metadata(&*s.file).map(|m| m.len() as usize).unwrap_or(0);
+            let file_bytes = fs::metadata(&*s.file)
+                .map(|m| m.len() as usize)
+                .unwrap_or(0);
             Some((s, file_bytes))
         })
         .collect();
@@ -90,17 +92,10 @@ fn prepare(path: &str, rt: &Runtime) -> Option<Setup> {
     let sym_bytes = target.byte_end.saturating_sub(target.byte_start);
 
     // Extract relative file path from the symbol_id (format: "rel/path::Name#kind").
-    let file_path = target
-        .id
-        .splitn(2, "::")
-        .next()
-        .unwrap_or("")
-        .to_string();
+    let file_path = target.id.splitn(2, "::").next().unwrap_or("").to_string();
 
     println!("[{label}] benchmark symbol: {}", target.id);
-    println!(
-        "[{label}] benchmark file:   {file_path}"
-    );
+    println!("[{label}] benchmark file:   {file_path}");
     println!(
         "[{label}] token efficiency — largest: {:.1}x  (symbol {} B vs file {} B)  |  median: {:.1}x",
         *file_bytes as f64 / sym_bytes.max(1) as f64,
@@ -146,21 +141,17 @@ fn bench_get_symbol(c: &mut Criterion, setups: &[(&str, Setup)]) {
     let rt = Runtime::new().unwrap();
     let mut group = c.benchmark_group("get_symbol");
     for (label, setup) in setups {
-        group.bench_with_input(
-            BenchmarkId::new("get", label),
-            &setup.symbol_id,
-            |b, id| {
-                b.iter(|| {
-                    rt.block_on(get_symbol(GetSymbolParams {
-                        project: setup.project.clone(),
-                        symbol_id: id.clone(),
-                        include_context: None,
-                        signature_only: None,
-                    }))
-                    .unwrap()
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("get", label), &setup.symbol_id, |b, id| {
+            b.iter(|| {
+                rt.block_on(get_symbol(GetSymbolParams {
+                    project: setup.project.clone(),
+                    symbol_id: id.clone(),
+                    include_context: None,
+                    signature_only: None,
+                }))
+                .unwrap()
+            })
+        });
     }
     group.finish();
 }

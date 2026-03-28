@@ -18,6 +18,12 @@ pub struct WatcherRegistry {
     watchers: Mutex<HashMap<String, ProjectWatcher>>,
 }
 
+impl Default for WatcherRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WatcherRegistry {
     pub fn new() -> Self {
         Self {

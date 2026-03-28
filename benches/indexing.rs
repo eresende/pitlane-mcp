@@ -20,9 +20,7 @@ fn bench_index_project(c: &mut Criterion) {
     for (name, path) in REPOS {
         let repo = Path::new(path);
         if !repo.exists() {
-            eprintln!(
-                "Skipping '{name}': {path} not found — run bench/setup.sh first"
-            );
+            eprintln!("Skipping '{name}': {path} not found — run bench/setup.sh first");
             continue;
         }
 
@@ -31,10 +29,7 @@ fn bench_index_project(c: &mut Criterion) {
 
         // Print index stats once (outside the timed loop).
         match indexer.index_project(repo, &excludes) {
-            Ok((idx, files)) => println!(
-                "[{name}] {files} files, {} symbols",
-                idx.symbol_count()
-            ),
+            Ok((idx, files)) => println!("[{name}] {files} files, {} symbols", idx.symbol_count()),
             Err(e) => {
                 eprintln!("Failed to index {name}: {e}");
                 continue;

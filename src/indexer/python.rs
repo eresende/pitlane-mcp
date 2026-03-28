@@ -328,27 +328,48 @@ mod tests {
             .unwrap();
         // Class symbol should end on line 1 (the header line), not line 3.
         assert_eq!(class_sym.line_start, 1);
-        assert_eq!(class_sym.line_end, 1, "class symbol should be trimmed to header only");
+        assert_eq!(
+            class_sym.line_end, 1,
+            "class symbol should be trimmed to header only"
+        );
         // The source read via byte range should be just the header line.
-        let source_str = std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
-        assert!(source_str.starts_with("class Greeter:"), "got: {source_str:?}");
-        assert!(!source_str.contains("def hello"), "body should not be included");
+        let source_str =
+            std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(
+            source_str.starts_with("class Greeter:"),
+            "got: {source_str:?}"
+        );
+        assert!(
+            !source_str.contains("def hello"),
+            "body should not be included"
+        );
     }
 
     /// A class with a docstring and methods should trim to header + docstring.
     #[test]
     fn test_class_with_docstring_trimmed_to_docstring() {
-        let source = b"class Greeter:\n    \"\"\"Greets people.\"\"\"\n    def hello(self):\n        pass\n";
+        let source =
+            b"class Greeter:\n    \"\"\"Greets people.\"\"\"\n    def hello(self):\n        pass\n";
         let symbols = parse_and_extract(source);
         let class_sym = symbols
             .iter()
             .find(|s| matches!(s.kind, SymbolKind::Class))
             .unwrap();
         // Class symbol should end on line 2 (docstring line).
-        assert_eq!(class_sym.line_end, 2, "class symbol should include docstring");
-        let source_str = std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
-        assert!(source_str.contains("Greets people"), "docstring should be included");
-        assert!(!source_str.contains("def hello"), "body should not be included");
+        assert_eq!(
+            class_sym.line_end, 2,
+            "class symbol should include docstring"
+        );
+        let source_str =
+            std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(
+            source_str.contains("Greets people"),
+            "docstring should be included"
+        );
+        assert!(
+            !source_str.contains("def hello"),
+            "body should not be included"
+        );
     }
 
     /// A class without methods (attribute-only) should NOT be trimmed.
@@ -359,8 +380,15 @@ mod tests {
         assert_eq!(symbols.len(), 1);
         let class_sym = &symbols[0];
         // No methods — full class should be returned.
-        assert!(class_sym.line_end > 1, "attribute-only class should not be trimmed");
-        let source_str = std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
-        assert!(source_str.contains("debug"), "attributes should be included");
+        assert!(
+            class_sym.line_end > 1,
+            "attribute-only class should not be trimmed"
+        );
+        let source_str =
+            std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(
+            source_str.contains("debug"),
+            "attributes should be included"
+        );
     }
 }

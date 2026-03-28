@@ -21,22 +21,40 @@ use pitlane_mcp::{
 use std::{fs, time::Instant};
 use tokio::runtime::Runtime;
 
-/// Reads the VmHWM (peak RSS) field from /proc/self/status, in kilobytes.
-fn vmhwm_kb() -> u64 {
-    let Ok(status) = fs::read_to_string("/proc/self/status") else {
-        return 0;
-    };
-    for line in status.lines() {
-        if line.starts_with("VmHWM:") {
-            return line
-                .split_whitespace()
-                .nth(1)
-                .unwrap_or("0")
-                .parse()
-                .unwrap_or(0);
+/// Returns peak RSS in kilobytes, or `None` on unsupported platforms.
+///
+/// - Linux: reads `VmHWM` from `/proc/self/status`
+/// - macOS: calls `getrusage(RUSAGE_SELF)` — `ru_maxrss` is in bytes on macOS
+/// - Windows and others: not supported, returns `None`
+fn peak_rss_kb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = fs::read_to_string("/proc/self/status").ok()?;
+        for line in status.lines() {
+            if line.starts_with("VmHWM:") {
+                return line.split_whitespace().nth(1)?.parse().ok();
+            }
+        }
+        None
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: getrusage is always safe to call with RUSAGE_SELF and a
+        // valid output pointer. ru_maxrss on macOS is in bytes (unlike Linux).
+        let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+        let ret = unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+        if ret == 0 {
+            Some(ru.ru_maxrss as u64 / 1024)
+        } else {
+            None
         }
     }
-    0
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
 }
 
 /// Number of indexing runs used for timing statistics.
@@ -52,7 +70,7 @@ fn main() {
     let rt = Runtime::new().expect("Failed to create tokio runtime");
 
     let mut times_ms: Vec<u128> = Vec::with_capacity(TIMING_RUNS);
-    let mut peak_ram_kb: u64 = 0;
+    let mut peak_ram_kb: Option<u64> = None;
     let mut last_result = None;
 
     for i in 0..TIMING_RUNS {
@@ -73,7 +91,7 @@ fn main() {
         // now fully started, giving the true worst-case RSS.  Later runs reuse
         // those resources, so their VmHWM readings would undercount.
         if i == 0 {
-            peak_ram_kb = vmhwm_kb();
+            peak_ram_kb = peak_rss_kb();
             last_result = Some(result);
         }
     }
@@ -112,8 +130,9 @@ fn main() {
                     if sym_bytes == 0 {
                         return None;
                     }
-                    let file_bytes =
-                        fs::metadata(&*s.file).map(|m| m.len() as usize).unwrap_or(0);
+                    let file_bytes = fs::metadata(&*s.file)
+                        .map(|m| m.len() as usize)
+                        .unwrap_or(0);
                     Some((s, sym_bytes, file_bytes))
                 })
                 .collect();
@@ -124,7 +143,9 @@ fn main() {
                 // Median efficiency.
                 let mut ratios: Vec<f64> = candidates
                     .iter()
-                    .map(|(_, sym_bytes, file_bytes)| *file_bytes as f64 / (*sym_bytes).max(1) as f64)
+                    .map(|(_, sym_bytes, file_bytes)| {
+                        *file_bytes as f64 / (*sym_bytes).max(1) as f64
+                    })
                     .collect();
                 ratios.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 let median = ratios[ratios.len() / 2];
@@ -155,11 +176,14 @@ fn main() {
         "Indexing time:    min {} ms  median {} ms  ({TIMING_RUNS} runs)",
         min_ms, median_ms
     );
-    println!(
-        "Peak RAM (VmHWM): {} KB  ({:.1} MB)  [first-run absolute peak]",
-        peak_ram_kb,
-        peak_ram_kb as f64 / 1024.0
-    );
+    match peak_ram_kb {
+        Some(kb) => println!(
+            "Peak RAM (VmHWM): {} KB  ({:.1} MB)  [first-run absolute peak]",
+            kb,
+            kb as f64 / 1024.0
+        ),
+        None => println!("Peak RAM (VmHWM): N/A (unsupported platform)"),
+    };
     println!(
         "Index disk size:  {} bytes  ({:.1} KB)",
         disk_bytes,

@@ -217,7 +217,10 @@ mod tests {
         assert_eq!(arc1.symbol_count(), arc2.symbol_count());
 
         // Both calls return the same Arc allocation.
-        assert!(Arc::ptr_eq(&arc1, &arc2), "cache hit must return the same Arc");
+        assert!(
+            Arc::ptr_eq(&arc1, &arc2),
+            "cache hit must return the same Arc"
+        );
 
         // Clean up.
         crate::cache::invalidate(&canonical);
