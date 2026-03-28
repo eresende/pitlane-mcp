@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
-use crate::indexer::{registry, Indexer};
+use crate::indexer::{load_gitignore_patterns, registry, Indexer};
 
 pub struct IndexProjectParams {
     pub path: String,
@@ -29,6 +29,9 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     if exclude.is_empty() {
         exclude = default_excludes();
     }
+
+    // Extend with patterns from the project's .gitignore (if present).
+    exclude.extend(load_gitignore_patterns(&canonical));
 
     let idx_dir = index_dir(&canonical)?;
     let index_path = idx_dir.join("index.bin");

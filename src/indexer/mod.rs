@@ -202,6 +202,67 @@ impl Indexer {
 
 /// Returns true if a directory component name is a well-known dependency or build directory
 /// that should never be indexed, regardless of where in the tree it appears.
+/// Reads the `.gitignore` at `root` and converts each entry into glob patterns
+/// compatible with the indexer's `GlobSet`-based exclusion system.
+///
+/// Handles the most common gitignore syntax:
+/// - Blank lines and `#` comments are skipped.
+/// - `!negation` patterns are skipped (too complex to invert reliably).
+/// - `/pattern` (root-anchored) → `pattern` + `pattern/**`
+/// - `pattern/` (dir-only) or plain name → `**/pattern` + `**/pattern/**`
+/// - `path/with/sep` (relative path) → as-is + `path/with/sep/**`
+/// - Globs containing `*` (e.g. `*.pyc`) → `**/*.pyc` only (no `/**` variant)
+///
+/// Returns an empty `Vec` if no `.gitignore` exists or it cannot be read.
+pub fn load_gitignore_patterns(root: &Path) -> Vec<String> {
+    let content = match std::fs::read_to_string(root.join(".gitignore")) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+
+    let mut patterns = Vec::new();
+
+    for raw in content.lines() {
+        let line = raw.trim();
+
+        // Skip blank lines, comments, and negation entries.
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+
+        let (anchored, pat) = match line.strip_prefix('/') {
+            Some(rest) => (true, rest),
+            None => (false, line),
+        };
+
+        let dir_only = pat.ends_with('/');
+        let pat = pat.trim_end_matches('/');
+
+        if pat.is_empty() {
+            continue;
+        }
+
+        if anchored {
+            // Root-relative: match only from the project root.
+            patterns.push(pat.to_string());
+            patterns.push(format!("{}/**", pat));
+        } else if pat.contains('/') {
+            // Explicit sub-path (e.g. `packages/generated`): match as-is.
+            patterns.push(pat.to_string());
+            patterns.push(format!("{}/**", pat));
+        } else {
+            // Simple name or glob: match at any depth.
+            patterns.push(format!("**/{}", pat));
+            // Add a directory-contents variant unless the pattern is a file glob.
+            if !pat.contains('*') || dir_only {
+                patterns.push(format!("**/{}/**", pat));
+            }
+        }
+    }
+
+    patterns
+}
+
 pub fn is_excluded_dir_name(name: &str) -> bool {
     matches!(
         name,
@@ -437,5 +498,100 @@ mod tests {
 
         // Previous symbols removed, oversized file produces no new symbols
         assert_eq!(index.symbol_count(), 0);
+    }
+
+    // ── load_gitignore_patterns ──────────────────────────────────────────────
+
+    #[test]
+    fn test_gitignore_missing_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        assert!(load_gitignore_patterns(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn test_gitignore_skips_comments_and_blanks() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "# comment\n\n  \n").unwrap();
+        assert!(load_gitignore_patterns(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn test_gitignore_skips_negation() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "!important.rs\n").unwrap();
+        assert!(load_gitignore_patterns(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn test_gitignore_simple_name() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "cdk.out\n").unwrap();
+        let pats = load_gitignore_patterns(dir.path());
+        assert!(pats.contains(&"**/cdk.out".to_string()));
+        assert!(pats.contains(&"**/cdk.out/**".to_string()));
+    }
+
+    #[test]
+    fn test_gitignore_dir_only_trailing_slash() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "dist/\n").unwrap();
+        let pats = load_gitignore_patterns(dir.path());
+        assert!(pats.contains(&"**/dist".to_string()));
+        assert!(pats.contains(&"**/dist/**".to_string()));
+    }
+
+    #[test]
+    fn test_gitignore_root_anchored() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "/build\n").unwrap();
+        let pats = load_gitignore_patterns(dir.path());
+        assert!(pats.contains(&"build".to_string()));
+        assert!(pats.contains(&"build/**".to_string()));
+        // Must NOT produce a `**/build` variant
+        assert!(!pats.contains(&"**/build".to_string()));
+    }
+
+    #[test]
+    fn test_gitignore_file_glob_no_dir_variant() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "*.pyc\n").unwrap();
+        let pats = load_gitignore_patterns(dir.path());
+        assert!(pats.contains(&"**/*.pyc".to_string()));
+        // Should not produce a `**/*.pyc/**` variant
+        assert!(!pats.contains(&"**/*.pyc/**".to_string()));
+    }
+
+    #[test]
+    fn test_gitignore_sub_path() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "packages/generated\n").unwrap();
+        let pats = load_gitignore_patterns(dir.path());
+        assert!(pats.contains(&"packages/generated".to_string()));
+        assert!(pats.contains(&"packages/generated/**".to_string()));
+    }
+
+    #[test]
+    fn test_index_project_respects_gitignore() {
+        let dir = TempDir::new().unwrap();
+
+        // Source file that should be indexed
+        std::fs::write(dir.path().join("main.rs"), b"fn main() {}").unwrap();
+
+        // Directory that .gitignore excludes
+        let cdk_out = dir.path().join("cdk.out");
+        std::fs::create_dir(&cdk_out).unwrap();
+        std::fs::write(cdk_out.join("generated.rs"), b"fn generated() {}").unwrap();
+
+        std::fs::write(dir.path().join(".gitignore"), "cdk.out/\n").unwrap();
+
+        let gitignore_pats = load_gitignore_patterns(dir.path());
+        let (index, file_count) = create_indexer()
+            .index_project(dir.path(), &gitignore_pats)
+            .unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(!names.contains(&"generated"));
     }
 }
