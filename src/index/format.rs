@@ -110,3 +110,104 @@ fn dirs_home() -> anyhow::Result<std::path::PathBuf> {
         .or_else(|_| std::env::var("USERPROFILE").map(std::path::PathBuf::from))
         .context("Cannot determine home directory")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::SymbolIndex;
+    use crate::indexer::language::{Language, Symbol, SymbolKind, make_symbol_id};
+    use tempfile::TempDir;
+
+    fn make_test_symbol(name: &str) -> Symbol {
+        let path = std::path::PathBuf::from("src/foo.rs");
+        let id = make_symbol_id(&path, name, &SymbolKind::Function);
+        Symbol {
+            id,
+            name: name.to_string(),
+            qualified: name.to_string(),
+            kind: SymbolKind::Function,
+            language: Language::Rust,
+            file: path,
+            byte_start: 0,
+            byte_end: 10,
+            line_start: 1,
+            line_end: 2,
+            signature: Some(format!("fn {name}()")),
+            doc: None,
+        }
+    }
+
+    #[test]
+    fn test_save_load_index_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let index_path = dir.path().join("index.bin");
+
+        let mut index = SymbolIndex::new();
+        let sym1 = make_test_symbol("hello");
+        let sym2 = make_test_symbol("world");
+        let id1 = sym1.id.clone();
+        let id2 = sym2.id.clone();
+        index.insert(sym1);
+        index.insert(sym2);
+
+        save_index(&index, &index_path).unwrap();
+        let loaded = load_index(&index_path).unwrap();
+
+        assert_eq!(loaded.symbol_count(), 2);
+        assert!(loaded.symbols.contains_key(&id1));
+        assert!(loaded.symbols.contains_key(&id2));
+    }
+
+    #[test]
+    fn test_load_index_rebuilds_secondary_indexes() {
+        let dir = TempDir::new().unwrap();
+        let index_path = dir.path().join("index.bin");
+
+        let mut index = SymbolIndex::new();
+        index.insert(make_test_symbol("foo"));
+
+        save_index(&index, &index_path).unwrap();
+        let loaded = load_index(&index_path).unwrap();
+
+        assert_eq!(loaded.file_count(), 1);
+        assert_eq!(loaded.by_kind[&SymbolKind::Function].len(), 1);
+    }
+
+    #[test]
+    fn test_save_load_meta_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let meta_path = dir.path().join("meta.json");
+
+        let mut meta = IndexMeta::new(dir.path());
+        meta.file_mtimes.insert("src/foo.rs".to_string(), 1_700_000_000);
+
+        save_meta(&meta, &meta_path).unwrap();
+        let loaded = load_meta(&meta_path).unwrap();
+
+        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.file_mtimes["src/foo.rs"], 1_700_000_000);
+    }
+
+    #[test]
+    fn test_project_hash_is_deterministic() {
+        let path = Path::new("/some/project/path");
+        let h1 = project_hash(path);
+        let h2 = project_hash(path);
+        assert_eq!(h1, h2);
+        assert!(!h1.is_empty());
+    }
+
+    #[test]
+    fn test_project_hash_differs_by_path() {
+        let h1 = project_hash(Path::new("/project/alpha"));
+        let h2 = project_hash(Path::new("/project/beta"));
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_load_index_missing_file_errors() {
+        let dir = TempDir::new().unwrap();
+        let result = load_index(&dir.path().join("nonexistent.bin"));
+        assert!(result.is_err());
+    }
+}

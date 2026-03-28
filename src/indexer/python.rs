@@ -152,3 +152,94 @@ fn extract_from_node(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indexer::language::SymbolKind;
+    use std::path::Path;
+
+    fn parse_and_extract(source: &[u8]) -> Vec<Symbol> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_python::language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        PythonParser.extract_symbols(source, &tree, Path::new("test.py"))
+    }
+
+    #[test]
+    fn test_extract_function() {
+        let symbols = parse_and_extract(b"def hello():\n    pass\n");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "hello");
+        assert!(matches!(symbols[0].kind, SymbolKind::Function));
+    }
+
+    #[test]
+    fn test_extract_class() {
+        let symbols = parse_and_extract(b"class MyClass:\n    pass\n");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "MyClass");
+        assert!(matches!(symbols[0].kind, SymbolKind::Class));
+    }
+
+    #[test]
+    fn test_extract_class_methods() {
+        let source = b"class Greeter:\n    def hello(self):\n        pass\n    def bye(self):\n        pass\n";
+        let symbols = parse_and_extract(source);
+
+        let class_sym = symbols.iter().find(|s| matches!(s.kind, SymbolKind::Class)).unwrap();
+        assert_eq!(class_sym.name, "Greeter");
+
+        let methods: Vec<_> = symbols.iter().filter(|s| matches!(s.kind, SymbolKind::Method)).collect();
+        assert_eq!(methods.len(), 2);
+        assert!(methods.iter().any(|m| m.qualified == "Greeter::hello"));
+        assert!(methods.iter().any(|m| m.qualified == "Greeter::bye"));
+    }
+
+    #[test]
+    fn test_extract_function_docstring() {
+        let source = b"def documented():\n    \"\"\"This is a docstring.\"\"\"\n    pass\n";
+        let symbols = parse_and_extract(source);
+        assert_eq!(symbols.len(), 1);
+        let doc = symbols[0].doc.as_deref().unwrap_or("");
+        assert!(doc.contains("docstring"), "doc={doc}");
+    }
+
+    #[test]
+    fn test_extract_multiple_top_level_functions() {
+        let source = b"def foo():\n    pass\n\ndef bar():\n    pass\n";
+        let symbols = parse_and_extract(source);
+        assert_eq!(symbols.len(), 2);
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"foo"));
+        assert!(names.contains(&"bar"));
+    }
+
+    #[test]
+    fn test_line_numbers() {
+        let source = b"def first():\n    pass\n\ndef second():\n    pass\n";
+        let symbols = parse_and_extract(source);
+        let first = symbols.iter().find(|s| s.name == "first").unwrap();
+        let second = symbols.iter().find(|s| s.name == "second").unwrap();
+        assert_eq!(first.line_start, 1);
+        assert!(second.line_start > first.line_start);
+    }
+
+    #[test]
+    fn test_decorated_method_is_extracted() {
+        let source = b"class Foo:\n    @staticmethod\n    def bar():\n        pass\n";
+        let symbols = parse_and_extract(source);
+        let method = symbols.iter().find(|s| s.name == "bar");
+        assert!(method.is_some(), "decorated method should be extracted");
+        assert_eq!(method.unwrap().qualified, "Foo::bar");
+    }
+
+    #[test]
+    fn test_signature_is_first_line() {
+        let source = b"def greet(name: str) -> str:\n    return name\n";
+        let symbols = parse_and_extract(source);
+        assert_eq!(symbols.len(), 1);
+        let sig = symbols[0].signature.as_deref().unwrap_or("");
+        assert_eq!(sig, "def greet(name: str) -> str:");
+    }
+}

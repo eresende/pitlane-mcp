@@ -213,3 +213,143 @@ pub fn is_excluded_dir_name(name: &str) -> bool {
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indexer::registry;
+    use tempfile::TempDir;
+
+    fn create_indexer() -> Indexer {
+        Indexer::new(registry::build_default_registry())
+    }
+
+    #[test]
+    fn test_is_excluded_dir_name_known() {
+        for name in &["target", "node_modules", ".git", "__pycache__", ".venv", "venv", ".mypy_cache"] {
+            assert!(is_excluded_dir_name(name), "{name} should be excluded");
+        }
+    }
+
+    #[test]
+    fn test_is_excluded_dir_name_unknown() {
+        for name in &["src", "lib", "tests", "docs", "my_module"] {
+            assert!(!is_excluded_dir_name(name), "{name} should not be excluded");
+        }
+    }
+
+    #[test]
+    fn test_index_project_rust_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn hello() {}\npub struct World;").unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        assert_eq!(index.symbol_count(), 2);
+    }
+
+    #[test]
+    fn test_index_project_python_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("main.py"), b"def foo():\n    pass\n\nclass Bar:\n    pass\n").unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        assert_eq!(index.symbol_count(), 2);
+    }
+
+    #[test]
+    fn test_index_project_multiple_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.rs"), b"fn func_a() {}").unwrap();
+        std::fs::write(dir.path().join("b.py"), b"def func_b():\n    pass\n").unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 2);
+        assert_eq!(index.symbol_count(), 2);
+    }
+
+    #[test]
+    fn test_index_project_skips_unknown_extensions() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("notes.txt"), b"hello world").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"fn hello() {}").unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        assert_eq!(index.symbol_count(), 1);
+    }
+
+    #[test]
+    fn test_index_project_excludes_target_dir() {
+        let dir = TempDir::new().unwrap();
+        let target_dir = dir.path().join("target");
+        std::fs::create_dir(&target_dir).unwrap();
+        std::fs::write(target_dir.join("generated.rs"), b"fn generated() {}").unwrap();
+        std::fs::write(dir.path().join("main.rs"), b"fn main() {}").unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(!names.contains(&"generated"));
+    }
+
+    #[test]
+    fn test_index_project_custom_exclude_pattern() {
+        let dir = TempDir::new().unwrap();
+        let vendor_dir = dir.path().join("vendor");
+        std::fs::create_dir(&vendor_dir).unwrap();
+        std::fs::write(vendor_dir.join("dep.rs"), b"fn dep_fn() {}").unwrap();
+        std::fs::write(dir.path().join("main.rs"), b"fn main() {}").unwrap();
+
+        let excludes = vec!["vendor/**".to_string()];
+        let (index, file_count) = create_indexer().index_project(dir.path(), &excludes).unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"main"));
+        assert!(!names.contains(&"dep_fn"));
+    }
+
+    #[test]
+    fn test_reindex_file_replaces_symbols() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        std::fs::write(&file_path, b"fn original() {}").unwrap();
+
+        let indexer = create_indexer();
+        let (mut index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        assert_eq!(index.symbol_count(), 1);
+
+        std::fs::write(&file_path, b"fn updated() {}\nfn added() {}").unwrap();
+        indexer.reindex_file(&file_path, dir.path(), &mut index).unwrap();
+
+        assert_eq!(index.symbol_count(), 2);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"updated"));
+        assert!(names.contains(&"added"));
+        assert!(!names.contains(&"original"));
+    }
+
+    #[test]
+    fn test_reindex_file_deleted_removes_symbols() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        std::fs::write(&file_path, b"fn foo() {}").unwrap();
+
+        let indexer = create_indexer();
+        let (mut index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        assert_eq!(index.symbol_count(), 1);
+
+        std::fs::remove_file(&file_path).unwrap();
+        indexer.reindex_file(&file_path, dir.path(), &mut index).unwrap();
+
+        assert_eq!(index.symbol_count(), 0);
+    }
+}
+

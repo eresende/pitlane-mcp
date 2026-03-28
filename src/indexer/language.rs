@@ -104,3 +104,63 @@ pub trait LanguageParser: Send + Sync {
         path: &std::path::Path,
     ) -> Vec<Symbol>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn test_language_display() {
+        assert_eq!(Language::Rust.to_string(), "rust");
+        assert_eq!(Language::Python.to_string(), "python");
+    }
+
+    #[test]
+    fn test_symbol_kind_display() {
+        assert_eq!(SymbolKind::Function.to_string(), "function");
+        assert_eq!(SymbolKind::Method.to_string(), "method");
+        assert_eq!(SymbolKind::Struct.to_string(), "struct");
+        assert_eq!(SymbolKind::Enum.to_string(), "enum");
+        assert_eq!(SymbolKind::Trait.to_string(), "trait");
+        assert_eq!(SymbolKind::Impl.to_string(), "impl");
+        assert_eq!(SymbolKind::Mod.to_string(), "mod");
+        assert_eq!(SymbolKind::Macro.to_string(), "macro");
+        assert_eq!(SymbolKind::Const.to_string(), "const");
+        assert_eq!(SymbolKind::TypeAlias.to_string(), "type_alias");
+        assert_eq!(SymbolKind::Class.to_string(), "class");
+    }
+
+    #[test]
+    fn test_symbol_kind_from_str() {
+        use std::str::FromStr;
+        assert_eq!(SymbolKind::from_str("function").unwrap(), SymbolKind::Function);
+        assert_eq!(SymbolKind::from_str("Method").unwrap(), SymbolKind::Method);
+        assert_eq!(SymbolKind::from_str("STRUCT").unwrap(), SymbolKind::Struct);
+        assert_eq!(SymbolKind::from_str("type_alias").unwrap(), SymbolKind::TypeAlias);
+        assert_eq!(SymbolKind::from_str("typealias").unwrap(), SymbolKind::TypeAlias);
+        assert_eq!(SymbolKind::from_str("class").unwrap(), SymbolKind::Class);
+        assert!(SymbolKind::from_str("unknown_kind").is_err());
+    }
+
+    #[test]
+    fn test_make_symbol_id_format() {
+        let id = make_symbol_id(Path::new("src/foo.rs"), "Foo", &SymbolKind::Struct);
+        assert!(id.ends_with("#struct"), "id={id}");
+        assert!(id.contains("Foo"), "id={id}");
+
+        let id2 = make_symbol_id(Path::new("src/bar.rs"), "Bar::baz", &SymbolKind::Method);
+        assert!(id2.ends_with("#method"), "id2={id2}");
+        assert!(id2.contains("Bar::baz"), "id2={id2}");
+    }
+
+    #[test]
+    fn test_make_symbol_id_uniqueness() {
+        let path = Path::new("src/lib.rs");
+        let id1 = make_symbol_id(path, "Foo", &SymbolKind::Struct);
+        let id2 = make_symbol_id(path, "Foo", &SymbolKind::Function);
+        let id3 = make_symbol_id(path, "Bar", &SymbolKind::Struct);
+        assert_ne!(id1, id2);
+        assert_ne!(id1, id3);
+    }
+}

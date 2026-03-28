@@ -388,3 +388,144 @@ fn extract_from_node(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::indexer::language::SymbolKind;
+    use std::path::Path;
+
+    fn parse_and_extract(source: &[u8]) -> Vec<Symbol> {
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_rust::language()).unwrap();
+        let tree = parser.parse(source, None).unwrap();
+        RustParser.extract_symbols(source, &tree, Path::new("test.rs"))
+    }
+
+    #[test]
+    fn test_extract_function() {
+        let symbols = parse_and_extract(b"fn hello() {}");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "hello");
+        assert!(matches!(symbols[0].kind, SymbolKind::Function));
+    }
+
+    #[test]
+    fn test_extract_pub_function() {
+        let symbols = parse_and_extract(b"pub fn greet(name: &str) -> String { String::new() }");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "greet");
+        assert!(matches!(symbols[0].kind, SymbolKind::Function));
+    }
+
+    #[test]
+    fn test_extract_struct() {
+        let symbols = parse_and_extract(b"pub struct Foo { x: i32 }");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "Foo");
+        assert!(matches!(symbols[0].kind, SymbolKind::Struct));
+    }
+
+    #[test]
+    fn test_extract_enum() {
+        let symbols = parse_and_extract(b"enum Color { Red, Green, Blue }");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "Color");
+        assert!(matches!(symbols[0].kind, SymbolKind::Enum));
+    }
+
+    #[test]
+    fn test_extract_trait() {
+        let symbols = parse_and_extract(b"pub trait Greet { fn greet(&self); }");
+        let trait_syms: Vec<_> = symbols.iter().filter(|s| matches!(s.kind, SymbolKind::Trait)).collect();
+        assert_eq!(trait_syms.len(), 1);
+        assert_eq!(trait_syms[0].name, "Greet");
+    }
+
+    #[test]
+    fn test_extract_impl_and_methods() {
+        let source = b"struct Point { x: f64 }\nimpl Point {\n    pub fn new(x: f64) -> Self { Point { x } }\n}";
+        let symbols = parse_and_extract(source);
+
+        let impl_sym = symbols.iter().find(|s| matches!(s.kind, SymbolKind::Impl)).unwrap();
+        assert!(impl_sym.qualified.contains("Point"));
+
+        let method = symbols.iter().find(|s| matches!(s.kind, SymbolKind::Method)).unwrap();
+        assert_eq!(method.name, "new");
+        assert_eq!(method.qualified, "Point::new");
+    }
+
+    #[test]
+    fn test_extract_trait_impl() {
+        let source = b"trait Greet {}\nstruct Foo;\nimpl Greet for Foo {}";
+        let symbols = parse_and_extract(source);
+        let impl_sym = symbols.iter().find(|s| matches!(s.kind, SymbolKind::Impl)).unwrap();
+        assert!(impl_sym.qualified.contains("Greet"), "qualified={}", impl_sym.qualified);
+        assert!(impl_sym.qualified.contains("Foo"), "qualified={}", impl_sym.qualified);
+    }
+
+    #[test]
+    fn test_extract_mod() {
+        let symbols = parse_and_extract(b"mod my_module;");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "my_module");
+        assert!(matches!(symbols[0].kind, SymbolKind::Mod));
+    }
+
+    #[test]
+    fn test_extract_type_alias() {
+        let symbols = parse_and_extract(b"pub type MyResult<T> = std::result::Result<T, String>;");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "MyResult");
+        assert!(matches!(symbols[0].kind, SymbolKind::TypeAlias));
+    }
+
+    #[test]
+    fn test_extract_const() {
+        let symbols = parse_and_extract(b"const MAX: u32 = 100;");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].name, "MAX");
+        assert!(matches!(symbols[0].kind, SymbolKind::Const));
+    }
+
+    #[test]
+    fn test_doc_comment_attached_to_symbol() {
+        let source = b"/// Adds two numbers.\nfn add(a: i32, b: i32) -> i32 { a + b }";
+        let symbols = parse_and_extract(source);
+        assert_eq!(symbols.len(), 1);
+        let doc = symbols[0].doc.as_deref().unwrap_or("");
+        assert!(doc.contains("Adds two numbers"), "doc={doc}");
+    }
+
+    #[test]
+    fn test_signature_is_first_line() {
+        let source = b"pub fn complex(\n    arg1: i32,\n    arg2: i32,\n) -> i32 {\n    arg1 + arg2\n}";
+        let symbols = parse_and_extract(source);
+        assert_eq!(symbols.len(), 1);
+        let sig = symbols[0].signature.as_deref().unwrap_or("");
+        assert_eq!(sig, "pub fn complex(");
+    }
+
+    #[test]
+    fn test_line_numbers() {
+        let source = b"fn first() {}\nfn second() {}";
+        let symbols = parse_and_extract(source);
+        assert_eq!(symbols.len(), 2);
+        let first = symbols.iter().find(|s| s.name == "first").unwrap();
+        let second = symbols.iter().find(|s| s.name == "second").unwrap();
+        assert_eq!(first.line_start, 1);
+        assert_eq!(second.line_start, 2);
+    }
+
+    #[test]
+    fn test_multiple_items() {
+        let source = b"struct A;\nstruct B;\nfn c() {}\nenum D {}";
+        let symbols = parse_and_extract(source);
+        assert_eq!(symbols.len(), 4);
+        let names: Vec<_> = symbols.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"A"));
+        assert!(names.contains(&"B"));
+        assert!(names.contains(&"c"));
+        assert!(names.contains(&"D"));
+    }
+}
