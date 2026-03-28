@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 
+use crate::index::format::{load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
 use crate::indexer::{registry, Indexer};
 
@@ -17,7 +18,12 @@ pub struct ProjectWatcher {
 }
 
 impl ProjectWatcher {
-    pub fn start(project_path: PathBuf, index: Arc<RwLock<SymbolIndex>>) -> anyhow::Result<Self> {
+    pub fn start(
+        project_path: PathBuf,
+        index: Arc<RwLock<SymbolIndex>>,
+        index_path: PathBuf,
+        meta_path: PathBuf,
+    ) -> anyhow::Result<Self> {
         let project_path_clone = project_path.clone();
 
         let parsers = registry::build_default_registry();
@@ -31,6 +37,8 @@ impl ProjectWatcher {
             indexer,
             index,
             DEBOUNCE_WINDOW,
+            index_path,
+            meta_path,
         ));
 
         let handler = move |result: notify::Result<Event>| {
@@ -67,6 +75,8 @@ async fn run_debounce_loop(
     indexer: Arc<Indexer>,
     index: Arc<RwLock<SymbolIndex>>,
     debounce_window: Duration,
+    index_path: PathBuf,
+    meta_path: PathBuf,
 ) {
     let mut pending: HashSet<PathBuf> = HashSet::new();
     let mut deadline: Option<Instant> = None;
@@ -86,7 +96,7 @@ async fn run_debounce_loop(
                     // Channel closed — flush whatever is pending and exit.
                     None => {
                         if !pending.is_empty() {
-                            reindex_batch(&pending, &root, &indexer, &index).await;
+                            reindex_batch(&pending, &root, &indexer, &index, &index_path, &meta_path).await;
                         }
                         return;
                     }
@@ -95,7 +105,7 @@ async fn run_debounce_loop(
 
             // Debounce window expired — flush the batch.
             _ = tokio::time::sleep(timeout), if deadline.is_some() => {
-                reindex_batch(&pending, &root, &indexer, &index).await;
+                reindex_batch(&pending, &root, &indexer, &index, &index_path, &meta_path).await;
                 pending.clear();
                 deadline = None;
             }
@@ -108,12 +118,44 @@ async fn reindex_batch(
     root: &Path,
     indexer: &Arc<Indexer>,
     index: &Arc<RwLock<SymbolIndex>>,
+    index_path: &Path,
+    meta_path: &Path,
 ) {
-    let mut idx = index.write().await;
-    for path in paths {
-        if let Err(e) = indexer.reindex_file(path, root, &mut idx) {
-            eprintln!("Error re-indexing {:?}: {}", path, e);
+    {
+        let mut idx = index.write().await;
+        for path in paths {
+            if let Err(e) = indexer.reindex_file(path, root, &mut idx) {
+                eprintln!("Error re-indexing {:?}: {}", path, e);
+            }
         }
+
+        // Flush updated index to disk while holding the write lock for consistency.
+        if let Err(e) = save_index(&idx, index_path) {
+            eprintln!("pitlane-mcp: failed to flush index to disk: {}", e);
+        }
+    }
+
+    // Update file_mtimes in meta for the changed paths so is_index_up_to_date
+    // returns true on the next server start without a forced re-index.
+    let mut meta = load_meta(meta_path).unwrap_or_else(|_| IndexMeta::new(root));
+    for path in paths {
+        let key = path.display().to_string();
+        match std::fs::metadata(path) {
+            Ok(fs_meta) => {
+                if let Ok(modified) = fs_meta.modified() {
+                    if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        meta.file_mtimes.insert(key, dur.as_secs());
+                    }
+                }
+            }
+            Err(_) => {
+                // File was deleted — remove its mtime so it isn't treated as fresh.
+                meta.file_mtimes.remove(&key);
+            }
+        }
+    }
+    if let Err(e) = save_meta(&meta, meta_path) {
+        eprintln!("pitlane-mcp: failed to flush meta to disk: {}", e);
     }
 }
 
@@ -133,11 +175,22 @@ mod tests {
 
     fn spawn_loop(
         rx: mpsc::Receiver<PathBuf>,
-        root: PathBuf,
+        dir: &TempDir,
         indexer: Arc<Indexer>,
         index: Arc<RwLock<SymbolIndex>>,
     ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(run_debounce_loop(rx, root, indexer, index, TEST_DEBOUNCE))
+        let root = dir.path().to_path_buf();
+        let index_path = dir.path().join("index.bin");
+        let meta_path = dir.path().join("meta.json");
+        tokio::spawn(run_debounce_loop(
+            rx,
+            root,
+            indexer,
+            index,
+            TEST_DEBOUNCE,
+            index_path,
+            meta_path,
+        ))
     }
 
     /// A single modified file is reindexed after the debounce window expires.
@@ -149,7 +202,7 @@ mod tests {
 
         let (index, indexer) = setup(&dir);
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_loop(rx, dir.path().to_path_buf(), indexer, index.clone());
+        let handle = spawn_loop(rx, &dir, indexer, index.clone());
 
         std::fs::write(&file, b"fn updated() {}").unwrap();
         tx.send(file).await.unwrap();
@@ -175,7 +228,7 @@ mod tests {
 
         let (index, indexer) = setup(&dir);
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_loop(rx, dir.path().to_path_buf(), indexer, index.clone());
+        let handle = spawn_loop(rx, &dir, indexer, index.clone());
 
         std::fs::write(&a, b"fn a_new() {}").unwrap();
         std::fs::write(&b, b"fn b_new() {}").unwrap();
@@ -208,7 +261,7 @@ mod tests {
 
         let (index, indexer) = setup(&dir);
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_loop(rx, dir.path().to_path_buf(), indexer, index.clone());
+        let handle = spawn_loop(rx, &dir, indexer, index.clone());
 
         std::fs::write(&file, b"fn bar() {}").unwrap();
 
@@ -235,7 +288,7 @@ mod tests {
 
         let (index, indexer) = setup(&dir);
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_loop(rx, dir.path().to_path_buf(), indexer, index.clone());
+        let handle = spawn_loop(rx, &dir, indexer, index.clone());
 
         std::fs::write(&file, b"fn after() {}").unwrap();
         tx.send(file).await.unwrap();
@@ -268,7 +321,7 @@ mod tests {
 
         let (index, indexer) = setup(&dir);
         let (tx, rx) = mpsc::channel(16);
-        let handle = spawn_loop(rx, dir.path().to_path_buf(), indexer, index.clone());
+        let handle = spawn_loop(rx, &dir, indexer, index.clone());
 
         // Only send paths that the handler would filter out — the debounce loop
         // itself does not filter, but we verify the contract expected by the handler.

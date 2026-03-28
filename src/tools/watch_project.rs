@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
-use crate::index::SymbolIndex;
+use crate::index::format::index_dir;
 use crate::tools::index_project::load_project_index;
 use crate::watcher::ProjectWatcher;
 
@@ -16,14 +16,12 @@ pub struct WatchProjectParams {
 
 pub struct WatcherRegistry {
     watchers: Mutex<HashMap<String, ProjectWatcher>>,
-    indexes: Arc<RwLock<HashMap<String, SymbolIndex>>>,
 }
 
 impl WatcherRegistry {
-    pub fn new(indexes: Arc<RwLock<HashMap<String, SymbolIndex>>>) -> Self {
+    pub fn new() -> Self {
         Self {
             watchers: Mutex::new(HashMap::new()),
-            indexes,
         }
     }
 
@@ -45,21 +43,17 @@ impl WatcherRegistry {
             }
         }
 
-        // Load existing index into registry
+        // Load existing index for the watcher to maintain incrementally.
         let existing_index = load_project_index(project)?;
-        {
-            let mut indexes = self.indexes.write().await;
-            indexes.insert(key.clone(), existing_index);
-        }
+        let project_index_arc = Arc::new(RwLock::new(existing_index));
 
-        // Get a handle to the specific project's index for the watcher
-        let project_index_arc = {
-            // We need a per-project Arc<RwLock<SymbolIndex>>
-            // For simplicity, create a new one that we'll sync
-            Arc::new(RwLock::new(SymbolIndex::new()))
-        };
+        // Resolve disk paths so the watcher can flush updates after each batch.
+        let idx_dir = index_dir(&canonical)?;
+        let index_path = idx_dir.join("index.bin");
+        let meta_path = idx_dir.join("meta.json");
 
-        let watcher = ProjectWatcher::start(canonical.clone(), project_index_arc)?;
+        let watcher =
+            ProjectWatcher::start(canonical.clone(), project_index_arc, index_path, meta_path)?;
 
         {
             let mut watchers = self.watchers.lock().unwrap();

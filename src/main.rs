@@ -3,7 +3,6 @@ mod indexer;
 mod tools;
 mod watcher;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::{
@@ -12,9 +11,7 @@ use rmcp::{
     schemars, tool, tool_handler, tool_router, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
 
-use crate::index::SymbolIndex;
 use crate::tools::watch_project::WatcherRegistry;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -91,8 +88,6 @@ pub struct WatchProjectRequest {
 
 #[derive(Clone)]
 pub struct PitlaneMcp {
-    #[allow(dead_code)]
-    indexes: Arc<RwLock<HashMap<String, SymbolIndex>>>,
     watcher_registry: Arc<WatcherRegistry>,
     tool_router: ToolRouter<Self>,
 }
@@ -105,10 +100,8 @@ impl Default for PitlaneMcp {
 
 impl PitlaneMcp {
     pub fn new() -> Self {
-        let indexes = Arc::new(RwLock::new(HashMap::new()));
-        let watcher_registry = Arc::new(WatcherRegistry::new(indexes.clone()));
+        let watcher_registry = Arc::new(WatcherRegistry::new());
         Self {
-            indexes,
             watcher_registry,
             tool_router: Self::tool_router(),
         }
