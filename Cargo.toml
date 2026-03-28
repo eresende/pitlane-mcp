@@ -3,9 +3,25 @@ name = "pitlane-mcp"
 version = "0.2.0"
 edition = "2021"
 
+[lib]
+name = "pitlane_mcp"
+path = "src/lib.rs"
+
 [[bin]]
 name = "pitlane-mcp"
 path = "src/main.rs"
+
+[[bin]]
+name = "memory_bench"
+path = "src/bin/memory_bench.rs"
+
+[[bench]]
+name = "indexing"
+harness = false
+
+[[bench]]
+name = "queries"
+harness = false
 
 [dependencies]
 rmcp = { version = "1.3", features = ["server", "transport-io"] }
