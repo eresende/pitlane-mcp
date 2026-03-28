@@ -1,6 +1,6 @@
 use std::io::{Read, Seek, SeekFrom};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::tools::index_project::load_project_index;
 
@@ -13,7 +13,9 @@ pub struct GetSymbolParams {
 pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
 
-    let sym = index.symbols.get(&params.symbol_id)
+    let sym = index
+        .symbols
+        .get(&params.symbol_id)
         .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", params.symbol_id))?;
 
     let include_context = params.include_context.unwrap_or(false);

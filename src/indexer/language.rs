@@ -90,7 +90,11 @@ pub struct Symbol {
     pub doc: Option<String>,
 }
 
-pub fn make_symbol_id(relative_path: &std::path::Path, qualified: &str, kind: &SymbolKind) -> SymbolId {
+pub fn make_symbol_id(
+    relative_path: &std::path::Path,
+    qualified: &str,
+    kind: &SymbolKind,
+) -> SymbolId {
     format!("{}::{}#{}", relative_path.display(), qualified, kind)
 }
 
@@ -134,11 +138,20 @@ mod tests {
     #[test]
     fn test_symbol_kind_from_str() {
         use std::str::FromStr;
-        assert_eq!(SymbolKind::from_str("function").unwrap(), SymbolKind::Function);
+        assert_eq!(
+            SymbolKind::from_str("function").unwrap(),
+            SymbolKind::Function
+        );
         assert_eq!(SymbolKind::from_str("Method").unwrap(), SymbolKind::Method);
         assert_eq!(SymbolKind::from_str("STRUCT").unwrap(), SymbolKind::Struct);
-        assert_eq!(SymbolKind::from_str("type_alias").unwrap(), SymbolKind::TypeAlias);
-        assert_eq!(SymbolKind::from_str("typealias").unwrap(), SymbolKind::TypeAlias);
+        assert_eq!(
+            SymbolKind::from_str("type_alias").unwrap(),
+            SymbolKind::TypeAlias
+        );
+        assert_eq!(
+            SymbolKind::from_str("typealias").unwrap(),
+            SymbolKind::TypeAlias
+        );
         assert_eq!(SymbolKind::from_str("class").unwrap(), SymbolKind::Class);
         assert!(SymbolKind::from_str("unknown_kind").is_err());
     }

@@ -71,9 +71,10 @@ impl Indexer {
                         return false;
                     }
                     // Exclude any directory whose name is a well-known dependency/build dir
-                    if rel.components().any(|c| {
-                        c.as_os_str().to_str().map_or(false, is_excluded_dir_name)
-                    }) {
+                    if rel
+                        .components()
+                        .any(|c| c.as_os_str().to_str().is_some_and(is_excluded_dir_name))
+                    {
                         return false;
                     }
                 }
@@ -87,10 +88,7 @@ impl Indexer {
             }
 
             // Check file extension
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
             if !self.ext_map.contains_key(ext) {
                 continue;
@@ -141,15 +139,8 @@ impl Indexer {
         Ok(())
     }
 
-    fn parse_file(
-        &self,
-        path: &Path,
-        root: &Path,
-    ) -> anyhow::Result<Vec<language::Symbol>> {
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+    fn parse_file(&self, path: &Path, root: &Path) -> anyhow::Result<Vec<language::Symbol>> {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let parser_idx = match self.ext_map.get(ext) {
             Some(idx) => *idx,
@@ -225,7 +216,15 @@ mod tests {
 
     #[test]
     fn test_is_excluded_dir_name_known() {
-        for name in &["target", "node_modules", ".git", "__pycache__", ".venv", "venv", ".mypy_cache"] {
+        for name in &[
+            "target",
+            "node_modules",
+            ".git",
+            "__pycache__",
+            ".venv",
+            "venv",
+            ".mypy_cache",
+        ] {
             assert!(is_excluded_dir_name(name), "{name} should be excluded");
         }
     }
@@ -240,7 +239,11 @@ mod tests {
     #[test]
     fn test_index_project_rust_file() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("lib.rs"), b"pub fn hello() {}\npub struct World;").unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn hello() {}\npub struct World;",
+        )
+        .unwrap();
 
         let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
 
@@ -251,7 +254,11 @@ mod tests {
     #[test]
     fn test_index_project_python_file() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("main.py"), b"def foo():\n    pass\n\nclass Bar:\n    pass\n").unwrap();
+        std::fs::write(
+            dir.path().join("main.py"),
+            b"def foo():\n    pass\n\nclass Bar:\n    pass\n",
+        )
+        .unwrap();
 
         let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
 
@@ -308,7 +315,9 @@ mod tests {
         std::fs::write(dir.path().join("main.rs"), b"fn main() {}").unwrap();
 
         let excludes = vec!["vendor/**".to_string()];
-        let (index, file_count) = create_indexer().index_project(dir.path(), &excludes).unwrap();
+        let (index, file_count) = create_indexer()
+            .index_project(dir.path(), &excludes)
+            .unwrap();
 
         assert_eq!(file_count, 1);
         let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
@@ -327,7 +336,9 @@ mod tests {
         assert_eq!(index.symbol_count(), 1);
 
         std::fs::write(&file_path, b"fn updated() {}\nfn added() {}").unwrap();
-        indexer.reindex_file(&file_path, dir.path(), &mut index).unwrap();
+        indexer
+            .reindex_file(&file_path, dir.path(), &mut index)
+            .unwrap();
 
         assert_eq!(index.symbol_count(), 2);
         let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
@@ -347,9 +358,10 @@ mod tests {
         assert_eq!(index.symbol_count(), 1);
 
         std::fs::remove_file(&file_path).unwrap();
-        indexer.reindex_file(&file_path, dir.path(), &mut index).unwrap();
+        indexer
+            .reindex_file(&file_path, dir.path(), &mut index)
+            .unwrap();
 
         assert_eq!(index.symbol_count(), 0);
     }
 }
-

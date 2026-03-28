@@ -1,4 +1,4 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::str::FromStr;
 
 use crate::indexer::language::{Language, SymbolKind};
@@ -22,26 +22,34 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
     let kind_filter: Option<SymbolKind> = params
         .kind
         .as_deref()
-        .map(|k| SymbolKind::from_str(k))
+        .map(SymbolKind::from_str)
         .transpose()?;
 
-    let lang_filter: Option<Language> = params.language.as_deref().map(|l| match l.to_lowercase().as_str() {
-        "rust" => Ok(Language::Rust),
-        "python" => Ok(Language::Python),
-        other => Err(anyhow::anyhow!("Unknown language: {}", other)),
-    }).transpose()?;
+    let lang_filter: Option<Language> = params
+        .language
+        .as_deref()
+        .map(|l| match l.to_lowercase().as_str() {
+            "rust" => Ok(Language::Rust),
+            "python" => Ok(Language::Python),
+            other => Err(anyhow::anyhow!("Unknown language: {}", other)),
+        })
+        .transpose()?;
 
     // File glob filter
-    let file_glob = params.file.as_deref().map(|f| {
-        globset::GlobBuilder::new(f)
-            .case_insensitive(true)
-            .build()
-            .map(|g| g.compile_matcher())
-    }).transpose()?;
+    let file_glob = params
+        .file
+        .as_deref()
+        .map(|f| {
+            globset::GlobBuilder::new(f)
+                .case_insensitive(true)
+                .build()
+                .map(|g| g.compile_matcher())
+        })
+        .transpose()?;
 
     let mut results = Vec::new();
 
-    for (_, sym) in &index.symbols {
+    for sym in index.symbols.values() {
         // Apply query filter
         let name_lower = sym.name.to_lowercase();
         let qualified_lower = sym.qualified.to_lowercase();

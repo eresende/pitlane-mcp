@@ -1,5 +1,5 @@
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -60,8 +60,7 @@ pub fn save_index(index: &SymbolIndex, index_path: &Path) -> anyhow::Result<()> 
 }
 
 pub fn load_index(index_path: &Path) -> anyhow::Result<SymbolIndex> {
-    let bytes = std::fs::read(index_path)
-        .context("Failed to read index file")?;
+    let bytes = std::fs::read(index_path).context("Failed to read index file")?;
 
     let (on_disk, _): (IndexOnDisk, _) =
         bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
@@ -97,7 +96,8 @@ pub fn project_hash(canonical_path: &Path) -> String {
 }
 
 pub fn index_dir(project_path: &Path) -> anyhow::Result<std::path::PathBuf> {
-    let canonical = project_path.canonicalize()
+    let canonical = project_path
+        .canonicalize()
         .unwrap_or_else(|_| project_path.to_path_buf());
     let hash = project_hash(&canonical);
     let home = dirs_home()?;
@@ -115,7 +115,7 @@ fn dirs_home() -> anyhow::Result<std::path::PathBuf> {
 mod tests {
     use super::*;
     use crate::index::SymbolIndex;
-    use crate::indexer::language::{Language, Symbol, SymbolKind, make_symbol_id};
+    use crate::indexer::language::{make_symbol_id, Language, Symbol, SymbolKind};
     use tempfile::TempDir;
 
     fn make_test_symbol(name: &str) -> Symbol {
@@ -179,7 +179,8 @@ mod tests {
         let meta_path = dir.path().join("meta.json");
 
         let mut meta = IndexMeta::new(dir.path());
-        meta.file_mtimes.insert("src/foo.rs".to_string(), 1_700_000_000);
+        meta.file_mtimes
+            .insert("src/foo.rs".to_string(), 1_700_000_000);
 
         save_meta(&meta, &meta_path).unwrap();
         let loaded = load_meta(&meta_path).unwrap();

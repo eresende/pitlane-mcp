@@ -1,6 +1,6 @@
 use tree_sitter::{Node, Tree};
 
-use crate::indexer::language::{Language, LanguageParser, Symbol, SymbolKind, make_symbol_id};
+use crate::indexer::language::{make_symbol_id, Language, LanguageParser, Symbol, SymbolKind};
 
 pub struct PythonParser;
 
@@ -13,12 +13,7 @@ impl LanguageParser for PythonParser {
         &["py"]
     }
 
-    fn extract_symbols(
-        &self,
-        source: &[u8],
-        tree: &Tree,
-        path: &std::path::Path,
-    ) -> Vec<Symbol> {
+    fn extract_symbols(&self, source: &[u8], tree: &Tree, path: &std::path::Path) -> Vec<Symbol> {
         let mut symbols = Vec::new();
         let root = tree.root_node();
         extract_from_node(source, root, path, None, &mut symbols);
@@ -46,7 +41,7 @@ fn get_doc_comment(source: &[u8], node: Node) -> Option<String> {
     // Look at the first statement of the body
     let body = node.child_by_field_name("body")?;
     let mut cursor = body.walk();
-    for child in body.children(&mut cursor) {
+    if let Some(child) = body.children(&mut cursor).next() {
         if child.kind() == "expression_statement" {
             let mut inner_cursor = child.walk();
             for inner in child.children(&mut inner_cursor) {
@@ -55,7 +50,7 @@ fn get_doc_comment(source: &[u8], node: Node) -> Option<String> {
                 }
             }
         }
-        break; // Only check first statement
+        // Only check first statement
     }
     None
 }
@@ -161,7 +156,9 @@ mod tests {
 
     fn parse_and_extract(source: &[u8]) -> Vec<Symbol> {
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_python::language()).unwrap();
+        parser
+            .set_language(&tree_sitter_python::language())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
         PythonParser.extract_symbols(source, &tree, Path::new("test.py"))
     }
@@ -187,10 +184,16 @@ mod tests {
         let source = b"class Greeter:\n    def hello(self):\n        pass\n    def bye(self):\n        pass\n";
         let symbols = parse_and_extract(source);
 
-        let class_sym = symbols.iter().find(|s| matches!(s.kind, SymbolKind::Class)).unwrap();
+        let class_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Class))
+            .unwrap();
         assert_eq!(class_sym.name, "Greeter");
 
-        let methods: Vec<_> = symbols.iter().filter(|s| matches!(s.kind, SymbolKind::Method)).collect();
+        let methods: Vec<_> = symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymbolKind::Method))
+            .collect();
         assert_eq!(methods.len(), 2);
         assert!(methods.iter().any(|m| m.qualified == "Greeter::hello"));
         assert!(methods.iter().any(|m| m.qualified == "Greeter::bye"));

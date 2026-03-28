@@ -1,20 +1,17 @@
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, recommended_watcher};
+use notify::{recommended_watcher, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::PathBuf;
-use std::sync::{Arc};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::index::SymbolIndex;
-use crate::indexer::{Indexer, registry};
+use crate::indexer::{registry, Indexer};
 
 pub struct ProjectWatcher {
     _watcher: RecommendedWatcher,
 }
 
 impl ProjectWatcher {
-    pub fn start(
-        project_path: PathBuf,
-        index: Arc<RwLock<SymbolIndex>>,
-    ) -> anyhow::Result<Self> {
+    pub fn start(project_path: PathBuf, index: Arc<RwLock<SymbolIndex>>) -> anyhow::Result<Self> {
         let project_path_clone = project_path.clone();
 
         let parsers = registry::build_default_registry();
@@ -25,10 +22,7 @@ impl ProjectWatcher {
                 match event.kind {
                     EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
                         for path in &event.paths {
-                            let ext = path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("");
+                            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
                             if ext == "rs" || ext == "py" {
                                 let path = path.clone();

@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::indexer::is_excluded_dir_name;
 use crate::tools::index_project::load_project_index;
@@ -15,7 +15,8 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
     let index = load_project_index(&params.project)?;
     let depth = params.depth.unwrap_or(2) as usize;
 
-    let project_path = Path::new(&params.project).canonicalize()
+    let project_path = Path::new(&params.project)
+        .canonicalize()
         .unwrap_or_else(|_| Path::new(&params.project).to_path_buf());
 
     // Group files by directory up to `depth` levels
@@ -27,9 +28,10 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
         let rel = file_path.strip_prefix(&project_path).unwrap_or(file_path);
 
         // Skip files inside well-known dependency/build directories
-        if rel.components().any(|c| {
-            c.as_os_str().to_str().map_or(false, is_excluded_dir_name)
-        }) {
+        if rel
+            .components()
+            .any(|c| c.as_os_str().to_str().is_some_and(is_excluded_dir_name))
+        {
             continue;
         }
 
@@ -56,7 +58,8 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
     for (dir, files) in &tree {
         let mut files_json = Vec::new();
         for (file, kinds) in files {
-            let kinds_json: Vec<Value> = kinds.iter()
+            let kinds_json: Vec<Value> = kinds
+                .iter()
                 .map(|(k, v)| json!({ "kind": k, "count": v }))
                 .collect();
             let total: usize = kinds.values().sum();
@@ -66,9 +69,7 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
                 "by_kind": kinds_json,
             }));
         }
-        let total_symbols: usize = files.values()
-            .flat_map(|k| k.values())
-            .sum();
+        let total_symbols: usize = files.values().flat_map(|k| k.values()).sum();
         dirs_json.push(json!({
             "directory": dir,
             "file_count": files.len(),

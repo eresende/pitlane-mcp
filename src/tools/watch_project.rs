@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 use crate::index::SymbolIndex;
@@ -28,7 +28,8 @@ impl WatcherRegistry {
     }
 
     pub async fn watch(&self, project: &str) -> anyhow::Result<Value> {
-        let canonical = Path::new(project).canonicalize()
+        let canonical = Path::new(project)
+            .canonicalize()
             .unwrap_or_else(|_| Path::new(project).to_path_buf());
         let key = canonical.display().to_string();
 
@@ -73,7 +74,8 @@ impl WatcherRegistry {
     }
 
     pub fn stop(&self, project: &str) -> Value {
-        let canonical = Path::new(project).canonicalize()
+        let canonical = Path::new(project)
+            .canonicalize()
             .unwrap_or_else(|_| Path::new(project).to_path_buf());
         let key = canonical.display().to_string();
 

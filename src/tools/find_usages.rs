@@ -2,7 +2,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use walkdir::WalkDir;
 
 use crate::tools::index_project::load_project_index;
@@ -16,11 +16,14 @@ pub struct FindUsagesParams {
 pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
 
-    let sym = index.symbols.get(&params.symbol_id)
+    let sym = index
+        .symbols
+        .get(&params.symbol_id)
         .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", params.symbol_id))?;
 
     let symbol_name = sym.name.clone();
-    let project_path = Path::new(&params.project).canonicalize()
+    let project_path = Path::new(&params.project)
+        .canonicalize()
         .unwrap_or_else(|_| Path::new(&params.project).to_path_buf());
 
     // Build scope glob set if provided
@@ -29,7 +32,9 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
         if let Ok(glob) = Glob::new(scope) {
             builder.add(glob);
         }
-        builder.build().unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap())
+        builder
+            .build()
+            .unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap())
     });
 
     let mut usages = Vec::new();
@@ -83,10 +88,7 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
     }))
 }
 
-fn search_file_for_name(
-    path: &Path,
-    name: &str,
-) -> anyhow::Result<Vec<(usize, usize, String)>> {
+fn search_file_for_name(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize, String)>> {
     let file = std::fs::File::open(path)?;
     let reader = BufReader::new(file);
     let mut hits = Vec::new();

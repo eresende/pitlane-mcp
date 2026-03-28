@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::tools::index_project::load_project_index;
 
@@ -12,7 +12,8 @@ pub struct GetFileOutlineParams {
 pub async fn get_file_outline(params: GetFileOutlineParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
 
-    let project_path = Path::new(&params.project).canonicalize()
+    let project_path = Path::new(&params.project)
+        .canonicalize()
         .unwrap_or_else(|_| Path::new(&params.project).to_path_buf());
 
     // Try to resolve the file path relative to project root
@@ -51,10 +52,11 @@ pub async fn get_file_outline(params: GetFileOutlineParams) -> anyhow::Result<Va
             }
             found
         }
-        Some(ids) => {
-            ids.iter()
-                .filter_map(|id| index.symbols.get(id))
-                .map(|sym| json!({
+        Some(ids) => ids
+            .iter()
+            .filter_map(|id| index.symbols.get(id))
+            .map(|sym| {
+                json!({
                     "id": sym.id,
                     "name": sym.name,
                     "qualified": sym.qualified,
@@ -62,9 +64,9 @@ pub async fn get_file_outline(params: GetFileOutlineParams) -> anyhow::Result<Va
                     "line_start": sym.line_start,
                     "line_end": sym.line_end,
                     "signature": sym.signature,
-                }))
-                .collect()
-        }
+                })
+            })
+            .collect(),
     };
 
     // Sort by line_start

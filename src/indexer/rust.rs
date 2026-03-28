@@ -1,6 +1,6 @@
 use tree_sitter::{Node, Tree};
 
-use crate::indexer::language::{Language, LanguageParser, Symbol, SymbolKind, make_symbol_id};
+use crate::indexer::language::{make_symbol_id, Language, LanguageParser, Symbol, SymbolKind};
 
 pub struct RustParser;
 
@@ -13,12 +13,7 @@ impl LanguageParser for RustParser {
         &["rs"]
     }
 
-    fn extract_symbols(
-        &self,
-        source: &[u8],
-        tree: &Tree,
-        path: &std::path::Path,
-    ) -> Vec<Symbol> {
+    fn extract_symbols(&self, source: &[u8], tree: &Tree, path: &std::path::Path) -> Vec<Symbol> {
         let mut symbols = Vec::new();
         let root = tree.root_node();
         extract_from_node(source, root, path, None, &mut symbols);
@@ -96,7 +91,11 @@ fn extract_impl_type_name(source: &[u8], node: Node) -> String {
 
     match (trait_type, self_type) {
         (Some(tr), Some(ty)) => {
-            format!("impl {} for {}", node_text(source, tr), node_text(source, ty))
+            format!(
+                "impl {} for {}",
+                node_text(source, tr),
+                node_text(source, ty)
+            )
         }
         (None, Some(ty)) => {
             format!("impl {}", node_text(source, ty))
@@ -118,7 +117,15 @@ fn extract_from_node(
                 let (kind, qualified) = if let Some(impl_name) = impl_type {
                     (
                         SymbolKind::Method,
-                        format!("{}::{}", impl_name.trim_start_matches("impl ").split(" for ").last().unwrap_or(impl_name), name),
+                        format!(
+                            "{}::{}",
+                            impl_name
+                                .trim_start_matches("impl ")
+                                .split(" for ")
+                                .last()
+                                .unwrap_or(impl_name),
+                            name
+                        ),
                     )
                 } else {
                     (SymbolKind::Function, name.clone())
@@ -230,7 +237,8 @@ fn extract_from_node(
             let end_pos = node.end_position();
 
             // Extract a short name for the impl (just the type name)
-            let name = node.child_by_field_name("type")
+            let name = node
+                .child_by_field_name("type")
                 .map(|n| node_text(source, n).to_string())
                 .unwrap_or_else(|| "impl".to_string());
 
@@ -250,7 +258,8 @@ fn extract_from_node(
             });
 
             // Extract the type name for method qualification
-            let type_name = node.child_by_field_name("type")
+            let type_name = node
+                .child_by_field_name("type")
                 .map(|n| node_text(source, n).to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
@@ -293,7 +302,8 @@ fn extract_from_node(
             }
         }
         "macro_rules" => {
-            if let Some(name) = node.child_by_field_name("name")
+            if let Some(name) = node
+                .child_by_field_name("name")
                 .map(|n| node_text(source, n).to_string())
                 .or_else(|| {
                     // Sometimes macro name is in a different position
@@ -437,7 +447,10 @@ mod tests {
     #[test]
     fn test_extract_trait() {
         let symbols = parse_and_extract(b"pub trait Greet { fn greet(&self); }");
-        let trait_syms: Vec<_> = symbols.iter().filter(|s| matches!(s.kind, SymbolKind::Trait)).collect();
+        let trait_syms: Vec<_> = symbols
+            .iter()
+            .filter(|s| matches!(s.kind, SymbolKind::Trait))
+            .collect();
         assert_eq!(trait_syms.len(), 1);
         assert_eq!(trait_syms[0].name, "Greet");
     }
@@ -447,10 +460,16 @@ mod tests {
         let source = b"struct Point { x: f64 }\nimpl Point {\n    pub fn new(x: f64) -> Self { Point { x } }\n}";
         let symbols = parse_and_extract(source);
 
-        let impl_sym = symbols.iter().find(|s| matches!(s.kind, SymbolKind::Impl)).unwrap();
+        let impl_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Impl))
+            .unwrap();
         assert!(impl_sym.qualified.contains("Point"));
 
-        let method = symbols.iter().find(|s| matches!(s.kind, SymbolKind::Method)).unwrap();
+        let method = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Method))
+            .unwrap();
         assert_eq!(method.name, "new");
         assert_eq!(method.qualified, "Point::new");
     }
@@ -459,9 +478,20 @@ mod tests {
     fn test_extract_trait_impl() {
         let source = b"trait Greet {}\nstruct Foo;\nimpl Greet for Foo {}";
         let symbols = parse_and_extract(source);
-        let impl_sym = symbols.iter().find(|s| matches!(s.kind, SymbolKind::Impl)).unwrap();
-        assert!(impl_sym.qualified.contains("Greet"), "qualified={}", impl_sym.qualified);
-        assert!(impl_sym.qualified.contains("Foo"), "qualified={}", impl_sym.qualified);
+        let impl_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Impl))
+            .unwrap();
+        assert!(
+            impl_sym.qualified.contains("Greet"),
+            "qualified={}",
+            impl_sym.qualified
+        );
+        assert!(
+            impl_sym.qualified.contains("Foo"),
+            "qualified={}",
+            impl_sym.qualified
+        );
     }
 
     #[test]
@@ -499,7 +529,8 @@ mod tests {
 
     #[test]
     fn test_signature_is_first_line() {
-        let source = b"pub fn complex(\n    arg1: i32,\n    arg2: i32,\n) -> i32 {\n    arg1 + arg2\n}";
+        let source =
+            b"pub fn complex(\n    arg1: i32,\n    arg2: i32,\n) -> i32 {\n    arg1 + arg2\n}";
         let symbols = parse_and_extract(source);
         assert_eq!(symbols.len(), 1);
         let sig = symbols[0].signature.as_deref().unwrap_or("");

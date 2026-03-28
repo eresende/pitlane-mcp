@@ -19,9 +19,18 @@ impl SymbolIndex {
 
     pub fn insert(&mut self, symbol: Symbol) {
         let id = symbol.id.clone();
-        self.by_file.entry(symbol.file.clone()).or_default().push(id.clone());
-        self.by_kind.entry(symbol.kind.clone()).or_default().push(id.clone());
-        self.by_language.entry(symbol.language.clone()).or_default().push(id.clone());
+        self.by_file
+            .entry(symbol.file.clone())
+            .or_default()
+            .push(id.clone());
+        self.by_kind
+            .entry(symbol.kind.clone())
+            .or_default()
+            .push(id.clone());
+        self.by_language
+            .entry(symbol.language.clone())
+            .or_default()
+            .push(id.clone());
         self.symbols.insert(id, symbol);
     }
 
@@ -47,9 +56,18 @@ impl SymbolIndex {
         let symbols: Vec<_> = self.symbols.values().cloned().collect();
         for sym in symbols {
             let id = sym.id.clone();
-            self.by_file.entry(sym.file.clone()).or_default().push(id.clone());
-            self.by_kind.entry(sym.kind.clone()).or_default().push(id.clone());
-            self.by_language.entry(sym.language.clone()).or_default().push(id.clone());
+            self.by_file
+                .entry(sym.file.clone())
+                .or_default()
+                .push(id.clone());
+            self.by_kind
+                .entry(sym.kind.clone())
+                .or_default()
+                .push(id.clone());
+            self.by_language
+                .entry(sym.language.clone())
+                .or_default()
+                .push(id.clone());
         }
     }
 
@@ -65,7 +83,7 @@ impl SymbolIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::indexer::language::{Language, Symbol, SymbolKind, make_symbol_id};
+    use crate::indexer::language::{make_symbol_id, Language, Symbol, SymbolKind};
 
     fn make_test_symbol(name: &str, kind: SymbolKind, file: &str) -> Symbol {
         let path = PathBuf::from(file);
@@ -98,7 +116,11 @@ mod tests {
         let mut index = SymbolIndex::new();
         index.insert(make_test_symbol("Foo", SymbolKind::Struct, "src/lib.rs"));
         index.insert(make_test_symbol("Bar", SymbolKind::Struct, "src/lib.rs"));
-        index.insert(make_test_symbol("baz", SymbolKind::Function, "src/other.rs"));
+        index.insert(make_test_symbol(
+            "baz",
+            SymbolKind::Function,
+            "src/other.rs",
+        ));
 
         assert_eq!(index.symbol_count(), 3);
         assert_eq!(index.file_count(), 2);
@@ -128,7 +150,11 @@ mod tests {
         let mut index = SymbolIndex::new();
         let path = PathBuf::from("src/lib.rs");
         index.insert(make_test_symbol("Foo", SymbolKind::Struct, "src/lib.rs"));
-        index.insert(make_test_symbol("bar", SymbolKind::Function, "src/other.rs"));
+        index.insert(make_test_symbol(
+            "bar",
+            SymbolKind::Function,
+            "src/other.rs",
+        ));
 
         index.remove_file(&path);
 
@@ -147,7 +173,10 @@ mod tests {
 
         index.remove_file(&path);
 
-        assert!(index.by_kind.get(&SymbolKind::Struct).map_or(true, |v| v.is_empty()));
+        assert!(index
+            .by_kind
+            .get(&SymbolKind::Struct)
+            .map_or(true, |v| v.is_empty()));
     }
 
     #[test]

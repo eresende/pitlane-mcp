@@ -7,9 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::{
-    ServerHandler,
     model::{ServerCapabilities, ServerInfo},
-    schemars, tool,
+    schemars, tool, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -94,6 +93,12 @@ pub struct PitlaneMcp {
     watcher_registry: Arc<WatcherRegistry>,
 }
 
+impl Default for PitlaneMcp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PitlaneMcp {
     pub fn new() -> Self {
         let indexes = Arc::new(RwLock::new(HashMap::new()));
@@ -115,7 +120,9 @@ fn err_to_text(e: anyhow::Error) -> String {
 
 #[tool(tool_box)]
 impl PitlaneMcp {
-    #[tool(description = "Parse and index all supported source files under a given path. Returns symbol count, file count, index path, and elapsed time.")]
+    #[tool(
+        description = "Parse and index all supported source files under a given path. Returns symbol count, file count, index path, and elapsed time."
+    )]
     async fn index_project(&self, #[tool(aggr)] req: IndexProjectRequest) -> String {
         let params = crate::tools::index_project::IndexProjectParams {
             path: req.path,
@@ -128,7 +135,9 @@ impl PitlaneMcp {
         }
     }
 
-    #[tool(description = "Search indexed symbols by name, kind, language, or file pattern. Returns matching symbols with their IDs, names, kinds, and locations.")]
+    #[tool(
+        description = "Search indexed symbols by name, kind, language, or file pattern. Returns matching symbols with their IDs, names, kinds, and locations."
+    )]
     async fn search_symbols(&self, #[tool(aggr)] req: SearchSymbolsRequest) -> String {
         let params = crate::tools::search_symbols::SearchSymbolsParams {
             project: req.project,
@@ -144,7 +153,9 @@ impl PitlaneMcp {
         }
     }
 
-    #[tool(description = "Retrieve the full source of a single symbol by its stable ID. Much more token-efficient than reading the whole file.")]
+    #[tool(
+        description = "Retrieve the full source of a single symbol by its stable ID. Much more token-efficient than reading the whole file."
+    )]
     async fn get_symbol(&self, #[tool(aggr)] req: GetSymbolRequest) -> String {
         let params = crate::tools::get_symbol::GetSymbolParams {
             project: req.project,
@@ -157,7 +168,9 @@ impl PitlaneMcp {
         }
     }
 
-    #[tool(description = "List all symbols in a file with their kinds and line numbers, without returning source code.")]
+    #[tool(
+        description = "List all symbols in a file with their kinds and line numbers, without returning source code."
+    )]
     async fn get_file_outline(&self, #[tool(aggr)] req: GetFileOutlineRequest) -> String {
         let params = crate::tools::get_file_outline::GetFileOutlineParams {
             project: req.project,
@@ -169,7 +182,9 @@ impl PitlaneMcp {
         }
     }
 
-    #[tool(description = "High-level overview of the project: files grouped by directory with symbol counts per kind.")]
+    #[tool(
+        description = "High-level overview of the project: files grouped by directory with symbol counts per kind."
+    )]
     async fn get_project_outline(&self, #[tool(aggr)] req: GetProjectOutlineRequest) -> String {
         let params = crate::tools::get_project_outline::GetProjectOutlineParams {
             project: req.project,
@@ -181,7 +196,9 @@ impl PitlaneMcp {
         }
     }
 
-    #[tool(description = "Find all locations in the project that reference a given symbol by name. Returns file, line, column, and surrounding snippet.")]
+    #[tool(
+        description = "Find all locations in the project that reference a given symbol by name. Returns file, line, column, and surrounding snippet."
+    )]
     async fn find_usages(&self, #[tool(aggr)] req: FindUsagesRequest) -> String {
         let params = crate::tools::find_usages::FindUsagesParams {
             project: req.project,
@@ -194,7 +211,9 @@ impl PitlaneMcp {
         }
     }
 
-    #[tool(description = "Start or stop incremental background re-indexing when source files change. Use stop=true to stop an existing watcher.")]
+    #[tool(
+        description = "Start or stop incremental background re-indexing when source files change. Use stop=true to stop an existing watcher."
+    )]
     async fn watch_project(&self, #[tool(aggr)] req: WatchProjectRequest) -> String {
         let params = crate::tools::watch_project::WatchProjectParams {
             project: req.project,

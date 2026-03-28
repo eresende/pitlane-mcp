@@ -3,11 +3,11 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Context;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
-use crate::index::format::{IndexMeta, index_dir, load_meta, save_index, save_meta};
+use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
-use crate::indexer::{Indexer, registry};
+use crate::indexer::{registry, Indexer};
 
 pub struct IndexProjectParams {
     pub path: String,
@@ -19,7 +19,8 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     let start = Instant::now();
 
     let path = Path::new(&params.path);
-    let canonical = path.canonicalize()
+    let canonical = path
+        .canonicalize()
         .with_context(|| format!("Cannot canonicalize path: {}", params.path))?;
 
     let force = params.force.unwrap_or(false);
@@ -59,11 +60,10 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     let parsers = registry::build_default_registry();
     let indexer = Indexer::new(parsers);
 
-    let (index, file_count) = tokio::task::spawn_blocking(move || {
-        indexer.index_project(&canonical, &exclude)
-    })
-    .await
-    .context("Indexing task panicked")??;
+    let (index, file_count) =
+        tokio::task::spawn_blocking(move || indexer.index_project(&canonical, &exclude))
+            .await
+            .context("Indexing task panicked")??;
 
     let symbol_count = index.symbol_count();
 
@@ -73,10 +73,7 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
         if let Ok(meta) = std::fs::metadata(file_path) {
             if let Ok(modified) = meta.modified() {
                 if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    file_mtimes.insert(
-                        file_path.display().to_string(),
-                        dur.as_secs(),
-                    );
+                    file_mtimes.insert(file_path.display().to_string(), dur.as_secs());
                 }
             }
         }
@@ -86,7 +83,8 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     save_index(&index, &index_path)?;
 
     // Save meta
-    let canonical_for_meta = Path::new(&params.path).canonicalize()
+    let canonical_for_meta = Path::new(&params.path)
+        .canonicalize()
         .unwrap_or_else(|_| Path::new(&params.path).to_path_buf());
     let mut meta = IndexMeta::new(&canonical_for_meta);
     meta.file_mtimes = file_mtimes;
@@ -141,13 +139,17 @@ fn is_index_up_to_date(project_path: &Path, meta: &IndexMeta) -> bool {
 /// Load an index from disk for a project path
 pub fn load_project_index(project: &str) -> anyhow::Result<SymbolIndex> {
     let path = Path::new(project);
-    let canonical = path.canonicalize()
+    let canonical = path
+        .canonicalize()
         .with_context(|| format!("Cannot canonicalize path: {}", project))?;
     let idx_dir = index_dir(&canonical)?;
     let index_path = idx_dir.join("index.bin");
 
     if !index_path.exists() {
-        anyhow::bail!("Project '{}' has not been indexed yet. Run index_project first.", project);
+        anyhow::bail!(
+            "Project '{}' has not been indexed yet. Run index_project first.",
+            project
+        );
     }
 
     crate::index::format::load_index(&index_path)
