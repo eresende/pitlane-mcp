@@ -7,10 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rmcp::{
-    ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
+    schemars, tool, tool_handler, tool_router, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
@@ -189,7 +188,10 @@ impl PitlaneMcp {
     #[tool(
         description = "High-level overview of the project: files grouped by directory with symbol counts per kind."
     )]
-    async fn get_project_outline(&self, Parameters(req): Parameters<GetProjectOutlineRequest>) -> String {
+    async fn get_project_outline(
+        &self,
+        Parameters(req): Parameters<GetProjectOutlineRequest>,
+    ) -> String {
         let params = crate::tools::get_project_outline::GetProjectOutlineParams {
             project: req.project,
             depth: req.depth,
