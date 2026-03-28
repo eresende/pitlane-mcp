@@ -153,7 +153,7 @@ impl Indexer {
         let mut ts_parser = tree_sitter::Parser::new();
         let ts_lang = match lang_parser.language() {
             language::Language::Rust => tree_sitter_rust::language(),
-            language::Language::Python => tree_sitter_python::language(),
+            language::Language::Python => tree_sitter_python::LANGUAGE.into(),
         };
         ts_parser.set_language(&ts_lang)?;
 
