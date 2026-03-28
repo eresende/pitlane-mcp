@@ -9,7 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 rmcp = { version = "0.1", features = ["server", "transport-io"] }
-tree-sitter = "0.22"
+tree-sitter = "0.26"
 tree-sitter-rust = "0.21"
 tree-sitter-python = "0.21"
 notify = "6"
