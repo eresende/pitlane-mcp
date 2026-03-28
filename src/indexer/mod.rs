@@ -13,6 +13,9 @@ use walkdir::WalkDir;
 use crate::index::SymbolIndex;
 use language::LanguageParser;
 
+/// Files larger than this are skipped to avoid memory exhaustion and parser hangs.
+const MAX_FILE_BYTES: u64 = 1024 * 1024; // 1 MiB
+
 pub struct Indexer {
     parsers: Vec<Box<dyn LanguageParser>>,
     /// Map from file extension to parser index
@@ -102,6 +105,15 @@ impl Indexer {
                 continue;
             }
 
+            // Skip files that exceed the size limit
+            if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES {
+                eprintln!(
+                    "pitlane-mcp: skipping oversized file {} ({} byte limit)",
+                    rel_str, MAX_FILE_BYTES
+                );
+                continue;
+            }
+
             if let Ok(symbols) = self.parse_file(path, root) {
                 for symbol in symbols {
                     index.insert(symbol);
@@ -147,6 +159,17 @@ impl Indexer {
             Some(idx) => *idx,
             None => return Ok(vec![]),
         };
+
+        // Guard against oversized files (e.g. minified bundles, generated data dicts)
+        let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        if file_size > MAX_FILE_BYTES {
+            eprintln!(
+                "pitlane-mcp: skipping oversized file {} ({} byte limit)",
+                path.display(),
+                MAX_FILE_BYTES
+            );
+            return Ok(vec![]);
+        }
 
         let source = std::fs::read(path)?;
         let lang_parser = &self.parsers[parser_idx];
@@ -363,6 +386,56 @@ mod tests {
             .reindex_file(&file_path, dir.path(), &mut index)
             .unwrap();
 
+        assert_eq!(index.symbol_count(), 0);
+    }
+
+    #[test]
+    fn test_index_project_skips_oversized_file() {
+        let dir = TempDir::new().unwrap();
+        // Normal file that should be indexed
+        std::fs::write(dir.path().join("small.rs"), b"fn small() {}").unwrap();
+        // Oversized file: MAX_FILE_BYTES + 1 bytes
+        let big_content = vec![b'x'; MAX_FILE_BYTES as usize + 1];
+        std::fs::write(dir.path().join("big.rs"), &big_content).unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1, "oversized file should not count as indexed");
+        assert_eq!(index.symbol_count(), 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"small"));
+    }
+
+    #[test]
+    fn test_index_project_allows_file_at_size_limit() {
+        let dir = TempDir::new().unwrap();
+        // A file exactly at the limit should be indexed, not skipped
+        let at_limit = vec![b' '; MAX_FILE_BYTES as usize];
+        std::fs::write(dir.path().join("exact.rs"), &at_limit).unwrap();
+
+        let (_, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1, "file at exactly the limit should be indexed");
+    }
+
+    #[test]
+    fn test_reindex_file_skips_oversized_file() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        std::fs::write(&file_path, b"fn original() {}").unwrap();
+
+        let indexer = create_indexer();
+        let (mut index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        assert_eq!(index.symbol_count(), 1);
+
+        // Replace with an oversized file
+        let big_content = vec![b'x'; MAX_FILE_BYTES as usize + 1];
+        std::fs::write(&file_path, &big_content).unwrap();
+        indexer
+            .reindex_file(&file_path, dir.path(), &mut index)
+            .unwrap();
+
+        // Previous symbols removed, oversized file produces no new symbols
         assert_eq!(index.symbol_count(), 0);
     }
 }
