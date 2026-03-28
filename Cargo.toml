@@ -11,7 +11,7 @@ path = "src/main.rs"
 rmcp = { version = "0.1", features = ["server", "transport-io"] }
 tree-sitter = "0.26"
 tree-sitter-rust = "0.21"
-tree-sitter-python = "0.21"
+tree-sitter-python = "0.25"
 notify = "8"
 bincode = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
