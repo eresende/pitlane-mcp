@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 pub type SymbolId = String;
 
@@ -81,7 +82,7 @@ pub struct Symbol {
     pub qualified: String,
     pub kind: SymbolKind,
     pub language: Language,
-    pub file: PathBuf,
+    pub file: Arc<PathBuf>,
     pub byte_start: usize,
     pub byte_end: usize,
     pub line_start: u32,

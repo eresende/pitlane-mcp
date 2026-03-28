@@ -116,6 +116,7 @@ mod tests {
     use super::*;
     use crate::index::SymbolIndex;
     use crate::indexer::language::{make_symbol_id, Language, Symbol, SymbolKind};
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn make_test_symbol(name: &str) -> Symbol {
@@ -127,7 +128,7 @@ mod tests {
             qualified: name.to_string(),
             kind: SymbolKind::Function,
             language: Language::Rust,
-            file: path,
+            file: Arc::new(path),
             byte_start: 0,
             byte_end: 10,
             line_start: 1,

@@ -38,7 +38,7 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
     let include_context = params.include_context.unwrap_or(false);
 
     // Open the file and read the symbol bytes
-    let mut file = std::fs::File::open(&sym.file)
+    let mut file = std::fs::File::open(&*sym.file)
         .map_err(|e| anyhow::anyhow!("Cannot open file {:?}: {}", sym.file, e))?;
 
     let source_text = if include_context {

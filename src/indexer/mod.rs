@@ -5,6 +5,7 @@ pub mod rust;
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use walkdir::WalkDir;
@@ -169,7 +170,7 @@ impl Indexer {
 
         // Update file to absolute path
         for sym in &mut symbols {
-            sym.file = path.to_path_buf();
+            sym.file = Arc::new(path.to_path_buf());
         }
 
         Ok(symbols)

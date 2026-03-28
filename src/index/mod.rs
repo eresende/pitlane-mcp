@@ -3,6 +3,7 @@ pub mod format;
 use crate::indexer::language::{Language, Symbol, SymbolId, SymbolKind};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Debug, Default, Clone)]
 pub struct SymbolIndex {
@@ -10,6 +11,9 @@ pub struct SymbolIndex {
     pub by_file: HashMap<PathBuf, Vec<SymbolId>>,
     pub by_kind: HashMap<SymbolKind, Vec<SymbolId>>,
     pub by_language: HashMap<Language, Vec<SymbolId>>,
+    /// Intern table: deduplicated Arc<PathBuf> per unique file path.
+    /// Not serialized; rebuilt by rebuild_secondary_indexes after loading.
+    file_interner: HashMap<PathBuf, Arc<PathBuf>>,
 }
 
 impl SymbolIndex {
@@ -17,10 +21,18 @@ impl SymbolIndex {
         Self::default()
     }
 
-    pub fn insert(&mut self, symbol: Symbol) {
+    pub fn insert(&mut self, mut symbol: Symbol) {
+        // Intern the file path so all symbols from the same file share one Arc allocation.
+        let interned = self
+            .file_interner
+            .entry((*symbol.file).clone())
+            .or_insert_with(|| symbol.file.clone())
+            .clone();
+        symbol.file = interned;
+
         let id = symbol.id.clone();
         self.by_file
-            .entry(symbol.file.clone())
+            .entry((*symbol.file).clone())
             .or_default()
             .push(id.clone());
         self.by_kind
@@ -53,11 +65,27 @@ impl SymbolIndex {
         self.by_file.clear();
         self.by_kind.clear();
         self.by_language.clear();
-        let symbols: Vec<_> = self.symbols.values().cloned().collect();
-        for sym in symbols {
+        self.file_interner.clear();
+
+        // Pass 1: build the interner from all unique paths present in symbols.
+        for sym in self.symbols.values() {
+            self.file_interner
+                .entry((*sym.file).clone())
+                .or_insert_with(|| sym.file.clone());
+        }
+
+        // Pass 2: point every symbol's file at the shared Arc.
+        for sym in self.symbols.values_mut() {
+            if let Some(interned) = self.file_interner.get(sym.file.as_ref()) {
+                sym.file = interned.clone();
+            }
+        }
+
+        // Pass 3: rebuild the secondary indexes.
+        for sym in self.symbols.values() {
             let id = sym.id.clone();
             self.by_file
-                .entry(sym.file.clone())
+                .entry((*sym.file).clone())
                 .or_default()
                 .push(id.clone());
             self.by_kind
@@ -84,6 +112,7 @@ impl SymbolIndex {
 mod tests {
     use super::*;
     use crate::indexer::language::{make_symbol_id, Language, Symbol, SymbolKind};
+    use std::sync::Arc;
 
     fn make_test_symbol(name: &str, kind: SymbolKind, file: &str) -> Symbol {
         let path = PathBuf::from(file);
@@ -94,7 +123,7 @@ mod tests {
             qualified: name.to_string(),
             kind,
             language: Language::Rust,
-            file: path,
+            file: Arc::new(path),
             byte_start: 0,
             byte_end: 10,
             line_start: 1,
@@ -162,7 +191,7 @@ mod tests {
         assert_eq!(index.file_count(), 1);
         assert!(index.by_file.get(&path).is_none());
         // Remaining symbol is from other.rs
-        assert!(index.symbols.values().all(|s| s.file != path));
+        assert!(index.symbols.values().all(|s| *s.file != path));
     }
 
     #[test]

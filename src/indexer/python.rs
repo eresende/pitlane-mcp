@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use tree_sitter::{Node, Tree};
 
 use crate::indexer::language::{make_symbol_id, Language, LanguageParser, Symbol, SymbolKind};
@@ -83,7 +85,7 @@ fn extract_from_node(
                     qualified,
                     kind,
                     language: Language::Python,
-                    file: path.to_path_buf(),
+                    file: Arc::new(path.to_path_buf()),
                     byte_start: node.start_byte(),
                     byte_end: node.end_byte(),
                     line_start: start_pos.row as u32 + 1,
@@ -108,7 +110,7 @@ fn extract_from_node(
                     qualified: name.clone(),
                     kind: SymbolKind::Class,
                     language: Language::Python,
-                    file: path.to_path_buf(),
+                    file: Arc::new(path.to_path_buf()),
                     byte_start: node.start_byte(),
                     byte_end: node.end_byte(),
                     line_start: start_pos.row as u32 + 1,
