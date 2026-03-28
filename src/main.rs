@@ -51,6 +51,8 @@ pub struct GetSymbolRequest {
     pub symbol_id: String,
     /// Also return up to 3 lines before/after (default: false)
     pub include_context: Option<bool>,
+    /// Return only the signature and docstring, skipping the full body (default: false)
+    pub signature_only: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -164,6 +166,7 @@ impl PitlaneMcp {
             project: req.project,
             symbol_id: req.symbol_id,
             include_context: req.include_context,
+            signature_only: req.signature_only,
         };
         match crate::tools::get_symbol::get_symbol(params).await {
             Ok(v) => value_to_text(v),

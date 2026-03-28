@@ -8,6 +8,7 @@ pub struct GetSymbolParams {
     pub project: String,
     pub symbol_id: String,
     pub include_context: Option<bool>,
+    pub signature_only: Option<bool>,
 }
 
 pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
@@ -17,6 +18,22 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         .symbols
         .get(&params.symbol_id)
         .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", params.symbol_id))?;
+
+    // signature_only: return only index-cached fields, no file I/O required.
+    if params.signature_only.unwrap_or(false) {
+        return Ok(json!({
+            "id": sym.id,
+            "name": sym.name,
+            "qualified": sym.qualified,
+            "kind": sym.kind.to_string(),
+            "language": sym.language.to_string(),
+            "file": sym.file.display().to_string(),
+            "line_start": sym.line_start,
+            "line_end": sym.line_end,
+            "signature": sym.signature,
+            "doc": sym.doc,
+        }));
+    }
 
     let include_context = params.include_context.unwrap_or(false);
 
@@ -61,4 +78,129 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         "signature": sym.signature,
         "doc": sym.doc,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::index::format::{index_dir, save_index};
+    use crate::indexer::{registry, Indexer};
+    use tempfile::TempDir;
+
+    /// Index a temp project to disk and return its path string.
+    async fn setup_project(dir: &TempDir) -> String {
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        dir.path().to_string_lossy().to_string()
+    }
+
+    fn first_symbol_id(project: &str) -> String {
+        let index = load_project_index(project).unwrap();
+        index.symbols.keys().next().unwrap().clone()
+    }
+
+    /// signature_only returns the signature field and no source body.
+    #[tokio::test]
+    async fn test_signature_only_omits_source() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn hello() {}").unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = first_symbol_id(&project);
+
+        let result = get_symbol(GetSymbolParams {
+            project,
+            symbol_id,
+            include_context: None,
+            signature_only: Some(true),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            result.get("source").is_none(),
+            "source should not be present"
+        );
+        assert_eq!(result["signature"].as_str().unwrap(), "pub fn hello() {}");
+    }
+
+    /// Without signature_only the full source body is returned.
+    #[tokio::test]
+    async fn test_default_returns_source() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn hello() {}").unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = first_symbol_id(&project);
+
+        let result = get_symbol(GetSymbolParams {
+            project,
+            symbol_id,
+            include_context: None,
+            signature_only: None,
+        })
+        .await
+        .unwrap();
+
+        assert!(result.get("source").is_some(), "source should be present");
+        assert_eq!(result["source"].as_str().unwrap(), "pub fn hello() {}");
+    }
+
+    /// signature_only captures the doc comment stored in the index.
+    #[tokio::test]
+    async fn test_signature_only_includes_doc() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"/// Greets the world\npub fn hello() {}",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = first_symbol_id(&project);
+
+        let result = get_symbol(GetSymbolParams {
+            project,
+            symbol_id,
+            include_context: None,
+            signature_only: Some(true),
+        })
+        .await
+        .unwrap();
+
+        let doc = result["doc"].as_str().unwrap_or("");
+        assert!(
+            doc.contains("Greets the world"),
+            "doc should contain the doc comment, got: {doc:?}"
+        );
+    }
+
+    /// signature_only succeeds even after the source file is deleted,
+    /// confirming it performs no file I/O.
+    #[tokio::test]
+    async fn test_signature_only_no_file_io() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, b"pub fn transient() {}").unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = first_symbol_id(&project);
+
+        // Remove the source file — signature_only must still work.
+        std::fs::remove_file(&file).unwrap();
+
+        let result = get_symbol(GetSymbolParams {
+            project,
+            symbol_id,
+            include_context: None,
+            signature_only: Some(true),
+        })
+        .await;
+
+        assert!(result.is_ok(), "signature_only should not read the file");
+        assert_eq!(
+            result.unwrap()["signature"].as_str().unwrap(),
+            "pub fn transient() {}"
+        );
+    }
 }
