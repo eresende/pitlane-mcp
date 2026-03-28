@@ -407,7 +407,9 @@ mod tests {
 
     fn parse_and_extract(source: &[u8]) -> Vec<Symbol> {
         let mut parser = tree_sitter::Parser::new();
-        parser.set_language(&tree_sitter_rust::language()).unwrap();
+        parser
+            .set_language(&tree_sitter_rust::LANGUAGE.into())
+            .unwrap();
         let tree = parser.parse(source, None).unwrap();
         RustParser.extract_symbols(source, &tree, Path::new("test.rs"))
     }
