@@ -164,4 +164,4 @@ Use pitlane-mcp for all code lookups when available.
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
+[MIT License](LICENSE)
