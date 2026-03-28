@@ -1,6 +1,6 @@
 use notify::{recommended_watcher, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -105,7 +105,7 @@ async fn run_debounce_loop(
 
 async fn reindex_batch(
     paths: &HashSet<PathBuf>,
-    root: &PathBuf,
+    root: &Path,
     indexer: &Arc<Indexer>,
     index: &Arc<RwLock<SymbolIndex>>,
 ) {
