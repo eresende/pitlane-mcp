@@ -87,6 +87,11 @@ Retrieve the source of one symbol by its stable ID. Much cheaper than reading th
 { "project": "/your/project", "symbol_id": "src/auth.rs::Auth::login#method" }
 ```
 
+Optional parameters:
+
+- `signature_only: true` — returns only the indexed metadata (signature, doc comment, file, line range) with no file I/O. Use this when you only need to know what a symbol looks like, not its full body.
+- `include_context: true` — includes 3 lines of surrounding source before and after the symbol.
+
 > **Python classes**: for classes that contain methods, `get_symbol` returns only the class header and docstring — not the full body. Retrieve individual methods by their own symbol IDs (e.g. `models.py::MyClass::some_method#method`). Use `get_file_outline` to list all methods first.
 
 ### `get_file_outline`
@@ -113,7 +118,7 @@ Find all locations that reference a symbol by name.
 { "project": "/your/project", "symbol_id": "src/auth.rs::Auth::login#method" }
 ```
 
-> Text-based reference search — finds name occurrences in indexed files. False positives are possible for short or common names.
+> AST-based reference search — only true identifier nodes are matched. String literals, comments, and substrings of longer identifiers are never returned.
 
 ### `watch_project`
 
