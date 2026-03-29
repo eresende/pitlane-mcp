@@ -230,6 +230,29 @@ cargo bench --bench queries
 cargo bench --bench indexing
 ```
 
+## Security
+
+pitlane-mcp is a fully local tool with no network calls. The following design properties are intentional but worth understanding before deploying it with AI agents.
+
+### Filesystem access scope
+
+`index_project`, `find_usages`, and `watch_project` accept any path accessible to the running process — there is no allowlist or project-root confinement. An AI agent (or a prompt-injected instruction) can call these tools with sensitive directories such as `~/.ssh`, `~/.config`, or `/etc`.
+
+Mitigating factors:
+- Only files with recognized source extensions are indexed or read (`.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.c`, `.cpp`, `.h`, `.hpp`, etc.). Most sensitive files — SSH keys, certificates, `.env` files — have no matching extension and are silently skipped.
+- Symbolic links are never followed (`follow_links: false` in all directory walks).
+- Files larger than 1 MiB are skipped.
+
+**Recommendation:** If you deploy pitlane-mcp with an AI agent in an environment where prompt injection is a concern, treat it as having read access to any source file the OS user can read.
+
+### No resource cap on directory walks
+
+There is no limit on the number of files indexed or total memory consumed during a walk. Calling `index_project` on a very large tree (e.g. `/`) will attempt to walk the entire filesystem and may cause high CPU/memory usage until it completes or the process is killed. Only invoke `index_project` on bounded project directories.
+
+### Index storage
+
+Indexes are stored unencrypted at `~/.pitlane/indexes/{blake3_hash}/`. If another local user or process can write to your home directory they could tamper with index files; however, deserialization failures are handled gracefully and will not execute arbitrary code.
+
 ## License
 
 Licensed under either of [MIT License](LICENSE-MIT) or [Apache License, Version 2.0](LICENSE-APACHE), at your option.
