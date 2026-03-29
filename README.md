@@ -232,4 +232,4 @@ cargo bench --bench indexing
 
 ## License
 
-[MIT License](LICENSE)
+Licensed under either of [MIT License](LICENSE-MIT) or [Apache License, Version 2.0](LICENSE-APACHE), at your option.
