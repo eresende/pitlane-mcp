@@ -41,6 +41,27 @@ cp target/release/pitlane-mcp ~/.local/bin/
 
 ## MCP Client Configuration
 
+### Claude Code
+
+```bash
+claude mcp add pitlane-mcp -- pitlane-mcp
+```
+
+### OpenCode
+
+Add to your `opencode.json` or `opencode.jsonc`:
+
+```json
+{
+  "mcp": {
+    "pitlane-mcp": {
+      "type": "local",
+      "command": ["pitlane-mcp"]
+    }
+  }
+}
+```
+
 ### VS Code / Kiro IDE
 
 Add to your MCP settings (`.kiro/settings/mcp.json` or `.vscode/mcp.json`):
@@ -57,12 +78,6 @@ Add to your MCP settings (`.kiro/settings/mcp.json` or `.vscode/mcp.json`):
     }
   }
 }
-```
-
-### Claude Code
-
-```bash
-claude mcp add pitlane-mcp -- pitlane-mcp
 ```
 
 ## Tools
