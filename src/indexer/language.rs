@@ -10,6 +10,8 @@ pub enum Language {
     Python,
     JavaScript,
     TypeScript,
+    C,
+    Cpp,
 }
 
 impl std::fmt::Display for Language {
@@ -19,6 +21,8 @@ impl std::fmt::Display for Language {
             Language::Python => write!(f, "python"),
             Language::JavaScript => write!(f, "javascript"),
             Language::TypeScript => write!(f, "typescript"),
+            Language::C => write!(f, "c"),
+            Language::Cpp => write!(f, "cpp"),
         }
     }
 }
@@ -127,6 +131,8 @@ mod tests {
     fn test_language_display() {
         assert_eq!(Language::Rust.to_string(), "rust");
         assert_eq!(Language::Python.to_string(), "python");
+        assert_eq!(Language::C.to_string(), "c");
+        assert_eq!(Language::Cpp.to_string(), "cpp");
     }
 
     #[test]

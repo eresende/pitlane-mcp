@@ -1,3 +1,5 @@
+pub mod c;
+pub mod cpp;
 pub mod javascript;
 pub mod language;
 pub mod python;
@@ -194,6 +196,8 @@ impl Indexer {
             language::Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             language::Language::Python => tree_sitter_python::LANGUAGE.into(),
             language::Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            language::Language::C => tree_sitter_c::LANGUAGE.into(),
+            language::Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             language::Language::TypeScript => {
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if ext == "tsx" {
@@ -451,6 +455,85 @@ mod tests {
 
         assert_eq!(file_count, 1);
         assert_eq!(index.symbol_count(), 3);
+    }
+
+    #[test]
+    fn test_index_project_c_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.c"),
+            b"#define MAX 100\ntypedef int Status;\nstruct Node { int val; };\nenum Dir { NORTH, SOUTH };\nint process(int x) { return x; }",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"MAX"));
+        assert!(names.contains(&"Status"));
+        assert!(names.contains(&"Node"));
+        assert!(names.contains(&"Dir"));
+        assert!(names.contains(&"process"));
+    }
+
+    #[test]
+    fn test_index_project_c_header_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("utils.h"),
+            b"typedef unsigned int uint32;\nstruct Config { int debug; };\nvoid init(void);",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"uint32"));
+        assert!(names.contains(&"Config"));
+    }
+
+    #[test]
+    fn test_index_project_cpp_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("greeter.cpp"),
+            b"class Greeter {\npublic:\n    void hello() {}\n    void bye() {}\n};\nint main() { return 0; }",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Greeter"), "class should be extracted");
+        assert!(names.contains(&"hello"), "method should be extracted");
+        assert!(names.contains(&"bye"), "method should be extracted");
+        assert!(names.contains(&"main"));
+    }
+
+    #[test]
+    fn test_index_project_cpp_header_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("math.hpp"),
+            b"namespace math {\n    int add(int a, int b) { return a + b; }\n}\n",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(
+            names.contains(&"add"),
+            "function in namespace should be extracted"
+        );
+        assert!(
+            !names.contains(&"math"),
+            "namespace itself should not be a symbol"
+        );
     }
 
     #[test]
