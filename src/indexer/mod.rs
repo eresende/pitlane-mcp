@@ -1,7 +1,9 @@
+pub mod javascript;
 pub mod language;
 pub mod python;
 pub mod registry;
 pub mod rust;
+pub mod typescript;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -90,6 +92,9 @@ impl Indexer {
                 if !self.ext_map.contains_key(ext) {
                     return false;
                 }
+                if is_declaration_file(path) {
+                    return false;
+                }
                 let rel = path.strip_prefix(root).unwrap_or(path);
                 let rel_str = rel.to_string_lossy();
                 if exclude_set.is_match(rel_str.as_ref()) || exclude_set.is_match(path) {
@@ -158,6 +163,13 @@ impl Indexer {
     fn parse_file(&self, path: &Path, root: &Path) -> anyhow::Result<Vec<language::Symbol>> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
+        // Skip TypeScript declaration files (*.d.ts, *.d.mts, *.d.cts).
+        // Also enforced in the eligible filter of index_project; this guard
+        // covers the reindex_file path.
+        if is_declaration_file(path) {
+            return Ok(vec![]);
+        }
+
         let parser_idx = match self.ext_map.get(ext) {
             Some(idx) => *idx,
             None => return Ok(vec![]),
@@ -181,6 +193,15 @@ impl Indexer {
         let ts_lang = match lang_parser.language() {
             language::Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             language::Language::Python => tree_sitter_python::LANGUAGE.into(),
+            language::Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            language::Language::TypeScript => {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if ext == "tsx" {
+                    tree_sitter_typescript::LANGUAGE_TSX.into()
+                } else {
+                    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+                }
+            }
         };
         ts_parser.set_language(&ts_lang)?;
 
@@ -266,6 +287,17 @@ pub fn load_gitignore_patterns(root: &Path) -> Vec<String> {
     patterns
 }
 
+/// Returns true for TypeScript declaration files (`*.d.ts`, `*.d.mts`, `*.d.cts`).
+/// These are generated artifacts and should not be indexed.
+pub fn is_declaration_file(path: &Path) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    matches!(ext, "ts" | "mts" | "cts")
+        && path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.ends_with(".d"))
+}
+
 pub fn is_excluded_dir_name(name: &str) -> bool {
     matches!(
         name,
@@ -289,6 +321,17 @@ pub fn is_excluded_dir_name(name: &str) -> bool {
             | ".idea"
             | ".vscode"
             | "target"
+            // JavaScript / TypeScript build and cache output
+            | "dist"
+            | "build"
+            | "out"
+            | "coverage"
+            | ".next"
+            | ".nuxt"
+            | ".turbo"
+            | ".svelte-kit"
+            | ".parcel-cache"
+            | "storybook-static"
     )
 }
 
@@ -312,6 +355,17 @@ mod tests {
             ".venv",
             "venv",
             ".mypy_cache",
+            // JS build dirs
+            "dist",
+            "build",
+            "out",
+            "coverage",
+            ".next",
+            ".nuxt",
+            ".turbo",
+            ".svelte-kit",
+            ".parcel-cache",
+            "storybook-static",
         ] {
             assert!(is_excluded_dir_name(name), "{name} should be excluded");
         }
@@ -364,6 +418,72 @@ mod tests {
 
         assert_eq!(file_count, 2);
         assert_eq!(index.symbol_count(), 2);
+    }
+
+    #[test]
+    fn test_index_project_js_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("app.js"),
+            b"function hello() {}\nconst greet = () => {};",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        assert_eq!(index.symbol_count(), 2);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"hello"));
+        assert!(names.contains(&"greet"));
+    }
+
+    #[test]
+    fn test_index_project_ts_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.ts"),
+            b"interface Foo {}\ntype Bar = string;\nfunction baz(): void {}",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        assert_eq!(index.symbol_count(), 3);
+    }
+
+    #[test]
+    fn test_index_project_skips_dts_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.ts"), b"function real(): void {}").unwrap();
+        std::fs::write(
+            dir.path().join("lib.d.ts"),
+            b"declare function real(): void;",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        // Only lib.ts counts; lib.d.ts is silently skipped
+        assert_eq!(file_count, 1);
+        assert_eq!(index.symbol_count(), 1);
+    }
+
+    #[test]
+    fn test_index_project_excludes_dist_dir() {
+        let dir = TempDir::new().unwrap();
+        let dist = dir.path().join("dist");
+        std::fs::create_dir(&dist).unwrap();
+        std::fs::write(dist.join("bundle.js"), b"function compiled() {}").unwrap();
+        std::fs::write(dir.path().join("src.js"), b"function source() {}").unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"source"));
+        assert!(!names.contains(&"compiled"));
     }
 
     #[test]

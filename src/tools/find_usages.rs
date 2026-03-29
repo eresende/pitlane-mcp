@@ -96,6 +96,9 @@ fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize,
     let ts_lang: tree_sitter::Language = match ext {
         "rs" => tree_sitter_rust::LANGUAGE.into(),
         "py" => tree_sitter_python::LANGUAGE.into(),
+        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
+        "ts" | "mts" | "cts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         _ => return Ok(vec![]),
     };
 
@@ -316,5 +319,88 @@ mod tests {
         assert!(std::fs::metadata(&path).unwrap().len() > 1024 * 1024);
         let hits = search_file_ast(&path, "foo").unwrap();
         assert!(hits.is_empty(), "oversized file must be skipped");
+    }
+
+    // ── JavaScript ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_js_finds_definition_and_call() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "mod.js", "function greet() {}\ngreet();\n");
+        let hits = search_file_ast(&path, "greet").unwrap();
+        let lines: Vec<usize> = hits.iter().map(|(l, _, _)| *l).collect();
+        assert!(lines.contains(&1), "definition on line 1");
+        assert!(lines.contains(&2), "call on line 2");
+    }
+
+    #[test]
+    fn test_js_ignores_string_literal() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "mod.js",
+            "function greet() {}\nconst s = \"greet\";\n",
+        );
+        let hits = search_file_ast(&path, "greet").unwrap();
+        assert!(
+            hits.iter().all(|(l, _, _)| *l == 1),
+            "string literal must not be returned: {hits:?}"
+        );
+    }
+
+    #[test]
+    fn test_js_ignores_comment() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "mod.js",
+            "// greet is mentioned here\nfunction other() {}\n",
+        );
+        let hits = search_file_ast(&path, "greet").unwrap();
+        assert!(hits.is_empty(), "comment mention must not be returned");
+    }
+
+    #[test]
+    fn test_jsx_finds_identifier() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "App.jsx", "function App() { return null; }\nApp();\n");
+        let hits = search_file_ast(&path, "App").unwrap();
+        assert!(hits.len() >= 2, "expected ≥2 hits, got {hits:?}");
+    }
+
+    // ── TypeScript ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ts_finds_definition_and_call() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "mod.ts", "function greet(): void {}\ngreet();\n");
+        let hits = search_file_ast(&path, "greet").unwrap();
+        let lines: Vec<usize> = hits.iter().map(|(l, _, _)| *l).collect();
+        assert!(lines.contains(&1), "definition on line 1");
+        assert!(lines.contains(&2), "call on line 2");
+    }
+
+    #[test]
+    fn test_ts_finds_type_identifier() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "mod.ts",
+            "interface User { id: number; }\nfunction f(u: User): User { return u; }\n",
+        );
+        let hits = search_file_ast(&path, "User").unwrap();
+        assert!(hits.len() >= 3, "expected ≥3 hits, got {hits:?}");
+    }
+
+    #[test]
+    fn test_tsx_finds_identifier() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "App.tsx",
+            "function App() { return <div />; }\nApp();\n",
+        );
+        let hits = search_file_ast(&path, "App").unwrap();
+        assert!(hits.len() >= 2, "expected ≥2 hits, got {hits:?}");
     }
 }

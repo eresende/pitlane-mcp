@@ -8,6 +8,8 @@ pub type SymbolId = String;
 pub enum Language {
     Rust,
     Python,
+    JavaScript,
+    TypeScript,
 }
 
 impl std::fmt::Display for Language {
@@ -15,6 +17,8 @@ impl std::fmt::Display for Language {
         match self {
             Language::Rust => write!(f, "rust"),
             Language::Python => write!(f, "python"),
+            Language::JavaScript => write!(f, "javascript"),
+            Language::TypeScript => write!(f, "typescript"),
         }
     }
 }
@@ -34,6 +38,8 @@ pub enum SymbolKind {
     TypeAlias,
     // Python
     Class,
+    // TypeScript
+    Interface,
 }
 
 impl std::fmt::Display for SymbolKind {
@@ -50,6 +56,7 @@ impl std::fmt::Display for SymbolKind {
             SymbolKind::Const => "const",
             SymbolKind::TypeAlias => "type_alias",
             SymbolKind::Class => "class",
+            SymbolKind::Interface => "interface",
         };
         write!(f, "{}", s)
     }
@@ -70,6 +77,7 @@ impl std::str::FromStr for SymbolKind {
             "const" => Ok(SymbolKind::Const),
             "type_alias" | "typealias" => Ok(SymbolKind::TypeAlias),
             "class" => Ok(SymbolKind::Class),
+            "interface" => Ok(SymbolKind::Interface),
             _ => Err(anyhow::anyhow!("Unknown symbol kind: {}", s)),
         }
     }

@@ -10,19 +10,23 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 
 ## Features
 
-- **AST-based indexing** — tree-sitter parses Rust and Python source into structured symbols
+- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, and TypeScript source into structured symbols
 - **Seven MCP tools** for navigation: outline, search, fetch, find usages
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
-- **Smart exclusions** — automatically skips `.venv`, `node_modules`, `target`, `__pycache__`, and other dependency trees at any depth
+- **Smart exclusions** — automatically skips `.venv`, `node_modules`, `target`, `__pycache__`, `dist`, `.next`, and other dependency/build trees at any depth
 - **Fully local** — no network calls, no external APIs
 
 ## Supported Languages
 
-| Language | Symbol kinds |
-|---|---|
-| Rust | function, method, struct, enum, trait, impl, mod, macro, const, type alias |
-| Python | function, method, class |
+| Language | Extensions | Symbol kinds |
+|---|---|---|
+| Rust | `.rs` | function, method, struct, enum, trait, impl, mod, macro, const, type alias |
+| Python | `.py` | function, method, class |
+| JavaScript | `.js`, `.jsx`, `.mjs`, `.cjs` | function, class, method |
+| TypeScript | `.ts`, `.tsx`, `.mts`, `.cts` | function, class, method, interface, type alias, enum |
+
+TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are automatically skipped.
 
 ## Installation
 
@@ -138,6 +142,8 @@ Symbol IDs are stable string keys derived from the file path, qualified name, an
 
 src/audio/engine.rs::Engine::process_block#method
 src/models/user.py::UserService::authenticate#method
+src/api/client.ts::fetchUser#function
+src/components/Button.tsx::Button#function
 ```
 
 IDs are returned by `search_symbols` and `get_file_outline` and used as input to `get_symbol` and `find_usages`.
