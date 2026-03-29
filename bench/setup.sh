@@ -30,9 +30,12 @@ echo ""
 clone_if_missing ripgrep https://github.com/BurntSushi/ripgrep.git 14.1.1
 # Python baseline: modern codebase with extensive type hints and decorators
 clone_if_missing fastapi  https://github.com/fastapi/fastapi.git    0.115.6
+# TypeScript baseline: web framework, exercises all TS symbol kinds
+clone_if_missing hono     https://github.com/honojs/hono.git        v4.7.4
 echo ""
 echo "Done. Run benchmarks with:"
 echo "  cargo bench --bench indexing"
 echo "  cargo bench --bench queries"
 echo "  cargo run --bin memory_bench -- bench/repos/ripgrep"
 echo "  cargo run --bin memory_bench -- bench/repos/fastapi"
+echo "  cargo run --bin memory_bench -- bench/repos/hono"

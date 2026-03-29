@@ -8,6 +8,7 @@ use std::{path::Path, time::Duration};
 const REPOS: &[(&str, &str)] = &[
     ("ripgrep", "bench/repos/ripgrep"),
     ("fastapi", "bench/repos/fastapi"),
+    ("hono", "bench/repos/hono"),
 ];
 
 fn bench_index_project(c: &mut Criterion) {

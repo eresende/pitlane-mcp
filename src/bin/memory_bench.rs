@@ -116,15 +116,24 @@ fn main() {
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
 
-    // Token efficiency: for each struct/class symbol, compute the ratio of its
-    // containing file size to the symbol's own byte span.  Report both the
-    // median (representative) and the largest-symbol value (worst case).
+    // Token efficiency: for each struct/class/interface/type-alias symbol, compute
+    // the ratio of its containing file size to the symbol's own byte span. Report
+    // both the median (representative) and the largest-symbol value (worst case).
+    // Interface and TypeAlias are included so TypeScript repos produce numbers.
     let efficiency_line = match load_project_index(&path) {
         Ok(index) => {
             let mut candidates: Vec<_> = index
                 .symbols
                 .values()
-                .filter(|s| matches!(s.kind, SymbolKind::Struct | SymbolKind::Class))
+                .filter(|s| {
+                    matches!(
+                        s.kind,
+                        SymbolKind::Struct
+                            | SymbolKind::Class
+                            | SymbolKind::Interface
+                            | SymbolKind::TypeAlias
+                    )
+                })
                 .filter_map(|s| {
                     let sym_bytes = s.byte_end.saturating_sub(s.byte_start);
                     if sym_bytes == 0 {

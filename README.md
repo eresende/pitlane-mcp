@@ -177,23 +177,26 @@ Use pitlane-mcp for all code lookups when available.
 
 ## Benchmarks
 
-Benchmarks use two pinned open-source projects as test corpora: [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) (Rust, 98 files, 3,194 symbols) and [FastAPI 0.115.6](https://github.com/fastapi/fastapi) (Python, 1,283 files, 4,807 symbols).
+Benchmarks use three pinned open-source projects as test corpora: [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) (Rust, 98 files, 3,194 symbols), [FastAPI 0.115.6](https://github.com/fastapi/fastapi) (Python + JS docs, 1,286 files, 4,828 symbols), and [Hono v4.7.4](https://github.com/honojs/hono) (TypeScript, 368 files, 992 symbols).
 
 ### Results
 
-| Metric | ripgrep | FastAPI |
-|---|---|---|
-| Indexing time (min / median, 5 runs) | 36 ms / 40 ms | 58 ms / 59 ms |
-| Peak RAM (first-run) | 39 MB | 37 MB |
-| Index size on disk | 1.1 MB | 1.6 MB |
-| Token efficiency — median | **540×** | **19×** |
-| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in a 26 KB file) | 3.2× (`Schema`, 4.8 KB in a 15 KB file) |
-| `search_symbols` latency | 147 µs | 40 µs |
-| `get_symbol` latency | 8.8 µs | 9.4 µs |
-| `get_file_outline` latency | 89 µs | 53 µs |
-| `find_usages` latency | 26 ms | 42 ms |
+| Metric | ripgrep | FastAPI | Hono |
+|---|---|---|---|
+| Indexing time (min / median, 5 runs) | 30 ms / 42 ms | 58 ms / 66 ms | 35 ms / 39 ms |
+| Peak RAM (first-run) | 41 MB | 36 MB | 31 MB |
+| Index size on disk | 1.1 MB | 1.6 MB | 275 KB |
+| Token efficiency — median | **532×** | **19×** | **42×** |
+| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in a 26 KB file) | 1.1× (`Termynal`, 9 KB in a 9.5 KB file) | 1.6× (`Context`, 15 KB in a 24 KB file) |
+| `search_symbols` latency | 151 µs | 283 µs | 46 µs |
+| `get_symbol` latency | 9.0 µs | 11.5 µs | 14 µs |
+| `get_file_outline` latency | 89 µs | 19 µs | 41 µs |
+| `get_project_outline` latency | 535 µs | 2.9 ms | 523 µs |
+| `find_usages` latency | 26 ms | 14.5 ms | 1.7 ms |
 
-Token efficiency is the ratio of full-file size to symbol size — how many times cheaper fetching a symbol is versus reading the whole file. Measured across all struct/class symbols; median is the typical case.
+Token efficiency is the ratio of full-file size to symbol size — how many times cheaper fetching a symbol is versus reading the whole file. Measured across all struct/class/interface/type-alias symbols; median is the typical case.
+
+> FastAPI's worst-case symbol is now `Termynal`, a JavaScript class in FastAPI's docs (`termynal.js`) — a dense single-class file where symbol and file are nearly the same size. The Python median of 19× is representative of normal usage.
 
 ### Running the benchmarks
 
@@ -208,6 +211,7 @@ bash bench/setup.sh
 ```bash
 cargo run --release --bin memory_bench -- bench/repos/ripgrep
 cargo run --release --bin memory_bench -- bench/repos/fastapi
+cargo run --release --bin memory_bench -- bench/repos/hono
 ```
 
 **Query latency** (Criterion, saves baseline for regression tracking):
