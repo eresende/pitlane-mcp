@@ -8,6 +8,7 @@ use tokio::time::{Duration, Instant};
 
 use crate::index::format::{load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
+use crate::indexer::is_supported_extension;
 use crate::indexer::{registry, Indexer};
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
@@ -47,7 +48,7 @@ impl ProjectWatcher {
                     EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_) => {
                         for path in event.paths {
                             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                            if ext == "rs" || ext == "py" {
+                            if is_supported_extension(ext) {
                                 // Non-blocking send; drop the event if the channel is full rather
                                 // than blocking the notify callback thread.
                                 let _ = tx.try_send(path);

@@ -5,6 +5,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
+use crate::indexer::is_supported_extension;
 use crate::tools::index_project::load_project_index;
 
 pub struct FindUsagesParams {
@@ -51,7 +52,7 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
         }
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if ext != "rs" && ext != "py" {
+        if !is_supported_extension(ext) {
             continue;
         }
 
@@ -99,6 +100,8 @@ fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize,
         "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
         "ts" | "mts" | "cts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "c" | "h" => tree_sitter_c::LANGUAGE.into(),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => tree_sitter_cpp::LANGUAGE.into(),
         _ => return Ok(vec![]),
     };
 
@@ -402,5 +405,81 @@ mod tests {
         );
         let hits = search_file_ast(&path, "App").unwrap();
         assert!(hits.len() >= 2, "expected ≥2 hits, got {hits:?}");
+    }
+
+    // ── C ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_c_finds_definition_and_call() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "mod.c",
+            "void process(void) {}\nint main(void) { process(); return 0; }\n",
+        );
+        let hits = search_file_ast(&path, "process").unwrap();
+        let lines: Vec<usize> = hits.iter().map(|(l, _, _)| *l).collect();
+        assert!(lines.contains(&1), "definition on line 1");
+        assert!(lines.contains(&2), "call on line 2");
+    }
+
+    #[test]
+    fn test_c_header_finds_identifier() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "mod.h", "typedef struct Node { int val; } Node;\n");
+        let hits = search_file_ast(&path, "Node").unwrap();
+        assert!(
+            hits.len() >= 2,
+            "expected ≥2 hits for typedef and struct tag, got {hits:?}"
+        );
+    }
+
+    #[test]
+    fn test_c_ignores_string_literal() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "mod.c",
+            "void process(void) {}\nconst char *s = \"process\";\n",
+        );
+        let hits = search_file_ast(&path, "process").unwrap();
+        assert!(
+            hits.iter().all(|(l, _, _)| *l == 1),
+            "string literal must not be returned: {hits:?}"
+        );
+    }
+
+    // ── C++ ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cpp_finds_class_and_usage() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "mod.cpp",
+            "class Greeter {};\nvoid use() { Greeter g; }\n",
+        );
+        let hits = search_file_ast(&path, "Greeter").unwrap();
+        assert!(hits.len() >= 2, "expected ≥2 hits, got {hits:?}");
+    }
+
+    #[test]
+    fn test_cpp_header_finds_identifier() {
+        let dir = TempDir::new().unwrap();
+        let path = write(&dir, "mod.hpp", "class Engine { void start(); };\n");
+        let hits = search_file_ast(&path, "Engine").unwrap();
+        assert!(!hits.is_empty(), "expected hits in .hpp file");
+    }
+
+    #[test]
+    fn test_cpp_ignores_comment() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "mod.cpp",
+            "// Greeter is mentioned here\nclass Other {};\n",
+        );
+        let hits = search_file_ast(&path, "Greeter").unwrap();
+        assert!(hits.is_empty(), "comment mention must not be returned");
     }
 }

@@ -302,6 +302,30 @@ pub fn is_declaration_file(path: &Path) -> bool {
             .is_some_and(|s| s.ends_with(".d"))
 }
 
+/// Returns true if `ext` is a file extension supported by the indexer.
+/// Single source of truth — update this when adding a new language.
+pub fn is_supported_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "rs" | "py"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "ts"
+            | "tsx"
+            | "mts"
+            | "cts"
+            | "c"
+            | "h"
+            | "cpp"
+            | "cc"
+            | "cxx"
+            | "hpp"
+            | "hxx"
+    )
+}
+
 pub fn is_excluded_dir_name(name: &str) -> bool {
     matches!(
         name,
