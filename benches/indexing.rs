@@ -11,6 +11,7 @@ const REPOS: &[(&str, &str)] = &[
     ("hono", "bench/repos/hono"),
     ("redis", "bench/repos/redis"),
     ("leveldb", "bench/repos/leveldb"),
+    ("gin", "bench/repos/gin"),
 ];
 
 fn bench_index_project(c: &mut Criterion) {

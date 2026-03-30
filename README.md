@@ -6,11 +6,11 @@ Token-efficient code intelligence MCP server. Indexes a codebase once using tree
 
 ## Why
 
-AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **133×** on C ([Redis](https://github.com/redis/redis)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **34×** on C++ ([LevelDB](https://github.com/google/leveldb)), and **19×** on Python ([FastAPI](https://github.com/fastapi/fastapi)).
+AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **34×** on C++ ([LevelDB](https://github.com/google/leveldb)), and **19×** on Python ([FastAPI](https://github.com/fastapi/fastapi)).
 
 ## Features
 
-- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, and C++ source into structured symbols
+- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, and Go source into structured symbols
 - **Seven MCP tools** for navigation: outline, search, fetch, find usages
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
@@ -27,6 +27,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 | TypeScript | `.ts`, `.tsx`, `.mts`, `.cts` | function, class, method, interface, type alias, enum |
 | C | `.c`, `.h` | function, struct, enum, type alias, macro |
 | C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx` | function, method, class, struct, enum, type alias, macro |
+| Go | `.go` | function, method, struct, interface, type alias |
 
 TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are automatically skipped.
 
@@ -196,28 +197,28 @@ Use pitlane-mcp for all code lookups when available.
 
 ## Benchmarks
 
-Benchmarks use five pinned open-source projects as test corpora: [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) (Rust, 98 files, 3,194 symbols), [FastAPI 0.115.6](https://github.com/fastapi/fastapi) (Python + JS docs, 1,286 files, 4,828 symbols), [Hono v4.7.4](https://github.com/honojs/hono) (TypeScript, 368 files, 992 symbols), [Redis 7.4.2](https://github.com/redis/redis) (C, 720 files, 14,591 symbols), and [LevelDB 1.23](https://github.com/google/leveldb) (C++, 132 files, 1,529 symbols).
+Benchmarks use six pinned open-source projects as test corpora: [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) (Rust, 98 files, 3,194 symbols), [FastAPI 0.115.6](https://github.com/fastapi/fastapi) (Python + JS docs, 1,286 files, 4,828 symbols), [Hono v4.7.4](https://github.com/honojs/hono) (TypeScript, 368 files, 992 symbols), [Redis 7.4.2](https://github.com/redis/redis) (C, 720 files, 14,591 symbols), [LevelDB 1.23](https://github.com/google/leveldb) (C++, 132 files, 1,529 symbols), and [Gin v1.10.0](https://github.com/gin-gonic/gin) (Go, 92 files, 1,184 symbols).
 
 > **Note:** pitlane-mcp is under active development. New language support and token-efficiency optimizations land frequently, so these numbers are updated with each release and may change significantly between versions.
 
 ### Results
 
-| Metric | ripgrep | FastAPI | Hono | Redis | LevelDB |
-|---|---|---|---|---|---|
-| Indexing time (min / median, 5 runs) | 34 ms / 34 ms | 51 ms / 52 ms | 35 ms / 36 ms | 135 ms / 139 ms | 19 ms / 20 ms |
-| Peak RAM (first-run) | 38.6 MB | 34.9 MB | 30.9 MB | 91.7 MB | 22.1 MB |
-| Index size on disk | 1.1 MB | 1.6 MB | 275 KB | 3.9 MB | 397 KB |
-| Token efficiency — median | **532×** | **19×** | **53×** | **133×** | **34×** |
-| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in 26 KB) | 1.1× (`Termynal`, 9 KB in 9.5 KB) | 1.4× (`RequestHeader`, 4.7 KB in 6.7 KB) | 5.1× (`redisServer`, 37.6 KB in 190 KB) | 1.7× (`Benchmark`, 19.8 KB in 33.3 KB) |
-| `search_symbols` latency | 164 µs | 302 µs | 43 µs | 918 µs | 49 µs |
-| `get_symbol` latency | 9.0 µs | 11.5 µs | 13.9 µs | 23.7 µs | 15.9 µs |
-| `get_file_outline` latency | 78 µs | 17.5 µs | 37 µs | 583 µs | 74 µs |
-| `get_project_outline` latency | 318 µs | 1.67 ms | 278 µs | 1.91 ms | 240 µs |
-| `find_usages` latency | 25.6 ms | 16.0 ms | 104.9 ms | 37.5 ms | 18.0 ms |
+| Metric | ripgrep | FastAPI | Hono | Redis | LevelDB | Gin |
+|---|---|---|---|---|---|---|
+| Indexing time (min / median, 5 runs) | 34 ms / 34 ms | 51 ms / 52 ms | 35 ms / 36 ms | 135 ms / 139 ms | 19 ms / 20 ms | 13 ms / 16 ms |
+| Peak RAM (first-run) | 38.6 MB | 34.9 MB | 30.9 MB | 91.7 MB | 22.1 MB | 20.3 MB |
+| Index size on disk | 1.1 MB | 1.6 MB | 275 KB | 3.9 MB | 397 KB | 354 KB |
+| Token efficiency — median | **532×** | **19×** | **53×** | **133×** | **34×** | **125×** |
+| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in 26 KB) | 1.1× (`Termynal`, 9 KB in 9.5 KB) | 1.4× (`RequestHeader`, 4.7 KB in 6.7 KB) | 5.1× (`redisServer`, 37.6 KB in 190 KB) | 1.7× (`Benchmark`, 19.8 KB in 33.3 KB) | 6.5× (`Engine`, 3.6 KB in 23.8 KB) |
+| `search_symbols` latency | 164 µs | 302 µs | 43 µs | 918 µs | 49 µs | 61.6 µs |
+| `get_symbol` latency | 9.0 µs | 11.5 µs | 13.9 µs | 23.7 µs | 15.9 µs | 10.1 µs |
+| `get_file_outline` latency | 78 µs | 17.5 µs | 37 µs | 583 µs | 74 µs | 57.3 µs |
+| `get_project_outline` latency | 318 µs | 1.67 ms | 278 µs | 1.91 ms | 240 µs | 155 µs |
+| `find_usages` latency | 25.6 ms | 16.0 ms | 104.9 ms | 37.5 ms | 18.0 ms | 0.45 ms |
 
 Token efficiency is the ratio of full-file size to symbol size — how many times cheaper fetching a symbol is versus reading the whole file. Measured across all struct/class/interface/type-alias symbols; median is the typical case.
 
-> Redis's high `search_symbols` and `get_file_outline` latencies reflect its 14,591 symbols (4× more than any other corpus) and the `src/server.h` benchmark file being a 190 KB header dense with declarations. FastAPI's worst-case symbol is `Termynal`, a JavaScript class in FastAPI's docs where symbol and file are nearly the same size; the Python median of 19× is representative of normal usage. `find_usages` latency for Hono, Redis, and LevelDB reflects full AST search across all their TypeScript, C, and C++ source files respectively.
+> Redis's high `search_symbols` and `get_file_outline` latencies reflect its 14,591 symbols (4× more than any other corpus) and the `src/server.h` benchmark file being a 190 KB header dense with declarations. FastAPI's worst-case symbol is `Termynal`, a JavaScript class in FastAPI's docs where symbol and file are nearly the same size; the Python median of 19× is representative of normal usage. `find_usages` latency for Hono, Redis, and LevelDB reflects full AST search across all their TypeScript, C, and C++ source files respectively. Gin's sub-millisecond `find_usages` reflects its compact 92-file codebase.
 
 ### Running the benchmarks
 
@@ -235,6 +236,7 @@ cargo run --release --bin memory_bench -- bench/repos/fastapi
 cargo run --release --bin memory_bench -- bench/repos/hono
 cargo run --release --bin memory_bench -- bench/repos/redis
 cargo run --release --bin memory_bench -- bench/repos/leveldb
+cargo run --release --bin memory_bench -- bench/repos/gin
 ```
 
 **Query latency** (Criterion, saves baseline for regression tracking):
@@ -258,7 +260,7 @@ pitlane-mcp is a fully local tool with no network calls. The following design pr
 `index_project`, `find_usages`, and `watch_project` accept any path accessible to the running process — there is no allowlist or project-root confinement. An AI agent (or a prompt-injected instruction) can call these tools with sensitive directories such as `~/.ssh`, `~/.config`, or `/etc`.
 
 Mitigating factors:
-- Only files with recognized source extensions are indexed or read (`.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.c`, `.cpp`, `.h`, `.hpp`, etc.). Most sensitive files — SSH keys, certificates, `.env` files — have no matching extension and are silently skipped.
+- Only files with recognized source extensions are indexed or read (`.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.c`, `.cpp`, `.h`, `.hpp`, `.go`, etc.). Most sensitive files — SSH keys, certificates, `.env` files — have no matching extension and are silently skipped.
 - Symbolic links are never followed (`follow_links: false` in all directory walks).
 - Files larger than 1 MiB are skipped.
 

@@ -1,5 +1,6 @@
 use crate::indexer::c::CParser;
 use crate::indexer::cpp::CppParser;
+use crate::indexer::go::GoParser;
 use crate::indexer::javascript::JavaScriptParser;
 use crate::indexer::language::LanguageParser;
 use crate::indexer::python::PythonParser;
@@ -14,5 +15,6 @@ pub fn build_default_registry() -> Vec<Box<dyn LanguageParser>> {
         Box::new(TypeScriptParser),
         Box::new(CParser),
         Box::new(CppParser),
+        Box::new(GoParser),
     ]
 }

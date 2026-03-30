@@ -36,6 +36,8 @@ clone_if_missing hono     https://github.com/honojs/hono.git        v4.7.4
 clone_if_missing redis    https://github.com/redis/redis.git         7.4.2
 # C++ baseline: clean idiomatic C++ with abstract classes and namespaces
 clone_if_missing leveldb  https://github.com/google/leveldb.git      1.23
+# Go baseline: popular HTTP web framework, idiomatic Go with structs and interfaces
+clone_if_missing gin      https://github.com/gin-gonic/gin.git        v1.10.0
 echo ""
 echo "Done. Run benchmarks with:"
 echo "  cargo bench --bench indexing"
@@ -45,3 +47,4 @@ echo "  cargo run --bin memory_bench -- bench/repos/fastapi"
 echo "  cargo run --bin memory_bench -- bench/repos/hono"
 echo "  cargo run --bin memory_bench -- bench/repos/redis"
 echo "  cargo run --bin memory_bench -- bench/repos/leveldb"
+echo "  cargo run --bin memory_bench -- bench/repos/gin"

@@ -12,6 +12,7 @@ pub enum Language {
     TypeScript,
     C,
     Cpp,
+    Go,
 }
 
 impl std::fmt::Display for Language {
@@ -23,6 +24,7 @@ impl std::fmt::Display for Language {
             Language::TypeScript => write!(f, "typescript"),
             Language::C => write!(f, "c"),
             Language::Cpp => write!(f, "cpp"),
+            Language::Go => write!(f, "go"),
         }
     }
 }

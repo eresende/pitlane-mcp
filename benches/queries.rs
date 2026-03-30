@@ -26,6 +26,7 @@ const REPOS: &[&str] = &[
     "bench/repos/hono",
     "bench/repos/redis",
     "bench/repos/leveldb",
+    "bench/repos/gin",
 ];
 
 struct Setup {
