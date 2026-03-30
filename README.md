@@ -205,11 +205,11 @@ Benchmarks use six pinned open-source projects as test corpora: [ripgrep 14.1.1]
 
 | Metric | ripgrep | FastAPI | Hono | Redis | LevelDB | Gin |
 |---|---|---|---|---|---|---|
-| Indexing time (min / median, 5 runs) | 34 ms / 34 ms | 51 ms / 52 ms | 35 ms / 36 ms | 135 ms / 139 ms | 19 ms / 20 ms | 13 ms / 16 ms |
-| Peak RAM (first-run) | 38.6 MB | 34.9 MB | 30.9 MB | 91.7 MB | 22.1 MB | 20.3 MB |
+| Indexing time (min / median, 5 runs) | 36 ms / 40 ms | 65 ms / 66 ms | 37 ms / 37 ms | 147 ms / 151 ms | 21 ms / 22 ms | 17 ms / 17 ms |
+| Peak RAM (first-run) | 39.3 MB | 36.0 MB | 30.8 MB | 89.3 MB | 22.2 MB | 20.2 MB |
 | Index size on disk | 1.1 MB | 1.6 MB | 275 KB | 3.9 MB | 397 KB | 354 KB |
-| Token efficiency — median | **532×** | **19×** | **53×** | **133×** | **34×** | **125×** |
-| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in 26 KB) | 1.1× (`Termynal`, 9 KB in 9.5 KB) | 1.4× (`RequestHeader`, 4.7 KB in 6.7 KB) | 5.1× (`redisServer`, 37.6 KB in 190 KB) | 1.7× (`Benchmark`, 19.8 KB in 33.3 KB) | 6.5× (`Engine`, 3.6 KB in 23.8 KB) |
+| Token efficiency — median | **532×** | **19×** | **53×** | **133×** | **418×** | **125×** |
+| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in 26 KB) | 3.2× (`Schema`, 4.8 KB in 15.4 KB) | 1.4× (`RequestHeader`, 4.9 KB in 6.9 KB) | 5.1× (`redisServer`, 37.6 KB in 190 KB) | 34.4× (`TestWritableFile`, 0.5 KB in 15.9 KB) | 6.5× (`Engine`, 3.7 KB in 23.8 KB) |
 | `search_symbols` latency | 164 µs | 302 µs | 43 µs | 918 µs | 49 µs | 61.6 µs |
 | `get_symbol` latency | 9.0 µs | 11.5 µs | 13.9 µs | 23.7 µs | 15.9 µs | 10.1 µs |
 | `get_file_outline` latency | 78 µs | 17.5 µs | 37 µs | 583 µs | 74 µs | 57.3 µs |
@@ -218,7 +218,7 @@ Benchmarks use six pinned open-source projects as test corpora: [ripgrep 14.1.1]
 
 Token efficiency is the ratio of full-file size to symbol size — how many times cheaper fetching a symbol is versus reading the whole file. Measured across all struct/class/interface/type-alias symbols; median is the typical case.
 
-> Redis's high `search_symbols` and `get_file_outline` latencies reflect its 14,591 symbols (4× more than any other corpus) and the `src/server.h` benchmark file being a 190 KB header dense with declarations. FastAPI's worst-case symbol is `Termynal`, a JavaScript class in FastAPI's docs where symbol and file are nearly the same size; the Python median of 19× is representative of normal usage. `find_usages` latency for Hono, Redis, and LevelDB reflects full AST search across all their TypeScript, C, and C++ source files respectively. Gin's sub-millisecond `find_usages` reflects its compact 92-file codebase.
+> Redis's high `search_symbols` and `get_file_outline` latencies reflect its 14,591 symbols (4× more than any other corpus) and the `src/server.h` benchmark file being a 190 KB header dense with declarations. LevelDB's 418× median reflects C++ class body trimming: inline method bodies are stripped from the indexed symbol, leaving only the class header. FastAPI's worst-case symbol is `Schema`, a large Pydantic model; the Python median of 19× is representative of normal usage. `find_usages` latency for Hono, Redis, and LevelDB reflects full AST search across all their TypeScript, C, and C++ source files respectively. Gin's sub-millisecond `find_usages` reflects its compact 92-file codebase.
 
 ### Running the benchmarks
 

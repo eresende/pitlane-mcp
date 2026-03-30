@@ -31,6 +31,72 @@ fn get_signature(source: &[u8], node: Node) -> Option<String> {
     Some(text.lines().next()?.trim_end().to_string())
 }
 
+/// Returns the immediately preceding doc comment (`/** ... */` or `///`), if any.
+fn get_doc_comment(source: &[u8], node: Node) -> Option<String> {
+    let parent = node.parent()?;
+    let mut cursor = parent.walk();
+    let mut prev_nodes: Vec<Node> = Vec::new();
+
+    for child in parent.children(&mut cursor) {
+        if child.id() == node.id() {
+            break;
+        }
+        prev_nodes.push(child);
+    }
+
+    for sibling in prev_nodes.iter().rev() {
+        if sibling.kind() == "comment" {
+            let text = node_text(source, *sibling);
+            if text.starts_with("/**") || text.starts_with("///") {
+                return Some(text.to_string());
+            }
+            break;
+        } else if !sibling.is_extra() {
+            break;
+        }
+    }
+
+    None
+}
+
+/// Returns `(byte_end, line_end)` for a C++ class or struct node.
+///
+/// For classes/structs with inline method definitions, trims to just the header
+/// line so that `get_symbol` returns only the declaration, not the full body.
+/// Classes/structs with no inline methods (field-only or empty) are returned
+/// at full extent.
+fn class_symbol_end(source: &[u8], node: Node) -> (usize, u32) {
+    let full = (node.end_byte(), node.end_position().row as u32 + 1);
+
+    let Some(body) = node.child_by_field_name("body") else {
+        return full;
+    };
+
+    let has_methods = {
+        let mut cursor = body.walk();
+        let x = body
+            .children(&mut cursor)
+            .any(|child| child.kind() == "function_definition");
+        x
+    };
+
+    if !has_methods {
+        return full;
+    }
+
+    // Trim to end of the header line (the line containing the opening `{`).
+    let body_start_byte = body.start_byte();
+    let body_start_row = body.start_position().row;
+    let after_open = &source[body_start_byte..node.end_byte()];
+    for (i, &b) in after_open.iter().enumerate() {
+        if b == b'\n' {
+            return (body_start_byte + i + 1, body_start_row as u32 + 1);
+        }
+    }
+
+    full
+}
+
 /// Recursively unwrap declarator chains to find the innermost name.
 /// Returns `(simple_name, qualified_name)`.
 ///
@@ -127,15 +193,25 @@ fn extract_from_node(
 
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(source, name_node).to_string();
-                push_symbol(
-                    source,
-                    node,
-                    path,
-                    name.clone(),
-                    name.clone(),
+                let id = make_symbol_id(path, &name, &kind);
+                let doc = get_doc_comment(source, node);
+                let signature = get_signature(source, node);
+                let start_pos = node.start_position();
+                let (byte_end, line_end) = class_symbol_end(source, node);
+                symbols.push(Symbol {
+                    id,
+                    name: name.clone(),
+                    qualified: name.clone(),
                     kind,
-                    symbols,
-                );
+                    language: Language::Cpp,
+                    file: Arc::new(path.to_path_buf()),
+                    byte_start: node.start_byte(),
+                    byte_end,
+                    line_start: start_pos.row as u32 + 1,
+                    line_end,
+                    signature,
+                    doc,
+                });
 
                 // Recurse into the body to pick up methods
                 if let Some(body) = node.child_by_field_name("body") {
@@ -397,5 +473,124 @@ int main() { return 0; }\n";
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].name, "get_name");
         assert!(matches!(symbols[0].kind, SymbolKind::Function));
+    }
+
+    /// A class with inline methods should be trimmed to just the header line.
+    #[test]
+    fn test_class_with_methods_trimmed_to_header() {
+        let source = b"class Greeter {\npublic:\n    void hello() {}\n    void bye() {}\n};\n";
+        let symbols = parse_and_extract(source);
+        let class_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Class))
+            .unwrap();
+        assert_eq!(class_sym.line_start, 1);
+        assert_eq!(
+            class_sym.line_end, 1,
+            "class symbol should be trimmed to header only"
+        );
+        let source_str =
+            std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(
+            source_str.starts_with("class Greeter {"),
+            "got: {source_str:?}"
+        );
+        assert!(!source_str.contains("hello"), "body should not be included");
+    }
+
+    /// A struct with inline methods should be trimmed to just the header line.
+    #[test]
+    fn test_struct_with_methods_trimmed_to_header() {
+        let source = b"struct Point {\n    int x, y;\n    int sum() { return x + y; }\n};\n";
+        let symbols = parse_and_extract(source);
+        let struct_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Struct))
+            .unwrap();
+        assert_eq!(struct_sym.line_start, 1);
+        assert_eq!(
+            struct_sym.line_end, 1,
+            "struct symbol should be trimmed to header only"
+        );
+        let source_str =
+            std::str::from_utf8(&source[struct_sym.byte_start..struct_sym.byte_end]).unwrap();
+        assert!(
+            source_str.starts_with("struct Point {"),
+            "got: {source_str:?}"
+        );
+        assert!(!source_str.contains("sum"), "body should not be included");
+    }
+
+    /// A multi-line class with only field declarations should NOT be trimmed.
+    #[test]
+    fn test_field_only_class_not_trimmed() {
+        let source = b"class Config {\npublic:\n    int timeout;\n    int retries;\n};\n";
+        let symbols = parse_and_extract(source);
+        let class_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Class))
+            .unwrap();
+        assert!(
+            class_sym.line_end > class_sym.line_start,
+            "field-only class should not be trimmed (line_start={} line_end={})",
+            class_sym.line_start,
+            class_sym.line_end,
+        );
+        let source_str =
+            std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(source_str.contains("retries"), "fields should be included");
+    }
+
+    /// A multi-line struct with only field declarations should NOT be trimmed.
+    #[test]
+    fn test_field_only_struct_not_trimmed() {
+        let source = b"struct Rect {\n    int x;\n    int y;\n    int w;\n    int h;\n};\n";
+        let symbols = parse_and_extract(source);
+        let struct_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Struct))
+            .unwrap();
+        assert!(
+            struct_sym.line_end > struct_sym.line_start,
+            "field-only struct should not be trimmed (line_start={} line_end={})",
+            struct_sym.line_start,
+            struct_sym.line_end,
+        );
+        let source_str =
+            std::str::from_utf8(&source[struct_sym.byte_start..struct_sym.byte_end]).unwrap();
+        assert!(source_str.contains("int h"), "fields should be included");
+    }
+
+    /// A Doxygen block comment preceding a class should be captured as `doc`.
+    #[test]
+    fn test_doxygen_block_comment_on_class() {
+        let source =
+            b"/** Manages connections. */\nclass ConnManager {\n    void connect() {}\n};\n";
+        let symbols = parse_and_extract(source);
+        let class_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Class))
+            .unwrap();
+        let doc = class_sym.doc.as_deref().unwrap_or("");
+        assert!(
+            doc.contains("Manages connections"),
+            "doc should contain class comment, got: {doc:?}"
+        );
+    }
+
+    /// A `///` line comment preceding a struct should be captured as `doc`.
+    #[test]
+    fn test_doxygen_line_comment_on_struct() {
+        let source = b"/// A 2-D point.\nstruct Vec2 {\n    float x;\n    float y;\n};\n";
+        let symbols = parse_and_extract(source);
+        let struct_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Struct))
+            .unwrap();
+        let doc = struct_sym.doc.as_deref().unwrap_or("");
+        assert!(
+            doc.contains("2-D point"),
+            "doc should contain struct comment, got: {doc:?}"
+        );
     }
 }
