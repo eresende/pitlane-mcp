@@ -53,28 +53,23 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
         }
     }
 
-    // Convert to JSON
+    // Convert to JSON — compact format: files as map keyed by path, kinds as flat object
     let mut dirs_json = Vec::new();
     for (dir, files) in &tree {
-        let mut files_json = Vec::new();
-        for (file, kinds) in files {
-            let kinds_json: Vec<Value> = kinds
-                .iter()
-                .map(|(k, v)| json!({ "kind": k, "count": v }))
-                .collect();
-            let total: usize = kinds.values().sum();
-            files_json.push(json!({
-                "path": file,
-                "symbol_count": total,
-                "by_kind": kinds_json,
-            }));
-        }
+        let files_map: serde_json::Map<String, Value> = files
+            .iter()
+            .map(|(file, kinds)| {
+                let kinds_obj: serde_json::Map<String, Value> =
+                    kinds.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+                (file.clone(), Value::Object(kinds_obj))
+            })
+            .collect();
         let total_symbols: usize = files.values().flat_map(|k| k.values()).sum();
         dirs_json.push(json!({
-            "directory": dir,
-            "file_count": files.len(),
-            "symbol_count": total_symbols,
-            "files": files_json,
+            "dir": dir,
+            "files": files.len(),
+            "symbols": total_symbols,
+            "items": files_map,
         }));
     }
 
