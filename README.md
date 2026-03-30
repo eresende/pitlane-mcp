@@ -6,7 +6,7 @@ Token-efficient code intelligence MCP server. Indexes a codebase once using tree
 
 ## Why
 
-AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **133×** on C ([Redis](https://github.com/redis/redis)), **42×** on TypeScript ([Hono](https://github.com/honojs/hono)), **34×** on C++ ([LevelDB](https://github.com/google/leveldb)), and **19×** on Python ([FastAPI](https://github.com/fastapi/fastapi)).
+AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **133×** on C ([Redis](https://github.com/redis/redis)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **34×** on C++ ([LevelDB](https://github.com/google/leveldb)), and **19×** on Python ([FastAPI](https://github.com/fastapi/fastapi)).
 
 ## Features
 
@@ -113,7 +113,7 @@ Optional parameters:
 - `signature_only: true` — returns only the indexed metadata (signature, doc comment, file, line range) with no file I/O. Use this when you only need to know what a symbol looks like, not its full body.
 - `include_context: true` — includes 3 lines of surrounding source before and after the symbol.
 
-> **Python classes**: for classes that contain methods, `get_symbol` returns only the class header and docstring — not the full body. Retrieve individual methods by their own symbol IDs (e.g. `models.py::MyClass::some_method#method`). Use `get_file_outline` to list all methods first.
+> **Python/JS/TS classes**: for classes that contain methods, `get_symbol` returns only the class header (plus docstring for Python) — not the full body. Retrieve individual methods by their own symbol IDs (e.g. `models.py::MyClass::some_method#method`). Use `get_file_outline` to list all methods first.
 
 ### `get_file_outline`
 
@@ -198,6 +198,8 @@ Use pitlane-mcp for all code lookups when available.
 
 Benchmarks use five pinned open-source projects as test corpora: [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) (Rust, 98 files, 3,194 symbols), [FastAPI 0.115.6](https://github.com/fastapi/fastapi) (Python + JS docs, 1,286 files, 4,828 symbols), [Hono v4.7.4](https://github.com/honojs/hono) (TypeScript, 368 files, 992 symbols), [Redis 7.4.2](https://github.com/redis/redis) (C, 720 files, 14,591 symbols), and [LevelDB 1.23](https://github.com/google/leveldb) (C++, 132 files, 1,529 symbols).
 
+> **Note:** pitlane-mcp is under active development. New language support and token-efficiency optimizations land frequently, so these numbers are updated with each release and may change significantly between versions.
+
 ### Results
 
 | Metric | ripgrep | FastAPI | Hono | Redis | LevelDB |
@@ -205,8 +207,8 @@ Benchmarks use five pinned open-source projects as test corpora: [ripgrep 14.1.1
 | Indexing time (min / median, 5 runs) | 34 ms / 34 ms | 51 ms / 52 ms | 35 ms / 36 ms | 135 ms / 139 ms | 19 ms / 20 ms |
 | Peak RAM (first-run) | 38.6 MB | 34.9 MB | 30.9 MB | 91.7 MB | 22.1 MB |
 | Index size on disk | 1.1 MB | 1.6 MB | 275 KB | 3.9 MB | 397 KB |
-| Token efficiency — median | **532×** | **19×** | **42×** | **133×** | **34×** |
-| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in 26 KB) | 1.1× (`Termynal`, 9 KB in 9.5 KB) | 1.6× (`Context`, 15.6 KB in 24.5 KB) | 5.1× (`redisServer`, 37.6 KB in 190 KB) | 1.7× (`Benchmark`, 19.8 KB in 33.3 KB) |
+| Token efficiency — median | **532×** | **19×** | **53×** | **133×** | **34×** |
+| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in 26 KB) | 1.1× (`Termynal`, 9 KB in 9.5 KB) | 1.4× (`RequestHeader`, 4.7 KB in 6.7 KB) | 5.1× (`redisServer`, 37.6 KB in 190 KB) | 1.7× (`Benchmark`, 19.8 KB in 33.3 KB) |
 | `search_symbols` latency | 164 µs | 302 µs | 43 µs | 918 µs | 49 µs |
 | `get_symbol` latency | 9.0 µs | 11.5 µs | 13.9 µs | 23.7 µs | 15.9 µs |
 | `get_file_outline` latency | 78 µs | 17.5 µs | 37 µs | 583 µs | 74 µs |

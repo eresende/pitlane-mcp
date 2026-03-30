@@ -66,6 +66,45 @@ fn get_doc_comment(source: &[u8], node: Node) -> Option<String> {
     None
 }
 
+/// Returns `(byte_end, line_end)` for a TS class node.
+/// For classes with methods, trims to just the header line so that
+/// `get_symbol` returns only the declaration, not the full body.
+/// Classes with no methods are returned at full extent.
+fn class_symbol_end(source: &[u8], node: Node) -> (usize, u32) {
+    let full = (node.end_byte(), node.end_position().row as u32 + 1);
+
+    let Some(body) = node.child_by_field_name("body") else {
+        return full;
+    };
+
+    let has_methods = {
+        let mut cursor = body.walk();
+        let x = body.children(&mut cursor).any(|child| {
+            matches!(
+                child.kind(),
+                "method_definition" | "abstract_method_signature"
+            )
+        });
+        x
+    };
+
+    if !has_methods {
+        return full;
+    }
+
+    // Trim to end of the header line (the line containing the opening `{`).
+    let body_start_byte = body.start_byte();
+    let body_start_row = body.start_position().row;
+    let after_open = &source[body_start_byte..node.end_byte()];
+    for (i, &b) in after_open.iter().enumerate() {
+        if b == b'\n' {
+            return (body_start_byte + i + 1, body_start_row as u32 + 1);
+        }
+    }
+
+    full
+}
+
 fn push_symbol(
     symbols: &mut Vec<Symbol>,
     source: &[u8],
@@ -144,15 +183,25 @@ fn extract_from_node(
         }
         "class_declaration" | "abstract_class_declaration" => {
             if let Some(name) = get_name(source, node) {
-                push_symbol(
-                    symbols,
-                    source,
-                    node,
-                    path,
-                    name.clone(),
-                    name.clone(),
-                    SymbolKind::Class,
-                );
+                let id = make_symbol_id(path, &name, &SymbolKind::Class);
+                let doc = get_doc_comment(source, node);
+                let signature = get_signature(source, node);
+                let start_pos = node.start_position();
+                let (byte_end, line_end) = class_symbol_end(source, node);
+                symbols.push(Symbol {
+                    id,
+                    name: name.clone(),
+                    qualified: name.clone(),
+                    kind: SymbolKind::Class,
+                    language: Language::TypeScript,
+                    file: Arc::new(path.to_path_buf()),
+                    byte_start: node.start_byte(),
+                    byte_end,
+                    line_start: start_pos.row as u32 + 1,
+                    line_end,
+                    signature,
+                    doc,
+                });
                 if let Some(body) = node.child_by_field_name("body") {
                     extract_methods(source, body, &name, path, symbols);
                 }
@@ -435,5 +484,55 @@ mod tests {
         assert_eq!(symbols.len(), 1);
         assert_eq!(symbols[0].name, "Button");
         assert!(matches!(symbols[0].kind, SymbolKind::Function));
+    }
+
+    /// A class with methods should have its symbol trimmed to just the header line.
+    #[test]
+    fn test_class_with_methods_trimmed_to_header() {
+        let source = b"class Dog {\n  bark(): void {}\n  fetch(): void {}\n}";
+        let symbols = parse_and_extract(source);
+        let class_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Class))
+            .unwrap();
+        assert_eq!(class_sym.line_start, 1);
+        assert_eq!(
+            class_sym.line_end, 1,
+            "class symbol should be trimmed to header only"
+        );
+        let source_str =
+            std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(source_str.starts_with("class Dog {"), "got: {source_str:?}");
+        assert!(!source_str.contains("bark"), "body should not be included");
+    }
+
+    /// An abstract class with methods should also be trimmed.
+    #[test]
+    fn test_abstract_class_with_methods_trimmed() {
+        let source = b"abstract class Shape {\n  abstract area(): number;\n}";
+        let symbols = parse_and_extract(source);
+        let class_sym = symbols
+            .iter()
+            .find(|s| matches!(s.kind, SymbolKind::Class))
+            .unwrap();
+        assert_eq!(
+            class_sym.line_end, 1,
+            "abstract class should be trimmed to header only"
+        );
+        let source_str =
+            std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(!source_str.contains("area"), "body should not be included");
+    }
+
+    /// A class without methods (empty or field-only) should NOT be trimmed.
+    #[test]
+    fn test_empty_class_not_trimmed() {
+        let source = b"class Config {}\n";
+        let symbols = parse_and_extract(source);
+        assert_eq!(symbols.len(), 1);
+        let class_sym = &symbols[0];
+        let source_str =
+            std::str::from_utf8(&source[class_sym.byte_start..class_sym.byte_end]).unwrap();
+        assert!(source_str.contains("Config"), "got: {source_str:?}");
     }
 }

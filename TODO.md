@@ -18,7 +18,7 @@ _(nothing currently in progress)_
 
 ### Token efficiency
 
-- [ ] **JS/TS class body trimming** — apply the same "header + docstring only" treatment already done for Python classes to TypeScript/JavaScript classes; Hono (42×) and similar TS projects would benefit most
+- [x] **JS/TS class body trimming** — apply the same "header + docstring only" treatment already done for Python classes to TypeScript/JavaScript classes; Hono (42×) and similar TS projects would benefit most
 - [ ] **C++ class body trimming** — large C++ classes (e.g. `redisServer` at 37 KB) are the worst-case token efficiency outliers; trimming to declaration + doc comment would help significantly
 
 ### Correctness & robustness
