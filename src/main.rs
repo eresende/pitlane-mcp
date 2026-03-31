@@ -109,7 +109,20 @@ fn value_to_text(value: serde_json::Value) -> String {
 }
 
 fn err_to_text(e: anyhow::Error) -> String {
-    format!("Error: {}", e)
+    // If the error is (or wraps) a ToolError, emit structured JSON.
+    if let Some(tool_err) = e.downcast_ref::<pitlane_mcp::error::ToolError>() {
+        return serde_json::to_string_pretty(&tool_err.to_json())
+            .unwrap_or_else(|_| tool_err.to_json().to_string());
+    }
+    // Fallback: wrap in a generic INTERNAL_ERROR envelope.
+    let fallback = serde_json::json!({
+        "error": {
+            "code": "INTERNAL_ERROR",
+            "message": e.to_string(),
+            "hint": "Check the project path and try again.",
+        }
+    });
+    serde_json::to_string_pretty(&fallback).unwrap_or_else(|_| fallback.to_string())
 }
 
 #[tool_router]

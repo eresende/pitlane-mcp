@@ -5,6 +5,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
+use crate::error::ToolError;
 use crate::indexer::is_supported_extension;
 use crate::tools::index_project::load_project_index;
 
@@ -20,7 +21,9 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
     let sym = index
         .symbols
         .get(&params.symbol_id)
-        .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", params.symbol_id))?;
+        .ok_or_else(|| ToolError::SymbolNotFound {
+            symbol_id: params.symbol_id.clone(),
+        })?;
 
     let symbol_name = sym.name.clone();
     let project_path = Path::new(&params.project)
@@ -481,5 +484,41 @@ mod tests {
         );
         let hits = search_file_ast(&path, "Greeter").unwrap();
         assert!(hits.is_empty(), "comment mention must not be returned");
+    }
+
+    // ── Error paths ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_usages_unknown_symbol_returns_structured_error() {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn hello() {}").unwrap();
+
+        // Index the project so load_project_index succeeds.
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let err = find_usages(FindUsagesParams {
+            project,
+            symbol_id: "nonexistent::symbol#function".to_string(),
+            scope: None,
+        })
+        .await
+        .unwrap_err();
+
+        let tool_err = err
+            .downcast_ref::<crate::error::ToolError>()
+            .expect("error should be a ToolError");
+
+        assert_eq!(tool_err.code(), "SYMBOL_NOT_FOUND");
+        assert!(tool_err.to_string().contains("nonexistent::symbol#function"));
     }
 }

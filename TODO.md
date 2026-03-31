@@ -14,7 +14,7 @@ _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor,
 - [x] **Tool description rewrites** — front-load "what and when" into the first sentence of each description; respect ~2048 char truncation limits _(Medium priority, small effort)_
 - [ ] **Result size / pagination** — add `offset` to `search_symbols` and `limit`/`offset` to `find_usages`; add soft caps with actionable truncation messages _(Medium priority, medium effort)_
 - [x] **Language filter bugfix** — `search_symbols` docstring only lists Rust/Python but indexer supports 8 languages; update docstring and verify filter logic _(Medium priority, small effort)_
-- [ ] **Structured error formatting** — return machine-readable error codes with recovery hints (e.g. `PROJECT_NOT_INDEXED` → "Call index_project first") _(Medium priority, small effort)_
+- [x] **Structured error formatting** — return machine-readable error codes with recovery hints (e.g. `PROJECT_NOT_INDEXED` → "Call index_project first") _(Medium priority, small effort)_
 - [ ] **`_meta` extensions** — set `alwaysLoad` and `searchHint` fields for tool discovery; unverified vendor extensions, speculative but harmless _(Medium priority, small effort)_
 - [ ] **Server instructions rewrite** — tighten the server instruction string; lead with "index first", group related tools _(Low priority, trivial effort)_
 - [ ] **Progress reporting for `index_project`** — emit progress notifications, but only for large projects (>500 files) _(Low priority, medium effort)_

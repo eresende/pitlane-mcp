@@ -6,6 +6,7 @@ use std::time::Instant;
 use anyhow::Context;
 use serde_json::{json, Value};
 
+use crate::error::ToolError;
 use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
 use crate::indexer::{load_gitignore_patterns, registry, Indexer};
@@ -166,10 +167,10 @@ pub fn load_project_index(project: &str) -> anyhow::Result<Arc<SymbolIndex>> {
     let index_path = idx_dir.join("index.bin");
 
     if !index_path.exists() {
-        anyhow::bail!(
-            "Project '{}' has not been indexed yet. Run index_project first.",
-            project
-        );
+        return Err(ToolError::ProjectNotIndexed {
+            project: project.to_string(),
+        }
+        .into());
     }
 
     let index = crate::index::format::load_index(&index_path)?;
@@ -224,5 +225,23 @@ mod tests {
 
         // Clean up.
         crate::cache::invalidate(&canonical);
+    }
+
+    #[test]
+    fn test_load_project_index_not_indexed_returns_structured_error() {
+        let dir = TempDir::new().unwrap();
+        // No index written — load must fail with PROJECT_NOT_INDEXED.
+        let project = dir.path().to_string_lossy().to_string();
+        let canonical = dir.path().canonicalize().unwrap();
+        crate::cache::invalidate(&canonical);
+
+        let err = load_project_index(&project).unwrap_err();
+        let tool_err = err
+            .downcast_ref::<crate::error::ToolError>()
+            .expect("error should be a ToolError");
+
+        assert_eq!(tool_err.code(), "PROJECT_NOT_INDEXED");
+        assert!(tool_err.to_string().contains(project.as_str()));
+        assert_eq!(tool_err.hint(), "Call index_project first.");
     }
 }

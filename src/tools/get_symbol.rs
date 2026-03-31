@@ -2,6 +2,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use serde_json::{json, Value};
 
+use crate::error::ToolError;
 use crate::tools::index_project::load_project_index;
 
 pub struct GetSymbolParams {
@@ -17,7 +18,9 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
     let sym = index
         .symbols
         .get(&params.symbol_id)
-        .ok_or_else(|| anyhow::anyhow!("Symbol not found: {}", params.symbol_id))?;
+        .ok_or_else(|| ToolError::SymbolNotFound {
+            symbol_id: params.symbol_id.clone(),
+        })?;
 
     // signature_only: return only index-cached fields, no file I/O required.
     if params.signature_only.unwrap_or(false) {
@@ -202,5 +205,28 @@ mod tests {
             result.unwrap()["signature"].as_str().unwrap(),
             "pub fn transient() {}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_symbol_id_returns_structured_error() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn hello() {}").unwrap();
+        let project = setup_project(&dir).await;
+
+        let err = get_symbol(GetSymbolParams {
+            project,
+            symbol_id: "nonexistent::symbol#function".to_string(),
+            include_context: None,
+            signature_only: None,
+        })
+        .await
+        .unwrap_err();
+
+        let tool_err = err
+            .downcast_ref::<crate::error::ToolError>()
+            .expect("error should be a ToolError");
+
+        assert_eq!(tool_err.code(), "SYMBOL_NOT_FOUND");
+        assert!(tool_err.to_string().contains("nonexistent::symbol#function"));
     }
 }
