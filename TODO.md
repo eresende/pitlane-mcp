@@ -10,7 +10,7 @@ _(nothing currently in progress)_
 
 _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor, etc.) discover, execute, and display pitlane-mcp tools._
 
-- [ ] **Tool annotations** — set `readOnlyHint`, `destructiveHint`, `openWorldHint` on all tools; enables concurrent execution and removes unnecessary permission prompts _(High priority, small effort)_
+- [x] **Tool annotations** — set `readOnlyHint`, `destructiveHint`, `openWorldHint` on all tools; enables concurrent execution and removes unnecessary permission prompts _(High priority, small effort)_
 - [ ] **Tool description rewrites** — front-load "what and when" into the first sentence of each description; respect ~2048 char truncation limits _(Medium priority, small effort)_
 - [ ] **Result size / pagination** — add `offset` to `search_symbols` and `limit`/`offset` to `find_usages`; add soft caps with actionable truncation messages _(Medium priority, medium effort)_
 - [ ] **Language filter bugfix** — `search_symbols` docstring only lists Rust/Python but indexer supports 8 languages; update docstring and verify filter logic _(Medium priority, small effort)_

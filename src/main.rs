@@ -115,7 +115,13 @@ fn err_to_text(e: anyhow::Error) -> String {
 #[tool_router]
 impl PitlaneMcp {
     #[tool(
-        description = "Parse and index all supported source files under a given path. Returns symbol count, file count, index path, and elapsed time."
+        description = "Parse and index all supported source files under a given path. Returns symbol count, file count, index path, and elapsed time.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn index_project(&self, Parameters(req): Parameters<IndexProjectRequest>) -> String {
         let params = tools::index_project::IndexProjectParams {
@@ -130,7 +136,13 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Search indexed symbols by name, kind, language, or file pattern. Returns matching symbols with their IDs, names, kinds, and locations."
+        description = "Search indexed symbols by name, kind, language, or file pattern. Returns matching symbols with their IDs, names, kinds, and locations.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn search_symbols(&self, Parameters(req): Parameters<SearchSymbolsRequest>) -> String {
         let params = tools::search_symbols::SearchSymbolsParams {
@@ -148,7 +160,13 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Retrieve the full source of a single symbol by its stable ID. Much more token-efficient than reading the whole file."
+        description = "Retrieve the full source of a single symbol by its stable ID. Much more token-efficient than reading the whole file.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_symbol(&self, Parameters(req): Parameters<GetSymbolRequest>) -> String {
         let params = tools::get_symbol::GetSymbolParams {
@@ -164,7 +182,13 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "List all symbols in a file with their kinds and line numbers, without returning source code."
+        description = "List all symbols in a file with their kinds and line numbers, without returning source code.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_file_outline(&self, Parameters(req): Parameters<GetFileOutlineRequest>) -> String {
         let params = tools::get_file_outline::GetFileOutlineParams {
@@ -178,7 +202,13 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "High-level overview of the project: files grouped by directory with symbol counts per kind."
+        description = "High-level overview of the project: files grouped by directory with symbol counts per kind.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn get_project_outline(
         &self,
@@ -195,7 +225,13 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Find all locations in the project that reference a given symbol by name. Returns file, line, column, and surrounding snippet."
+        description = "Find all locations in the project that reference a given symbol by name. Returns file, line, column, and surrounding snippet.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn find_usages(&self, Parameters(req): Parameters<FindUsagesRequest>) -> String {
         let params = tools::find_usages::FindUsagesParams {
@@ -210,7 +246,13 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Start or stop incremental background re-indexing when source files change. Use stop=true to stop an existing watcher."
+        description = "Start or stop incremental background re-indexing when source files change. Use stop=true to stop an existing watcher.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn watch_project(&self, Parameters(req): Parameters<WatchProjectRequest>) -> String {
         let params = tools::watch_project::WatchProjectParams {
