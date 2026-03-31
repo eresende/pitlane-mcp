@@ -31,7 +31,16 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
         .map(|l| match l.to_lowercase().as_str() {
             "rust" => Ok(Language::Rust),
             "python" => Ok(Language::Python),
-            other => Err(anyhow::anyhow!("Unknown language: {}", other)),
+            "javascript" | "js" => Ok(Language::JavaScript),
+            "typescript" | "ts" => Ok(Language::TypeScript),
+            "c" => Ok(Language::C),
+            "cpp" | "c++" => Ok(Language::Cpp),
+            "go" => Ok(Language::Go),
+            "java" => Ok(Language::Java),
+            other => Err(anyhow::anyhow!(
+                "Unknown language: {}. Supported: rust, python, javascript, typescript, c, cpp, go, java",
+                other
+            )),
         })
         .transpose()?;
 
