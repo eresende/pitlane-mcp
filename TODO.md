@@ -6,6 +6,24 @@ _(nothing currently in progress)_
 
 ## Planned
 
+### MCP host integration
+
+_These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor, etc.) discover, execute, and display pitlane-mcp tools._
+
+- [ ] **Tool annotations** — set `readOnlyHint`, `destructiveHint`, `openWorldHint` on all tools; enables concurrent execution and removes unnecessary permission prompts _(High priority, small effort)_
+- [ ] **Tool description rewrites** — front-load "what and when" into the first sentence of each description; respect ~2048 char truncation limits _(Medium priority, small effort)_
+- [ ] **Result size / pagination** — add `offset` to `search_symbols` and `limit`/`offset` to `find_usages`; add soft caps with actionable truncation messages _(Medium priority, medium effort)_
+- [ ] **Language filter bugfix** — `search_symbols` docstring only lists Rust/Python but indexer supports 8 languages; update docstring and verify filter logic _(Medium priority, small effort)_
+- [ ] **Structured error formatting** — return machine-readable error codes with recovery hints (e.g. `PROJECT_NOT_INDEXED` → "Call index_project first") _(Medium priority, small effort)_
+- [ ] **`_meta` extensions** — set `alwaysLoad` and `searchHint` fields for tool discovery; unverified vendor extensions, speculative but harmless _(Medium priority, small effort)_
+- [ ] **Server instructions rewrite** — tighten the server instruction string; lead with "index first", group related tools _(Low priority, trivial effort)_
+- [ ] **Progress reporting for `index_project`** — emit progress notifications, but only for large projects (>500 files) _(Low priority, medium effort)_
+
+### Correctness & robustness
+
+- [ ] **Resource cap on directory walks** — add a configurable max-file-count guard in `index_project` to prevent accidental or adversarial full-filesystem walks (e.g. `index_project("/")`)
+- [ ] **`find_usages` scope glob for all languages** — the `scope` parameter currently works but is only exercised by Rust/Python tests; validate and test it for JS/TS/C/C++
+
 ### Language support
 
 - [ ] **Bash** — `tree-sitter-bash` exists on crates.io; useful for indexing shell scripts, dotfiles, and DevOps repos
@@ -20,11 +38,6 @@ _(nothing currently in progress)_
 
 - [x] **JS/TS class body trimming** — apply the same "header + docstring only" treatment already done for Python classes to TypeScript/JavaScript classes; Hono (42×) and similar TS projects would benefit most
 - [x] **C++ class body trimming** — classes/structs with inline methods trimmed to header line; LevelDB median improved from 34× to 418×
-
-### Correctness & robustness
-
-- [ ] **Resource cap on directory walks** — add a configurable max-file-count guard in `index_project` to prevent accidental or adversarial full-filesystem walks (e.g. `index_project("/")`)
-- [ ] **`find_usages` scope glob for all languages** — the `scope` parameter currently works but is only exercised by Rust/Python tests; validate and test it for JS/TS/C/C++
 
 ### Distribution
 
