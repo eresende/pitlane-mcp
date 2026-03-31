@@ -7,6 +7,9 @@
 # Claude Code local settings
 .claude/
 
+# Kiro AI IDE settings
+.kiro/
+
 # Editor directories
 .idea/
 .vscode/
