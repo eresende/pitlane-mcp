@@ -146,6 +146,7 @@ fn bench_search_symbols(c: &mut Criterion, setups: &[(&str, Setup)]) {
                         language: None,
                         file: None,
                         limit: Some(20),
+                        offset: None,
                     }))
                     .unwrap()
                 })
@@ -232,6 +233,8 @@ fn bench_find_usages(c: &mut Criterion, setups: &[(&str, Setup)]) {
                         project: setup.project.clone(),
                         symbol_id: id.clone(),
                         scope: None,
+                        limit: None,
+                        offset: None,
                     }))
                     .unwrap()
                 })

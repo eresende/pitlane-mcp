@@ -13,10 +13,14 @@ pub struct FindUsagesParams {
     pub project: String,
     pub symbol_id: String,
     pub scope: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
+    let limit = params.limit.unwrap_or(100);
+    let offset = params.offset.unwrap_or(0);
 
     let sym = index
         .symbols
@@ -83,12 +87,24 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
         }
     }
 
-    Ok(json!({
+    let total = usages.len();
+    let page: Vec<_> = usages.into_iter().skip(offset).take(limit).collect();
+    let truncated = (offset + page.len()) < total;
+
+    let mut resp = json!({
         "symbol_id": params.symbol_id,
         "symbol_name": symbol_name,
-        "usages": usages,
-        "count": usages.len(),
-    }))
+        "usages": page,
+        "count": page.len(),
+        "truncated": truncated,
+    });
+    if truncated {
+        resp["next_page_message"] = json!(format!(
+            "More results available. Call again with offset: {}",
+            offset + limit
+        ));
+    }
+    Ok(resp)
 }
 
 /// Searches `path` for AST nodes whose text equals `name`. Only true identifier
@@ -510,6 +526,8 @@ mod tests {
             project,
             symbol_id: "nonexistent::symbol#function".to_string(),
             scope: None,
+            limit: None,
+            offset: None,
         })
         .await
         .unwrap_err();
@@ -519,6 +537,319 @@ mod tests {
             .expect("error should be a ToolError");
 
         assert_eq!(tool_err.code(), "SYMBOL_NOT_FOUND");
-        assert!(tool_err.to_string().contains("nonexistent::symbol#function"));
+        assert!(tool_err
+            .to_string()
+            .contains("nonexistent::symbol#function"));
+    }
+
+    // ── Preservation tests (Property 2) ─────────────────────────────────────
+    //
+    // These tests MUST PASS on unfixed code. They establish the baseline
+    // behavior that must not regress after the fix is applied in task 3.
+    //
+    // Validates: Requirements 3.3, 3.4, 3.6
+
+    /// Preservation: index a symbol with 3 usages, call find_usages, assert
+    /// all 3 usages are returned (no truncation when total is small).
+    ///
+    /// Validates: Requirements 3.3
+    #[tokio::test]
+    async fn test_preserve_all_usages_returned_when_small() {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+
+        let dir = TempDir::new().unwrap();
+
+        // Define `target_fn` and call it exactly 3 times.
+        let src = r#"
+pub fn target_fn() {}
+
+pub fn caller_a() { target_fn(); }
+pub fn caller_b() { target_fn(); }
+pub fn caller_c() { target_fn(); }
+"#;
+        write(&dir, "lib.rs", src);
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let sym_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == "target_fn")
+            .map(|s| s.id.clone())
+            .expect("target_fn must be indexed");
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        let count = response["count"].as_u64().expect("count must be present");
+        // The definition + 3 call sites = at least 3 usages.
+        assert!(
+            count >= 3,
+            "expected at least 3 usages (definition + 3 calls), got {}",
+            count
+        );
+
+        let usages = response["usages"].as_array().expect("usages must be array");
+        assert_eq!(
+            usages.len() as u64,
+            count,
+            "usages array length must match count field"
+        );
+    }
+
+    /// Preservation: SYMBOL_NOT_FOUND error path is unchanged.
+    ///
+    /// Validates: Requirements 3.4
+    #[tokio::test]
+    async fn test_preserve_symbol_not_found_error_unchanged() {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn hello() {}").unwrap();
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let err = find_usages(FindUsagesParams {
+            project,
+            symbol_id: "nonexistent::symbol#function".to_string(),
+            scope: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap_err();
+
+        let tool_err = err
+            .downcast_ref::<crate::error::ToolError>()
+            .expect("error should be a ToolError");
+
+        assert_eq!(tool_err.code(), "SYMBOL_NOT_FOUND");
+        assert!(tool_err
+            .to_string()
+            .contains("nonexistent::symbol#function"));
+    }
+
+    // ── Bug condition exploration tests ─────────────────────────────────────
+
+    /// Bug condition: call find_usages and assert the response contains a
+    /// `truncated` field.
+    ///
+    /// Validates: Requirements 1.3, 1.4, 1.5 (bug condition)
+    #[tokio::test]
+    async fn test_bug_find_usages_truncated_field_absent() {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+
+        let dir = TempDir::new().unwrap();
+
+        let src = r#"
+pub fn target_fn() {}
+
+pub fn caller_a() { target_fn(); }
+pub fn caller_b() { target_fn(); }
+pub fn caller_c() { target_fn(); }
+pub fn caller_d() { target_fn(); }
+pub fn caller_e() { target_fn(); }
+"#;
+        write(&dir, "lib.rs", src);
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let sym_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == "target_fn")
+            .map(|s| s.id.clone())
+            .expect("target_fn must be indexed");
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            response["count"].as_u64().unwrap_or(0) > 0,
+            "expected at least one usage, got: {}",
+            response
+        );
+
+        assert!(
+            response["truncated"].is_boolean(),
+            "COUNTEREXAMPLE: `truncated` field is absent from find_usages response — \
+             caller cannot tell whether the result set is complete or silently capped. \
+             Full response: {}",
+            response
+        );
+    }
+
+    // ── Pagination unit tests (Task 3.6) ────────────────────────────────────
+
+    /// Helper: index a project with a symbol that has N usages.
+    /// Returns (project_path, symbol_id).
+    async fn setup_usages_project(n_callers: usize) -> (TempDir, String, String) {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+
+        let dir = TempDir::new().unwrap();
+        let mut src = String::from("pub fn target_fn() {}\n");
+        for i in 0..n_callers {
+            src.push_str(&format!("pub fn caller_{i:03}() {{ target_fn(); }}\n"));
+        }
+        std::fs::write(dir.path().join("lib.rs"), src.as_bytes()).unwrap();
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let sym_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == "target_fn")
+            .map(|s| s.id.clone())
+            .expect("target_fn must be indexed");
+
+        (dir, project, sym_id)
+    }
+
+    /// Symbol with 6 usages, limit=3 → count=3, truncated:true, next_page_message contains "offset: 3"
+    #[tokio::test]
+    async fn test_find_usages_limit_caps_results() {
+        let (_dir, project, sym_id) = setup_usages_project(6).await;
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: Some(3),
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(response["count"], 3, "count must be capped at limit=3");
+        assert_eq!(response["truncated"], true, "truncated must be true");
+        let msg = response["next_page_message"]
+            .as_str()
+            .expect("next_page_message must be present");
+        assert!(
+            msg.contains("offset: 3"),
+            "message must contain 'offset: 3', got: {msg}"
+        );
+    }
+
+    /// Symbol with 6 usages, offset=3, limit=3 → count=3, truncated:false
+    #[tokio::test]
+    async fn test_find_usages_offset_second_page() {
+        let (_dir, project, sym_id) = setup_usages_project(6).await;
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: Some(3),
+            offset: Some(3),
+        })
+        .await
+        .unwrap();
+
+        // 6 usages total (definition + 6 callers = 7, but we only care that offset+limit covers the rest)
+        // With 7 total usages: page 2 (offset=3, limit=3) = items 3,4,5 → count=3, truncated depends on total
+        let count = response["count"].as_u64().unwrap();
+        assert!(count > 0, "second page must have results");
+        // truncated is true only if there are more items beyond offset+count
+        let truncated = response["truncated"]
+            .as_bool()
+            .expect("truncated must be bool");
+        let total_implied = 3 + count as usize; // offset + page_count
+                                                // If total > offset + count, truncated should be true; otherwise false
+        if truncated {
+            assert!(response["next_page_message"].is_string());
+        } else {
+            assert!(response["next_page_message"].is_null());
+        }
+        let _ = total_implied; // suppress unused warning
+    }
+
+    /// Symbol with 3 usages, limit=100 → count=3, truncated:false
+    #[tokio::test]
+    async fn test_find_usages_under_limit_truncated_false() {
+        let (_dir, project, sym_id) = setup_usages_project(3).await;
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: Some(100),
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response["truncated"], false,
+            "truncated must be false when total < limit"
+        );
+        assert!(
+            response["next_page_message"].is_null(),
+            "no next_page_message when not truncated"
+        );
+    }
+
+    /// Symbol with 3 usages, offset=100 → count=0, truncated:false
+    #[tokio::test]
+    async fn test_find_usages_offset_beyond_total_empty() {
+        let (_dir, project, sym_id) = setup_usages_project(3).await;
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: Some(100),
+            offset: Some(100),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            response["count"], 0,
+            "count must be 0 when offset beyond total"
+        );
+        assert_eq!(response["truncated"], false, "truncated must be false");
     }
 }

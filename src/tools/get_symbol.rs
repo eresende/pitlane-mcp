@@ -227,6 +227,8 @@ mod tests {
             .expect("error should be a ToolError");
 
         assert_eq!(tool_err.code(), "SYMBOL_NOT_FOUND");
-        assert!(tool_err.to_string().contains("nonexistent::symbol#function"));
+        assert!(tool_err
+            .to_string()
+            .contains("nonexistent::symbol#function"));
     }
 }

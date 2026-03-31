@@ -161,10 +161,19 @@ mod tests {
     #[test]
     fn test_to_json_all_variants_have_required_fields() {
         let variants: Vec<ToolError> = vec![
-            ToolError::ProjectNotIndexed { project: "p".to_string() },
-            ToolError::SymbolNotFound { symbol_id: "s".to_string() },
-            ToolError::InvalidArgument { param: "x".to_string(), message: "bad".to_string() },
-            ToolError::Internal { message: "oops".to_string() },
+            ToolError::ProjectNotIndexed {
+                project: "p".to_string(),
+            },
+            ToolError::SymbolNotFound {
+                symbol_id: "s".to_string(),
+            },
+            ToolError::InvalidArgument {
+                param: "x".to_string(),
+                message: "bad".to_string(),
+            },
+            ToolError::Internal {
+                message: "oops".to_string(),
+            },
         ];
         for e in variants {
             let v = e.to_json();

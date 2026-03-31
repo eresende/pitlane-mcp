@@ -34,6 +34,8 @@ pub struct SearchSymbolsRequest {
     pub file: Option<String>,
     /// Maximum results to return (default: 20)
     pub limit: Option<usize>,
+    /// Offset into results for pagination (default: 0)
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -72,6 +74,10 @@ pub struct FindUsagesRequest {
     pub symbol_id: String,
     /// Restrict search to a file or directory glob
     pub scope: Option<String>,
+    /// Maximum usages to return (default: 100)
+    pub limit: Option<usize>,
+    /// Offset into usages for pagination (default: 0)
+    pub offset: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -165,6 +171,7 @@ impl PitlaneMcp {
             language: req.language,
             file: req.file,
             limit: req.limit,
+            offset: req.offset,
         };
         match tools::search_symbols::search_symbols(params).await {
             Ok(v) => value_to_text(v),
@@ -251,6 +258,8 @@ impl PitlaneMcp {
             project: req.project,
             symbol_id: req.symbol_id,
             scope: req.scope,
+            limit: req.limit,
+            offset: req.offset,
         };
         match tools::find_usages::find_usages(params).await {
             Ok(v) => value_to_text(v),
