@@ -115,7 +115,7 @@ fn err_to_text(e: anyhow::Error) -> String {
 #[tool_router]
 impl PitlaneMcp {
     #[tool(
-        description = "Parse and index all supported source files under a given path. Returns symbol count, file count, index path, and elapsed time.",
+        description = "Call first to parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -136,7 +136,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Search indexed symbols by name, kind, language, or file pattern. Returns matching symbols with their IDs, names, kinds, and locations.",
+        description = "Search indexed symbols by name; filter by kind, language, or file glob to narrow results. Returns matching symbols with IDs, kinds, and locations.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -160,7 +160,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Retrieve the full source of a single symbol by its stable ID. Much more token-efficient than reading the whole file.",
+        description = "Fetch the source of one symbol by its stable ID — more token-efficient than reading the whole file.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -182,7 +182,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "List all symbols in a file with their kinds and line numbers, without returning source code.",
+        description = "Explore a file's structure: lists all symbols with kinds and line numbers, without returning source code.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -202,7 +202,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "High-level overview of the project: files grouped by directory with symbol counts per kind.",
+        description = "Orient yourself in a codebase: files grouped by directory with symbol counts per kind.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -225,7 +225,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Find all locations in the project that reference a given symbol by name. Returns file, line, column, and surrounding snippet.",
+        description = "Find all call sites for a symbol before refactoring. Returns file, line, column, and surrounding snippet for each match.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -246,7 +246,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Start or stop incremental background re-indexing when source files change. Use stop=true to stop an existing watcher.",
+        description = "Call after index_project to keep the index current as files change. Pass stop=true to stop the watcher.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
