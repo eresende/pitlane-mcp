@@ -9,7 +9,7 @@ _(nothing currently in progress)_
 ### Language support
 
 - [ ] **Bash** — `tree-sitter-bash` exists on crates.io; useful for indexing shell scripts, dotfiles, and DevOps repos
-- [ ] **Java** — `tree-sitter-java` exists on crates.io; high-value target with large existing corpus of open-source Java projects
+- [x] **Java** — `tree-sitter-java` exists on crates.io; high-value target with large existing corpus of open-source Java projects
 - [x] **Go** — `tree-sitter-go` exists on crates.io; high-value target given Go's prevalence in backend codebases
 - [ ] **C#** — `tree-sitter-c-sharp` exists on crates.io; common in enterprise and game dev (Unity)
 - [ ] **Ruby** — `tree-sitter-ruby` exists on crates.io; common in Rails codebases

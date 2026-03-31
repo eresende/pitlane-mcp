@@ -13,6 +13,7 @@ pub enum Language {
     C,
     Cpp,
     Go,
+    Java,
 }
 
 impl std::fmt::Display for Language {
@@ -25,6 +26,7 @@ impl std::fmt::Display for Language {
             Language::C => write!(f, "c"),
             Language::Cpp => write!(f, "cpp"),
             Language::Go => write!(f, "go"),
+            Language::Java => write!(f, "java"),
         }
     }
 }
@@ -42,9 +44,9 @@ pub enum SymbolKind {
     Macro,
     Const,
     TypeAlias,
-    // Python
+    // Python, Java
     Class,
-    // TypeScript
+    // TypeScript, Java
     Interface,
 }
 

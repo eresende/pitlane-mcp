@@ -27,17 +27,19 @@ clone_if_missing() {
 echo "Setting up benchmark repositories in $REPOS/ ..."
 echo ""
 # Rust baseline: medium-sized, well-structured, widely known
-clone_if_missing ripgrep https://github.com/BurntSushi/ripgrep.git 14.1.1
+clone_if_missing ripgrep https://github.com/BurntSushi/ripgrep.git  14.1.1
 # Python baseline: modern codebase with extensive type hints and decorators
 clone_if_missing fastapi  https://github.com/fastapi/fastapi.git    0.115.6
 # TypeScript baseline: web framework, exercises all TS symbol kinds
 clone_if_missing hono     https://github.com/honojs/hono.git        v4.7.4
 # C baseline: heavy macro/typedef/struct usage, large file count
-clone_if_missing redis    https://github.com/redis/redis.git         7.4.2
+clone_if_missing redis    https://github.com/redis/redis.git        7.4.2
 # C++ baseline: clean idiomatic C++ with abstract classes and namespaces
-clone_if_missing leveldb  https://github.com/google/leveldb.git      1.23
+clone_if_missing leveldb  https://github.com/google/leveldb.git     1.23
 # Go baseline: popular HTTP web framework, idiomatic Go with structs and interfaces
-clone_if_missing gin      https://github.com/gin-gonic/gin.git        v1.10.0
+clone_if_missing gin      https://github.com/gin-gonic/gin.git      v1.10.0
+# Java baseline: Google core libraries, rich mix of classes, interfaces, and generics
+clone_if_missing guava    https://github.com/google/guava.git       v33.4.8
 echo ""
 echo "Done. Run benchmarks with:"
 echo "  cargo bench --bench indexing"
@@ -48,3 +50,4 @@ echo "  cargo run --bin memory_bench -- bench/repos/hono"
 echo "  cargo run --bin memory_bench -- bench/repos/redis"
 echo "  cargo run --bin memory_bench -- bench/repos/leveldb"
 echo "  cargo run --bin memory_bench -- bench/repos/gin"
+echo "  cargo run --bin memory_bench -- bench/repos/guava"
