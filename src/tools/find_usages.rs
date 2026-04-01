@@ -530,10 +530,22 @@ mod tests {
             "pub fn shared_fn() {}\npub fn a1() { shared_fn(); }\npub fn a2() { shared_fn(); }\n",
         );
         for (name, body) in [
-            ("b.rs", "pub fn b1() { shared_fn(); }\npub fn b2() { shared_fn(); }\n"),
-            ("c.rs", "pub fn c1() { shared_fn(); }\npub fn c2() { shared_fn(); }\n"),
-            ("d.rs", "pub fn d1() { shared_fn(); }\npub fn d2() { shared_fn(); }\n"),
-            ("e.rs", "pub fn e1() { shared_fn(); }\npub fn e2() { shared_fn(); }\n"),
+            (
+                "b.rs",
+                "pub fn b1() { shared_fn(); }\npub fn b2() { shared_fn(); }\n",
+            ),
+            (
+                "c.rs",
+                "pub fn c1() { shared_fn(); }\npub fn c2() { shared_fn(); }\n",
+            ),
+            (
+                "d.rs",
+                "pub fn d1() { shared_fn(); }\npub fn d2() { shared_fn(); }\n",
+            ),
+            (
+                "e.rs",
+                "pub fn e1() { shared_fn(); }\npub fn e2() { shared_fn(); }\n",
+            ),
         ] {
             write(&dir, name, body);
         }
@@ -590,10 +602,22 @@ mod tests {
             "pub fn target() {}\npub fn a1() { target(); }\npub fn a2() { target(); }\n",
         );
         for (name, body) in [
-            ("b.rs", "pub fn b1() { target(); }\npub fn b2() { target(); }\n"),
-            ("c.rs", "pub fn c1() { target(); }\npub fn c2() { target(); }\n"),
-            ("d.rs", "pub fn d1() { target(); }\npub fn d2() { target(); }\n"),
-            ("e.rs", "pub fn e1() { target(); }\npub fn e2() { target(); }\n"),
+            (
+                "b.rs",
+                "pub fn b1() { target(); }\npub fn b2() { target(); }\n",
+            ),
+            (
+                "c.rs",
+                "pub fn c1() { target(); }\npub fn c2() { target(); }\n",
+            ),
+            (
+                "d.rs",
+                "pub fn d1() { target(); }\npub fn d2() { target(); }\n",
+            ),
+            (
+                "e.rs",
+                "pub fn e1() { target(); }\npub fn e2() { target(); }\n",
+            ),
         ] {
             write(&dir, name, body);
         }
@@ -979,5 +1003,214 @@ pub fn caller_e() { target_fn(); }
             "count must be 0 when offset beyond total"
         );
         assert_eq!(response["truncated"], false, "truncated must be false");
+    }
+
+    // ── Scope glob filter ────────────────────────────────────────────────────
+
+    /// Helper: index a project and return (TempDir, project_path, symbol_id).
+    /// `files` is a slice of (relative_path, source) pairs; the symbol to find
+    /// is identified by `sym_name`.
+    async fn setup_scope_project(
+        files: &[(&str, &str)],
+        sym_name: &str,
+    ) -> (TempDir, String, String) {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+
+        let dir = TempDir::new().unwrap();
+        for (rel, src) in files {
+            let path = dir.path().join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, src.as_bytes()).unwrap();
+        }
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let sym_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == sym_name)
+            .map(|s| s.id.clone())
+            .unwrap_or_else(|| panic!("{sym_name} must be indexed"));
+
+        (dir, project, sym_id)
+    }
+
+    /// Scope glob restricts JS usages to `src/` only; `other/` file is excluded.
+    #[tokio::test]
+    async fn test_scope_glob_js() {
+        let (_dir, project, sym_id) = setup_scope_project(
+            &[
+                ("src/app.js", "function greet() {}\ngreet();\ngreet();\n"),
+                ("other/util.js", "function greet() {}\ngreet();\n"),
+            ],
+            "greet",
+        )
+        .await;
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: Some("src/**".to_string()),
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        let usages = response["usages"].as_array().unwrap();
+        assert!(
+            usages
+                .iter()
+                .all(|u| u["file"].as_str().unwrap().starts_with("src/")),
+            "all usages must come from src/, got: {usages:?}"
+        );
+        assert!(
+            response["count"].as_u64().unwrap() > 0,
+            "must find usages in src/"
+        );
+    }
+
+    /// Scope glob restricts TS usages to `src/` only; `other/` file is excluded.
+    #[tokio::test]
+    async fn test_scope_glob_ts() {
+        let (_dir, project, sym_id) = setup_scope_project(
+            &[
+                (
+                    "src/app.ts",
+                    "function greet(): void {}\ngreet();\ngreet();\n",
+                ),
+                ("other/util.ts", "function greet(): void {}\ngreet();\n"),
+            ],
+            "greet",
+        )
+        .await;
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: Some("src/**".to_string()),
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        let usages = response["usages"].as_array().unwrap();
+        assert!(
+            usages
+                .iter()
+                .all(|u| u["file"].as_str().unwrap().starts_with("src/")),
+            "all usages must come from src/, got: {usages:?}"
+        );
+        assert!(response["count"].as_u64().unwrap() > 0);
+    }
+
+    /// Scope glob restricts C usages to `src/` only; `other/` file is excluded.
+    #[tokio::test]
+    async fn test_scope_glob_c() {
+        let (_dir, project, sym_id) = setup_scope_project(
+            &[
+                (
+                    "src/main.c",
+                    "void process(void) {}\nint main(void) { process(); process(); return 0; }\n",
+                ),
+                (
+                    "other/util.c",
+                    "void process(void) {}\nvoid helper(void) { process(); }\n",
+                ),
+            ],
+            "process",
+        )
+        .await;
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: Some("src/**".to_string()),
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        let usages = response["usages"].as_array().unwrap();
+        assert!(
+            usages
+                .iter()
+                .all(|u| u["file"].as_str().unwrap().starts_with("src/")),
+            "all usages must come from src/, got: {usages:?}"
+        );
+        assert!(response["count"].as_u64().unwrap() > 0);
+    }
+
+    /// Scope glob restricts C++ usages to `src/` only; `other/` file is excluded.
+    #[tokio::test]
+    async fn test_scope_glob_cpp() {
+        let (_dir, project, sym_id) = setup_scope_project(
+            &[
+                (
+                    "src/engine.cpp",
+                    "class Engine {};\nvoid use() { Engine e; Engine f; }\n",
+                ),
+                (
+                    "other/legacy.cpp",
+                    "class Engine {};\nvoid old() { Engine e; }\n",
+                ),
+            ],
+            "Engine",
+        )
+        .await;
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: Some("src/**".to_string()),
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        let usages = response["usages"].as_array().unwrap();
+        assert!(
+            usages
+                .iter()
+                .all(|u| u["file"].as_str().unwrap().starts_with("src/")),
+            "all usages must come from src/, got: {usages:?}"
+        );
+        assert!(response["count"].as_u64().unwrap() > 0);
+    }
+
+    /// Scope glob that matches no files returns count=0, truncated=false.
+    #[tokio::test]
+    async fn test_scope_glob_no_match_returns_empty() {
+        let (_dir, project, sym_id) = setup_scope_project(
+            &[(
+                "lib.rs",
+                "pub fn target() {}\npub fn caller() { target(); }\n",
+            )],
+            "target",
+        )
+        .await;
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: Some("nonexistent/**".to_string()),
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(response["count"], 0, "no usages when scope matches nothing");
+        assert_eq!(response["truncated"], false);
     }
 }
