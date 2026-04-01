@@ -45,10 +45,11 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
             .unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap())
     });
 
+    let max_collect = offset.saturating_add(limit);
     let mut usages = Vec::new();
 
     // Walk all source files in the project
-    for entry in WalkDir::new(&project_path)
+    'walk: for entry in WalkDir::new(&project_path)
         .follow_links(false)
         .into_iter()
         .filter_map(|e| e.ok())
@@ -85,11 +86,15 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
             }
             Err(_) => continue,
         }
+
+        // Early exit: stop walking once we have enough usages for the requested page.
+        if usages.len() >= max_collect {
+            break 'walk;
+        }
     }
 
-    let total = usages.len();
+    let truncated = usages.len() >= max_collect;
     let page: Vec<_> = usages.into_iter().skip(offset).take(limit).collect();
-    let truncated = (offset + page.len()) < total;
 
     let mut resp = json!({
         "symbol_id": params.symbol_id,
@@ -500,6 +505,129 @@ mod tests {
         );
         let hits = search_file_ast(&path, "Greeter").unwrap();
         assert!(hits.is_empty(), "comment mention must not be returned");
+    }
+
+    // ── Early-exit across multiple files ────────────────────────────────────
+
+    /// Early-exit: spread the symbol across 5 files (3 usages each = 15 total),
+    /// request limit=5. The walk must stop as soon as 5 usages are collected,
+    /// leaving the remaining files unvisited.
+    ///
+    /// Observable invariants:
+    ///   - count == 5  (exactly the requested page)
+    ///   - truncated == true  (more results exist beyond the page)
+    ///   - next_page_message contains "offset: 5"
+    #[tokio::test]
+    async fn test_early_exit_stops_after_limit_across_files() {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+
+        let dir = TempDir::new().unwrap();
+        // 5 files, each calling `shared_fn` twice (plus 1 definition in file 0 = 11 usages)
+        write(
+            &dir,
+            "a.rs",
+            "pub fn shared_fn() {}\npub fn a1() { shared_fn(); }\npub fn a2() { shared_fn(); }\n",
+        );
+        for (name, body) in [
+            ("b.rs", "pub fn b1() { shared_fn(); }\npub fn b2() { shared_fn(); }\n"),
+            ("c.rs", "pub fn c1() { shared_fn(); }\npub fn c2() { shared_fn(); }\n"),
+            ("d.rs", "pub fn d1() { shared_fn(); }\npub fn d2() { shared_fn(); }\n"),
+            ("e.rs", "pub fn e1() { shared_fn(); }\npub fn e2() { shared_fn(); }\n"),
+        ] {
+            write(&dir, name, body);
+        }
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let sym_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == "shared_fn")
+            .map(|s| s.id.clone())
+            .expect("shared_fn must be indexed");
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: Some(5),
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(response["count"], 5, "count must equal limit=5");
+        assert_eq!(response["truncated"], true, "truncated must be true");
+        let msg = response["next_page_message"]
+            .as_str()
+            .expect("next_page_message must be present");
+        assert!(
+            msg.contains("offset: 5"),
+            "message must contain 'offset: 5', got: {msg}"
+        );
+    }
+
+    /// Early-exit with offset: spread the symbol across 5 files, request
+    /// offset=4, limit=4. The walk must collect ≥8 usages then stop; the page
+    /// must contain exactly 4 results at the right offset.
+    #[tokio::test]
+    async fn test_early_exit_with_offset_across_files() {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+
+        let dir = TempDir::new().unwrap();
+        // Each file contributes 2 usages; 5 files = 10 usages (+ 1 definition)
+        write(
+            &dir,
+            "a.rs",
+            "pub fn target() {}\npub fn a1() { target(); }\npub fn a2() { target(); }\n",
+        );
+        for (name, body) in [
+            ("b.rs", "pub fn b1() { target(); }\npub fn b2() { target(); }\n"),
+            ("c.rs", "pub fn c1() { target(); }\npub fn c2() { target(); }\n"),
+            ("d.rs", "pub fn d1() { target(); }\npub fn d2() { target(); }\n"),
+            ("e.rs", "pub fn e1() { target(); }\npub fn e2() { target(); }\n"),
+        ] {
+            write(&dir, name, body);
+        }
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let sym_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == "target")
+            .map(|s| s.id.clone())
+            .expect("target must be indexed");
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: Some(4),
+            offset: Some(4),
+        })
+        .await
+        .unwrap();
+
+        let count = response["count"].as_u64().expect("count must be present");
+        assert_eq!(count, 4, "page must contain exactly 4 results");
+
+        // With 11 total usages and offset+limit=8, there are 3 more beyond the page.
+        assert_eq!(response["truncated"], true, "truncated must be true");
     }
 
     // ── Error paths ─────────────────────────────────────────────────────────
