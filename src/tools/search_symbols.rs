@@ -109,7 +109,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             "qualified": sym.qualified,
             "kind": sym.kind.to_string(),
             "language": sym.language.to_string(),
-            "file": sym.file.display().to_string(),
+            "file": sym.file.to_string_lossy().replace('\\', "/"),
             "line_start": sym.line_start,
             "line_end": sym.line_end,
             "signature": sym.signature,

@@ -112,7 +112,12 @@ pub fn make_symbol_id(
     qualified: &str,
     kind: &SymbolKind,
 ) -> SymbolId {
-    format!("{}::{}#{}", relative_path.display(), qualified, kind)
+    format!(
+        "{}::{}#{}",
+        relative_path.to_string_lossy().replace('\\', "/"),
+        qualified,
+        kind
+    )
 }
 
 pub trait LanguageParser: Send + Sync {

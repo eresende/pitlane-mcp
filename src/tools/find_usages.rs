@@ -77,7 +77,7 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
                 for (line_num, col, snippet) in hits {
                     let rel = path.strip_prefix(&project_path).unwrap_or(path);
                     usages.push(json!({
-                        "file": rel.to_string_lossy(),
+                        "file": rel.to_string_lossy().replace('\\', "/"),
                         "line": line_num,
                         "column": col,
                         "snippet": snippet,

@@ -37,7 +37,7 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
 
         // Truncate to `depth` directory levels
         let dir_key = dir_at_depth(rel, depth);
-        let file_key = rel.to_string_lossy().to_string();
+        let file_key = rel.to_string_lossy().replace('\\', "/");
 
         // Count symbols by kind
         let file_entry = tree
@@ -92,5 +92,5 @@ fn dir_at_depth(rel_path: &Path, depth: usize) -> String {
     let dir_components = &components[..components.len() - 1];
     let take = depth.min(dir_components.len());
     let dir: PathBuf = dir_components[..take].iter().collect();
-    dir.to_string_lossy().to_string()
+    dir.to_string_lossy().replace('\\', "/")
 }
