@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build / ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: Linux x86_64
+            artifact: pitlane-mcp-linux-x86_64.tar.gz
+          - os: ubuntu-24.04-arm
+            name: Linux aarch64
+            artifact: pitlane-mcp-linux-aarch64.tar.gz
+          - os: macos-13
+            name: macOS x86_64
+            artifact: pitlane-mcp-macos-x86_64.tar.gz
+          - os: macos-latest
+            name: macOS Apple Silicon
+            artifact: pitlane-mcp-macos-aarch64.tar.gz
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Package binaries
+        run: |
+          tar -czf ${{ matrix.artifact }} \
+            -C target/release \
+            pitlane-mcp pitlane
+
+      - name: Upload to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload ${{ github.ref_name }} ${{ matrix.artifact }} --clobber

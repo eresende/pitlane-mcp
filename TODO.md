@@ -4,8 +4,6 @@
 
 ### Distribution
 
-- **Binary releases via GitHub Actions** — build Linux (x86\_64, aarch64) and macOS (x86\_64, Apple Silicon) binaries on tag push, attach to GitHub releases
-
 ## Planned
 
 ### MCP host integration
