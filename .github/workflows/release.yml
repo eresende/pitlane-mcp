@@ -23,15 +23,19 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux x86_64
+            target: ''
             artifact: pitlane-mcp-linux-x86_64.tar.gz
           - os: ubuntu-24.04-arm
             name: Linux aarch64
+            target: ''
             artifact: pitlane-mcp-linux-aarch64.tar.gz
-          - os: macos-13
+          - os: macos-latest
             name: macOS x86_64
+            target: x86_64-apple-darwin
             artifact: pitlane-mcp-macos-x86_64.tar.gz
           - os: macos-latest
             name: macOS Apple Silicon
+            target: aarch64-apple-darwin
             artifact: pitlane-mcp-macos-aarch64.tar.gz
 
     steps:
@@ -43,14 +47,17 @@ jobs:
       - name: Cache build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Add Rust target (macOS cross-compile)
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build release binaries
-        run: cargo build --release
+        run: cargo build --release ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
 
       - name: Package binaries
         run: |
-          tar -czf ${{ matrix.artifact }} \
-            -C target/release \
-            pitlane-mcp pitlane
+          BIN_DIR=${{ matrix.target != '' && format('target/{0}/release', matrix.target) || 'target/release' }}
+          tar -czf ${{ matrix.artifact }} -C "$BIN_DIR" pitlane-mcp pitlane
 
       - name: Upload to GitHub release
         env:
