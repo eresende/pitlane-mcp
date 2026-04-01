@@ -21,7 +21,7 @@ _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor,
 
 ### Correctness & robustness
 
-- [ ] **Resource cap on directory walks** — add a configurable max-file-count guard in `index_project` to prevent accidental or adversarial full-filesystem walks (e.g. `index_project("/")`)
+- [x] **Resource cap on directory walks** — add a configurable max-file-count guard in `index_project` to prevent accidental or adversarial full-filesystem walks (e.g. `index_project("/")`)
 - [ ] **`find_usages` early-exit file walk** — short-circuit the AST walk once `offset + limit` usages are collected; currently walks all files even when the page is already full, which wastes work on large codebases _(Medium priority, small effort)_
 - [ ] **`find_usages` scope glob for all languages** — the `scope` parameter currently works but is only exercised by Rust/Python tests; validate and test it for JS/TS/C/C++
 

@@ -95,6 +95,12 @@ Parse and index all supported source files under a path.
 
 Returns symbol count, file count, index path, and elapsed time. Subsequent calls return cached results unless `force: true`.
 
+Optional parameters:
+
+- `exclude` — additional glob patterns to skip during the walk (e.g. `"vendor/**"`).
+- `force: true` — rebuild the index even if the on-disk copy is up to date.
+- `max_files` — cap on the number of source files indexed (default: 100 000). Raise this for very large mono-repos. If the walk finds more eligible files than the cap, `index_project` returns a `FILE_LIMIT_EXCEEDED` error instead of indexing.
+
 ### `search_symbols`
 
 Search by name, kind, language, or file pattern.

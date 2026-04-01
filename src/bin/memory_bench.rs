@@ -80,6 +80,7 @@ fn main() {
                 path: path.clone(),
                 exclude: None,
                 force: Some(true), // always re-index for a clean measurement
+                max_files: None,
                 progress_token: None,
                 peer: None,
             }))

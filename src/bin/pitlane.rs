@@ -99,6 +99,7 @@ async fn main() -> anyhow::Result<()> {
                     Some(exclude)
                 },
                 force: if force { Some(true) } else { None },
+                max_files: None,
                 progress_token: None,
                 peer: None,
             };

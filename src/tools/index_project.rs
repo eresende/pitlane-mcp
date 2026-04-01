@@ -19,10 +19,17 @@ use crate::indexer::{load_gitignore_patterns, registry, Indexer};
 /// Minimum file count before progress notifications are emitted.
 const PROGRESS_THRESHOLD: usize = 500;
 
+/// Default cap on the number of eligible source files per walk.
+/// Prevents accidental full-filesystem indexing (e.g. `index_project("/")`).
+pub const DEFAULT_MAX_FILES: usize = 100_000;
+
 pub struct IndexProjectParams {
     pub path: String,
     pub exclude: Option<Vec<String>>,
     pub force: Option<bool>,
+    /// Maximum source files to index. Defaults to `DEFAULT_MAX_FILES`.
+    /// Pass `usize::MAX` to disable.
+    pub max_files: Option<usize>,
     /// If present, progress notifications are sent to this peer.
     pub progress_token: Option<ProgressToken>,
     pub peer: Option<Peer<RoleServer>>,
@@ -81,6 +88,7 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     let parsers = registry::build_default_registry();
     let indexer = Indexer::new(parsers);
 
+    let max_files = params.max_files.unwrap_or(DEFAULT_MAX_FILES);
     let progress_token = params.progress_token.clone();
     let peer = params.peer.clone();
 
@@ -110,7 +118,7 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
                 let _ = (current, total);
             }))
         };
-        indexer.index_project_with_progress(&canonical, &exclude, cb.as_deref())
+        indexer.index_project_with_progress(&canonical, &exclude, max_files, cb.as_deref())
     })
     .await
     .context("Indexing task panicked")??;
@@ -305,5 +313,38 @@ mod tests {
         assert_eq!(tool_err.code(), "PROJECT_NOT_INDEXED");
         assert!(tool_err.to_string().contains(project.as_str()));
         assert_eq!(tool_err.hint(), "Call index_project first.");
+    }
+
+    #[tokio::test]
+    async fn test_index_project_default_max_files_enforced() {
+        // Verify that max_files: None uses DEFAULT_MAX_FILES (not usize::MAX).
+        // We create DEFAULT_MAX_FILES + 1 stub files and expect FILE_LIMIT_EXCEEDED.
+        let dir = TempDir::new().unwrap();
+        for i in 0..=DEFAULT_MAX_FILES {
+            std::fs::write(dir.path().join(format!("f{i}.rs")), b"fn f() {}").unwrap();
+        }
+
+        let params = IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: None,
+            max_files: None,
+            progress_token: None,
+            peer: None,
+        };
+        let err = index_project(params).await.unwrap_err();
+        let tool_err = err
+            .downcast_ref::<crate::error::ToolError>()
+            .expect("error should be a ToolError");
+        assert!(
+            matches!(
+                tool_err,
+                crate::error::ToolError::FileLimitExceeded {
+                    limit: DEFAULT_MAX_FILES,
+                    ..
+                }
+            ),
+            "expected FileLimitExceeded with limit={DEFAULT_MAX_FILES}, got: {tool_err:?}"
+        );
     }
 }

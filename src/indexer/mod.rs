@@ -59,14 +59,20 @@ impl Indexer {
         root: &Path,
         exclude_patterns: &[String],
     ) -> anyhow::Result<(SymbolIndex, usize)> {
-        self.index_project_with_progress(root, exclude_patterns, None)
+        self.index_project_with_progress(root, exclude_patterns, usize::MAX, None)
     }
 
-    /// Like `index_project` but accepts an optional progress callback.
+    /// Like `index_project` but accepts an optional progress callback and a file-count cap.
+    ///
+    /// `max_files` limits how many eligible source files will be accepted before the walk
+    /// aborts with `ToolError::FileLimitExceeded`. The walk stops as soon as `max_files + 1`
+    /// eligible files are found, so it never reads the full filesystem for large paths.
+    /// Pass `usize::MAX` to disable the cap.
     pub fn index_project_with_progress(
         &self,
         root: &Path,
         exclude_patterns: &[String],
+        max_files: usize,
         on_progress: Option<&(dyn Fn(usize, usize) + Send)>,
     ) -> anyhow::Result<(SymbolIndex, usize)> {
         let exclude_set = Self::build_exclude_set(exclude_patterns)?;
@@ -125,8 +131,17 @@ impl Indexer {
                 }
                 true
             })
+            .take(max_files.saturating_add(1))
             .map(|e| e.into_path())
             .collect();
+
+        if eligible.len() > max_files {
+            return Err(crate::error::ToolError::FileLimitExceeded {
+                path: root.display().to_string(),
+                limit: max_files,
+            }
+            .into());
+        }
 
         // Notify: Phase 1 complete — we now know the total file count.
         if let Some(cb) = on_progress {
@@ -861,5 +876,29 @@ mod tests {
         let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"main"));
         assert!(!names.contains(&"generated"));
+    }
+
+    #[test]
+    fn test_index_project_enforces_max_files_cap() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.path().join(format!("f{i}.rs")), b"fn f() {}").unwrap();
+        }
+
+        // Cap of 3 should fail: we have 5 eligible files.
+        let err = create_indexer()
+            .index_project_with_progress(dir.path(), &[], 3, None)
+            .unwrap_err();
+        let tool_err = err.downcast_ref::<crate::error::ToolError>().unwrap();
+        assert!(matches!(
+            tool_err,
+            crate::error::ToolError::FileLimitExceeded { limit: 3, .. }
+        ));
+
+        // Cap of 5 should succeed.
+        let (_, file_count) = create_indexer()
+            .index_project_with_progress(dir.path(), &[], 5, None)
+            .unwrap();
+        assert_eq!(file_count, 5);
     }
 }

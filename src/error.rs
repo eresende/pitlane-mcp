@@ -20,6 +20,8 @@ pub enum ToolError {
     SymbolNotFound { symbol_id: String },
     /// A parameter value was syntactically or semantically invalid.
     InvalidArgument { param: String, message: String },
+    /// The file walk would exceed the configured max-file cap.
+    FileLimitExceeded { path: String, limit: usize },
     /// Catch-all for unexpected I/O or internal failures.
     Internal { message: String },
 }
@@ -30,6 +32,7 @@ impl ToolError {
             ToolError::ProjectNotIndexed { .. } => "PROJECT_NOT_INDEXED",
             ToolError::SymbolNotFound { .. } => "SYMBOL_NOT_FOUND",
             ToolError::InvalidArgument { .. } => "INVALID_ARGUMENT",
+            ToolError::FileLimitExceeded { .. } => "FILE_LIMIT_EXCEEDED",
             ToolError::Internal { .. } => "INTERNAL_ERROR",
         }
     }
@@ -42,6 +45,9 @@ impl ToolError {
             }
             ToolError::InvalidArgument { .. } => {
                 "Check the parameter value and consult the tool description."
+            }
+            ToolError::FileLimitExceeded { .. } => {
+                "Narrow the project path, add exclude patterns, or raise max_files."
             }
             ToolError::Internal { .. } => "Check the project path and try again.",
         }
@@ -71,6 +77,11 @@ impl std::fmt::Display for ToolError {
             ToolError::InvalidArgument { param, message } => {
                 write!(f, "Invalid value for '{}': {}", param, message)
             }
+            ToolError::FileLimitExceeded { path, limit } => write!(
+                f,
+                "Indexing '{}' would exceed the {}-file cap.",
+                path, limit
+            ),
             ToolError::Internal { message } => write!(f, "{}", message),
         }
     }
@@ -159,6 +170,17 @@ mod tests {
     }
 
     #[test]
+    fn test_file_limit_exceeded_code_and_hint() {
+        let e = ToolError::FileLimitExceeded {
+            path: "/".to_string(),
+            limit: 100_000,
+        };
+        assert_eq!(e.code(), "FILE_LIMIT_EXCEEDED");
+        assert!(e.hint().contains("max_files"));
+        assert!(e.to_string().contains("100000"));
+    }
+
+    #[test]
     fn test_to_json_all_variants_have_required_fields() {
         let variants: Vec<ToolError> = vec![
             ToolError::ProjectNotIndexed {
@@ -170,6 +192,10 @@ mod tests {
             ToolError::InvalidArgument {
                 param: "x".to_string(),
                 message: "bad".to_string(),
+            },
+            ToolError::FileLimitExceeded {
+                path: "/".to_string(),
+                limit: 100_000,
             },
             ToolError::Internal {
                 message: "oops".to_string(),

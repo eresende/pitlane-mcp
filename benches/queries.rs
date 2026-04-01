@@ -55,6 +55,7 @@ fn prepare(path: &str, rt: &Runtime) -> Option<Setup> {
         path: path.to_string(),
         exclude: None,
         force: Some(false),
+        max_files: None,
         progress_token: None,
         peer: None,
     }))
