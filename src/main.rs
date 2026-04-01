@@ -3,7 +3,7 @@ use std::sync::Arc;
 use pitlane_mcp::tools;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
+    model::{Meta, ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router, Peer, RoleServer, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
@@ -110,6 +110,21 @@ impl PitlaneMcp {
     }
 }
 
+/// Build the `_meta` object attached to each tool definition.
+///
+/// `alwaysLoad` is a vendor hint (used by some MCP hosts) that the tool should
+/// always be included in the active toolset without explicit opt-in.
+/// `searchHint` provides keywords the host can use for tool discovery matching.
+fn tool_meta(search_hint: &'static str) -> Meta {
+    let mut meta = Meta::new();
+    meta.insert("alwaysLoad".to_string(), serde_json::Value::Bool(true));
+    meta.insert(
+        "searchHint".to_string(),
+        serde_json::Value::String(search_hint.to_string()),
+    );
+    meta
+}
+
 fn value_to_text(value: serde_json::Value) -> String {
     serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
 }
@@ -135,6 +150,7 @@ fn err_to_text(e: anyhow::Error) -> String {
 impl PitlaneMcp {
     #[tool(
         description = "Call first to parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time.",
+        meta = tool_meta("index parse cache project"),
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -163,6 +179,7 @@ impl PitlaneMcp {
 
     #[tool(
         description = "Search indexed symbols by name; filter by kind, language, or file glob to narrow results. Returns matching symbols with IDs, kinds, and locations.",
+        meta = tool_meta("search find symbol function method class type"),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -188,6 +205,7 @@ impl PitlaneMcp {
 
     #[tool(
         description = "Fetch the source of one symbol by its stable ID — more token-efficient than reading the whole file.",
+        meta = tool_meta("symbol implementation source code definition"),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -210,6 +228,7 @@ impl PitlaneMcp {
 
     #[tool(
         description = "Explore a file's structure: lists all symbols with kinds and line numbers, without returning source code.",
+        meta = tool_meta("file outline structure symbols"),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -230,6 +249,7 @@ impl PitlaneMcp {
 
     #[tool(
         description = "Orient yourself in a codebase: files grouped by directory with symbol counts per kind.",
+        meta = tool_meta("project overview codebase directory structure"),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -253,6 +273,7 @@ impl PitlaneMcp {
 
     #[tool(
         description = "Find all call sites for a symbol before refactoring. Returns file, line, column, and surrounding snippet for each match.",
+        meta = tool_meta("usages references callers refactor"),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -276,6 +297,7 @@ impl PitlaneMcp {
 
     #[tool(
         description = "Call after index_project to keep the index current as files change. Pass stop=true to stop the watcher.",
+        meta = tool_meta("watch monitor file changes live"),
         annotations(
             read_only_hint = false,
             destructive_hint = false,
