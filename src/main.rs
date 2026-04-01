@@ -292,7 +292,14 @@ impl PitlaneMcp {
 impl ServerHandler for PitlaneMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("pitlane-mcp: Token-efficient code intelligence using tree-sitter AST parsing. Use index_project first, then search_symbols, get_symbol, get_file_outline, get_project_outline, find_usages, and watch_project.")
+            .with_instructions(
+                "pitlane-mcp: AST-based code intelligence. \
+                ALWAYS call index_project first — all other tools require an up-to-date index. \
+                Discovery: search_symbols (find by name), get_file_outline (file structure), get_project_outline (repo overview). \
+                Retrieval: get_symbol (fetch one implementation by ID). \
+                Analysis: find_usages (all call sites for a symbol). \
+                Maintenance: watch_project (keep index current as files change).",
+            )
     }
 }
 

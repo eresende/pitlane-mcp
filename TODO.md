@@ -16,12 +16,13 @@ _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor,
 - [x] **Language filter bugfix** — `search_symbols` docstring only lists Rust/Python but indexer supports 8 languages; update docstring and verify filter logic _(Medium priority, small effort)_
 - [x] **Structured error formatting** — return machine-readable error codes with recovery hints (e.g. `PROJECT_NOT_INDEXED` → "Call index_project first") _(Medium priority, small effort)_
 - [ ] **`_meta` extensions** — set `alwaysLoad` and `searchHint` fields for tool discovery; unverified vendor extensions, speculative but harmless _(Medium priority, small effort)_
-- [ ] **Server instructions rewrite** — tighten the server instruction string; lead with "index first", group related tools _(Low priority, trivial effort)_
+- [x] **Server instructions rewrite** — tighten the server instruction string; lead with "index first", group related tools _(Low priority, trivial effort)_
 - [ ] **Progress reporting for `index_project`** — emit progress notifications, but only for large projects (>500 files) _(Low priority, medium effort)_
 
 ### Correctness & robustness
 
 - [ ] **Resource cap on directory walks** — add a configurable max-file-count guard in `index_project` to prevent accidental or adversarial full-filesystem walks (e.g. `index_project("/")`)
+- [ ] **`find_usages` early-exit file walk** — short-circuit the AST walk once `offset + limit` usages are collected; currently walks all files even when the page is already full, which wastes work on large codebases _(Medium priority, small effort)_
 - [ ] **`find_usages` scope glob for all languages** — the `scope` parameter currently works but is only exercised by Rust/Python tests; validate and test it for JS/TS/C/C++
 
 ### Language support
