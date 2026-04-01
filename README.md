@@ -34,7 +34,13 @@ TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are automatically ski
 
 ## Installation
 
-Build from source (requires Rust 1.75+):
+Install from [crates.io](https://crates.io/crates/pitlane-mcp) (requires Rust 1.75+):
+
+```bash
+cargo install pitlane-mcp
+```
+
+Or build from source:
 
 ```bash
 cargo build --release
@@ -330,9 +336,9 @@ Mitigating factors:
 
 **Recommendation:** If you deploy pitlane-mcp with an AI agent in an environment where prompt injection is a concern, treat it as having read access to any source file the OS user can read.
 
-### No resource cap on directory walks
+### Resource cap on directory walks
 
-There is no limit on the number of files indexed or total memory consumed during a walk. Calling `index_project` on a very large tree (e.g. `/`) will attempt to walk the entire filesystem and may cause high CPU/memory usage until it completes or the process is killed. Only invoke `index_project` on bounded project directories.
+`index_project` enforces a configurable `max_files` cap (default: 100,000 source files). If the walk finds more eligible files than the cap, it returns a `FILE_LIMIT_EXCEEDED` error instead of indexing. This prevents accidental full-filesystem walks (e.g. `index_project("/")`). Raise `max_files` explicitly for very large mono-repos.
 
 ### Index storage
 
