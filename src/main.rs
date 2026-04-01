@@ -4,7 +4,7 @@ use pitlane_mcp::tools;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router, ServerHandler,
+    schemars, tool, tool_handler, tool_router, Peer, RoleServer, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -142,11 +142,18 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn index_project(&self, Parameters(req): Parameters<IndexProjectRequest>) -> String {
+    async fn index_project(
+        &self,
+        Parameters(req): Parameters<IndexProjectRequest>,
+        peer: Peer<RoleServer>,
+        meta: rmcp::model::Meta,
+    ) -> String {
         let params = tools::index_project::IndexProjectParams {
             path: req.path,
             exclude: req.exclude,
             force: req.force,
+            progress_token: meta.get_progress_token(),
+            peer: Some(peer),
         };
         match tools::index_project::index_project(params).await {
             Ok(v) => value_to_text(v),
@@ -305,6 +312,14 @@ impl ServerHandler for PitlaneMcp {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_env("RUST_LOG")
+                .add_directive("pitlane_mcp=info".parse().unwrap()),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
     let server = PitlaneMcp::new();
     let transport = (tokio::io::stdin(), tokio::io::stdout());
     let running = rmcp::serve_server(server, transport).await?;

@@ -13,6 +13,10 @@ name = "pitlane-mcp"
 path = "src/main.rs"
 
 [[bin]]
+name = "pitlane"
+path = "src/bin/pitlane.rs"
+
+[[bin]]
 name = "memory_bench"
 path = "src/bin/memory_bench.rs"
 
@@ -46,6 +50,9 @@ globset = "0.4"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 libc = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

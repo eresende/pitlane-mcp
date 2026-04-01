@@ -17,7 +17,7 @@ _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor,
 - [x] **Structured error formatting** — return machine-readable error codes with recovery hints (e.g. `PROJECT_NOT_INDEXED` → "Call index_project first") _(Medium priority, small effort)_
 - [ ] **`_meta` extensions** — set `alwaysLoad` and `searchHint` fields for tool discovery; unverified vendor extensions, speculative but harmless _(Medium priority, small effort)_
 - [x] **Server instructions rewrite** — tighten the server instruction string; lead with "index first", group related tools _(Low priority, trivial effort)_
-- [ ] **Progress reporting for `index_project`** — emit progress notifications, but only for large projects (>500 files) _(Low priority, medium effort)_
+- [x] **Progress reporting for `index_project`** — emit progress notifications, but only for large projects (>500 files) _(Low priority, medium effort)_
 
 ### Correctness & robustness
 

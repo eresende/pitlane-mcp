@@ -39,6 +39,7 @@ Build from source (requires Rust 1.75+):
 ```bash
 cargo build --release
 cp target/release/pitlane-mcp ~/.local/bin/
+cp target/release/pitlane ~/.local/bin/
 ```
 
 ## MCP Client Configuration
@@ -151,6 +152,61 @@ Start incremental background re-indexing on file changes.
 { "project": "/your/project" }
 { "project": "/your/project", "stop": true }
 ```
+
+## CLI
+
+The `pitlane` binary exposes the same code intelligence as the MCP server, useful for shell scripts, CI pipelines, or manual exploration.
+
+### `pitlane index`
+
+Index a project (or load from cache if up to date).
+
+```bash
+pitlane index /your/project
+pitlane index /your/project --force
+pitlane index /your/project --exclude "*.generated.ts" --exclude "vendor/**"
+```
+
+### `pitlane search`
+
+Search for symbols by name with optional filters.
+
+```bash
+pitlane search /your/project authenticate
+pitlane search /your/project authenticate --kind method
+pitlane search /your/project authenticate --lang python
+pitlane search /your/project authenticate --file "src/auth*"
+pitlane search /your/project authenticate --limit 5 --offset 10
+```
+
+### `pitlane outline`
+
+High-level directory/symbol overview of the project.
+
+```bash
+pitlane outline /your/project
+pitlane outline /your/project --depth 3
+```
+
+### `pitlane file`
+
+List all symbols in a file with kinds and line numbers.
+
+```bash
+pitlane file /your/project src/auth.rs
+```
+
+### `pitlane symbol`
+
+Fetch the source of a single symbol by its ID.
+
+```bash
+pitlane symbol /your/project src/auth.rs::Auth::login[method]
+pitlane symbol /your/project src/auth.rs::Auth::login[method] --context
+pitlane symbol /your/project src/auth.rs::Auth::login[method] --sig-only
+```
+
+All commands output JSON to stdout. Logs go to stderr and can be controlled with `RUST_LOG`.
 
 ## Symbol IDs
 

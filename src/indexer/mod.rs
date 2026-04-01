@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use rayon::prelude::*;
+use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use crate::index::SymbolIndex;
@@ -48,11 +49,25 @@ impl Indexer {
         Ok(builder.build()?)
     }
 
-    /// Index a full project directory
+    /// Index a full project directory.
+    ///
+    /// If `on_progress` is provided it is called twice:
+    ///   1. After Phase 1 (file collection) with `(0, total_files)` — signals start.
+    ///   2. After Phase 2 (parsing) with `(total_files, total_files)` — signals completion.
     pub fn index_project(
         &self,
         root: &Path,
         exclude_patterns: &[String],
+    ) -> anyhow::Result<(SymbolIndex, usize)> {
+        self.index_project_with_progress(root, exclude_patterns, None)
+    }
+
+    /// Like `index_project` but accepts an optional progress callback.
+    pub fn index_project_with_progress(
+        &self,
+        root: &Path,
+        exclude_patterns: &[String],
+        on_progress: Option<&(dyn Fn(usize, usize) + Send)>,
     ) -> anyhow::Result<(SymbolIndex, usize)> {
         let exclude_set = Self::build_exclude_set(exclude_patterns)?;
 
@@ -105,10 +120,7 @@ impl Indexer {
                     return false;
                 }
                 if e.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES {
-                    eprintln!(
-                        "pitlane-mcp: skipping oversized file {} ({} byte limit)",
-                        rel_str, MAX_FILE_BYTES
-                    );
+                    warn!(file = %rel_str, limit = MAX_FILE_BYTES, "skipping oversized file");
                     return false;
                 }
                 true
@@ -116,14 +128,32 @@ impl Indexer {
             .map(|e| e.into_path())
             .collect();
 
+        // Notify: Phase 1 complete — we now know the total file count.
+        if let Some(cb) = on_progress {
+            cb(0, eligible.len());
+        }
+
         // Phase 2 — parse files in parallel.
         // Each parse_file call is CPU-bound and independent: it creates its own
-        // tree-sitter Parser and reads a single file. Rayon distributes the work
-        // across all available cores.
-        let parsed: Vec<Vec<language::Symbol>> = eligible
-            .par_iter()
-            .filter_map(|path| self.parse_file(path, root).ok())
-            .collect();
+        // tree-sitter Parser and reads a single file. A dedicated thread pool
+        // caps parallelism at 6 to avoid OOM on large codebases (e.g. LLVM).
+        // Stack size is bumped to 64 MiB per thread: tree-sitter recurses deeply
+        // into heavily-templated C++ (e.g. LLVM headers) and overflows the
+        // default 8 MiB stack.
+        let threads = std::thread::available_parallelism()
+            .map(|n| (n.get() / 2).max(1))
+            .unwrap_or(4);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .stack_size(64 * 1024 * 1024)
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+        let parsed: Vec<Vec<language::Symbol>> = pool.install(|| {
+            eligible
+                .par_iter()
+                .filter_map(|path| self.parse_file(path, root).ok())
+                .collect()
+        });
 
         // Phase 3 — insert symbols into the index (sequential: SymbolIndex is &mut).
         let mut index = SymbolIndex::new();
@@ -134,10 +164,15 @@ impl Indexer {
             }
         }
 
+        // Notify: Phase 2+3 complete.
+        if let Some(cb) = on_progress {
+            cb(file_count, file_count);
+        }
+
         Ok((index, file_count))
     }
 
-    /// Re-index a single file (for incremental updates)
+    /// Re-index a single file
     pub fn reindex_file(
         &self,
         file_path: &Path,
@@ -182,14 +217,11 @@ impl Indexer {
         // Guard against oversized files (e.g. minified bundles, generated data dicts)
         let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
         if file_size > MAX_FILE_BYTES {
-            eprintln!(
-                "pitlane-mcp: skipping oversized file {} ({} byte limit)",
-                path.display(),
-                MAX_FILE_BYTES
-            );
+            warn!(file = %path.display(), limit = MAX_FILE_BYTES, "skipping oversized file");
             return Ok(vec![]);
         }
 
+        debug!(file = %path.display(), bytes = file_size, "parsing file");
         let source = std::fs::read(path)?;
         let lang_parser = &self.parsers[parser_idx];
 

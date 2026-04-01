@@ -4,17 +4,28 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
+use rmcp::model::{ProgressNotificationParam, ProgressToken};
+use rmcp::service::Peer;
+use rmcp::RoleServer;
 use serde_json::{json, Value};
+
+use tracing::info;
 
 use crate::error::ToolError;
 use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
 use crate::indexer::{load_gitignore_patterns, registry, Indexer};
 
+/// Minimum file count before progress notifications are emitted.
+const PROGRESS_THRESHOLD: usize = 500;
+
 pub struct IndexProjectParams {
     pub path: String,
     pub exclude: Option<Vec<String>>,
     pub force: Option<bool>,
+    /// If present, progress notifications are sent to this peer.
+    pub progress_token: Option<ProgressToken>,
+    pub peer: Option<Peer<RoleServer>>,
 }
 
 pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> {
@@ -24,6 +35,8 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     let canonical = path
         .canonicalize()
         .with_context(|| format!("Cannot canonicalize path: {}", params.path))?;
+
+    info!(path = %canonical.display(), "index_project: start");
 
     let force = params.force.unwrap_or(false);
 
@@ -64,14 +77,63 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     // Create index directory
     std::fs::create_dir_all(&idx_dir)?;
 
-    // Run the indexer
+    // Run the indexer, wiring up progress notifications when a token is present.
     let parsers = registry::build_default_registry();
     let indexer = Indexer::new(parsers);
 
-    let (index, file_count) =
-        tokio::task::spawn_blocking(move || indexer.index_project(&canonical, &exclude))
-            .await
-            .context("Indexing task panicked")??;
+    let progress_token = params.progress_token.clone();
+    let peer = params.peer.clone();
+
+    // Channel: blocking thread → async task for progress events (started, done).
+    // Each message is (current, total).
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(usize, usize)>(4);
+
+    info!(path = %canonical.display(), "index_project: walking files");
+
+    let (index, file_count) = tokio::task::spawn_blocking(move || {
+        let cb: Option<Box<dyn Fn(usize, usize) + Send>> = if progress_token.is_some() {
+            let tx = tx.clone();
+            Some(Box::new(move |current, total| {
+                if current == 0 {
+                    tracing::info!(total, "index_project: discovered files, starting parse");
+                }
+                // Only emit MCP progress for large projects.
+                if total >= PROGRESS_THRESHOLD {
+                    let _ = tx.blocking_send((current, total));
+                }
+            }))
+        } else {
+            Some(Box::new(move |current, total| {
+                if current == 0 {
+                    tracing::info!(total, "index_project: discovered files, starting parse");
+                }
+                let _ = (current, total);
+            }))
+        };
+        indexer.index_project_with_progress(&canonical, &exclude, cb.as_deref())
+    })
+    .await
+    .context("Indexing task panicked")??;
+
+    info!(
+        file_count,
+        symbol_count = index.symbol_count(),
+        "index_project: parsing complete"
+    );
+
+    // Drain progress events and forward as MCP notifications.
+    if let (Some(token), Some(peer)) = (params.progress_token, peer) {
+        while let Ok((current, total)) = rx.try_recv() {
+            let mut notif = ProgressNotificationParam::new(token.clone(), current as f64)
+                .with_total(total as f64);
+            if current == 0 {
+                notif = notif.with_message(format!("Indexing {total} files…"));
+            } else {
+                notif = notif.with_message(format!("Indexed {total} files"));
+            }
+            let _ = peer.notify_progress(notif).await;
+        }
+    }
 
     let symbol_count = index.symbol_count();
 

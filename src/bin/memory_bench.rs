@@ -80,6 +80,8 @@ fn main() {
                 path: path.clone(),
                 exclude: None,
                 force: Some(true), // always re-index for a clean measurement
+                progress_token: None,
+                peer: None,
             }))
             .unwrap_or_else(|e| {
                 eprintln!("Indexing failed: {e}");
