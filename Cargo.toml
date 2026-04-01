@@ -2,7 +2,13 @@
 name = "pitlane-mcp"
 version = "0.3.0"
 edition = "2021"
+description = "Token-efficient code intelligence MCP server — indexes a codebase with tree-sitter and lets AI agents fetch exactly the symbols they need"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/eresende/pitlane-mcp"
+readme = "README.md"
+keywords = ["mcp", "tree-sitter", "ast", "code-intelligence", "ai"]
+categories = ["development-tools", "command-line-utilities"]
+exclude = ["bench/", "CLAUDE.md", "TODO.md", ".kiro/"]
 
 [lib]
 name = "pitlane_mcp"
