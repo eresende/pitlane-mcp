@@ -282,7 +282,7 @@ Use pitlane-mcp for all code lookups when available.
 
 ## Benchmarks
 
-Benchmarks use seven pinned open-source projects as test corpora: [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) (Rust, 98 files, 3,194 symbols), [FastAPI 0.115.6](https://github.com/fastapi/fastapi) (Python + JS docs, 1,286 files, 4,828 symbols), [Hono v4.7.4](https://github.com/honojs/hono) (TypeScript, 368 files, 992 symbols), [Redis 7.4.2](https://github.com/redis/redis) (C, 720 files, 14,591 symbols), [LevelDB 1.23](https://github.com/google/leveldb) (C++, 132 files, 1,529 symbols), [Gin v1.10.0](https://github.com/gin-gonic/gin) (Go, 92 files, 1,184 symbols), and [Guava v33.4.8](https://github.com/google/guava) (Java, 3,269 files, 56,804 symbols).
+Benchmarks use eight pinned open-source projects as test corpora: [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) (Rust, 98 files, 3,194 symbols), [FastAPI 0.115.6](https://github.com/fastapi/fastapi) (Python + JS docs, 1,286 files, 4,828 symbols), [Hono v4.7.4](https://github.com/honojs/hono) (TypeScript, 368 files, 992 symbols), [Redis 7.4.2](https://github.com/redis/redis) (C, 720 files, 14,591 symbols), [LevelDB 1.23](https://github.com/google/leveldb) (C++, 132 files, 1,529 symbols), [Gin v1.10.0](https://github.com/gin-gonic/gin) (Go, 92 files, 1,184 symbols), [Guava v33.4.8](https://github.com/google/guava) (Java, 3,269 files, 56,804 symbols), and [bats-core v1.11.1](https://github.com/bats-core/bats-core) (Bash, 54 files, 147 symbols).
 
 > **Note:** pitlane-mcp is under active development. New language support and token-efficiency optimizations land frequently, so these numbers are updated with each release and may change significantly between versions.
 
@@ -290,20 +290,20 @@ Benchmarks use seven pinned open-source projects as test corpora: [ripgrep 14.1.
 
 ### Results
 
-| Metric | ripgrep | FastAPI | Hono | Redis | LevelDB | Gin | Guava |
-|---|---|---|---|---|---|---|---|
-| Indexing time (min / median, 5 runs) | 26 ms / 28 ms | 32 ms / 34 ms | 17 ms / 18 ms | 103 ms / 104 ms | 10 ms / 12 ms | 11 ms / 11 ms | 239 ms / 246 ms |
-| Peak RAM (first-run) | 40.1 MB | 37.8 MB | 31.3 MB | 94.1 MB | 24.1 MB | 21.9 MB | 201.9 MB |
-| Index size on disk | 1.1 MB | 1.6 MB | 275 KB | 3.9 MB | 398 KB | 354 KB | 28.4 MB |
-| Token efficiency — median | **532×** | **20×** | **53×** | **133×** | **418×** | **125×** | **112×** |
-| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in 26 KB) | 3.2× (`Schema`, 4.8 KB in 15.4 KB) | 1.4× (`RequestHeader`, 4.9 KB in 6.9 KB) | 5.1× (`redisServer`, 37.6 KB in 190 KB) | 34.4× (`TestWritableFile`, 0.5 KB in 15.9 KB) | 6.5× (`Engine`, 3.7 KB in 23.8 KB) | 1.2× (`Network`, 18.6 KB in 22.9 KB) |
-| `search_symbols` latency | 144 µs | 30 µs | 36 µs | 673 µs | 61 µs | 47 µs | 65 µs |
-| `get_symbol` latency | 3.4 µs | 3.8 µs | 3.8 µs | 10.8 µs | 2.6 µs | 3.5 µs | 6.8 µs |
-| `get_file_outline` latency | 96 µs | 52 µs | 5.0 µs | 1.06 ms | 72 µs | 59 µs | 33 µs |
-| `get_project_outline` latency | 362 µs | 1.93 ms | 273 µs | 2.24 ms | 227 µs | 150 µs | 24.5 ms |
-| `find_usages` latency | 19.7 ms | 29.6 ms | 11.7 ms | 29.7 ms | 2.0 ms | 139 µs | 3.3 ms |
+| Metric | ripgrep | FastAPI | Hono | Redis | LevelDB | Gin | Guava | bats-core |
+|---|---|---|---|---|---|---|---|---|
+| Indexing time (min / median, 5 runs) | 26 ms / 28 ms | 32 ms / 34 ms | 17 ms / 18 ms | 103 ms / 104 ms | 10 ms / 12 ms | 11 ms / 11 ms | 239 ms / 246 ms | 2 ms / 2 ms |
+| Peak RAM (first-run) | 40.1 MB | 37.8 MB | 31.3 MB | 94.1 MB | 24.1 MB | 21.9 MB | 201.9 MB | 10.3 MB |
+| Index size on disk | 1.1 MB | 1.6 MB | 275 KB | 3.9 MB | 398 KB | 354 KB | 28.4 MB | 52.5 KB |
+| Token efficiency — median | **532×** | **20×** | **53×** | **133×** | **418×** | **125×** | **112×** | N/A¹ |
+| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in 26 KB) | 3.2× (`Schema`, 4.8 KB in 15.4 KB) | 1.4× (`RequestHeader`, 4.9 KB in 6.9 KB) | 5.1× (`redisServer`, 37.6 KB in 190 KB) | 34.4× (`TestWritableFile`, 0.5 KB in 15.9 KB) | 6.5× (`Engine`, 3.7 KB in 23.8 KB) | 1.2× (`Network`, 18.6 KB in 22.9 KB) | N/A¹ |
+| `search_symbols` latency | 144 µs | 30 µs | 36 µs | 673 µs | 61 µs | 47 µs | 65 µs | 7.9 µs |
+| `get_symbol` latency | 3.4 µs | 3.8 µs | 3.8 µs | 10.8 µs | 2.6 µs | 3.5 µs | 6.8 µs | 4.2 µs |
+| `get_file_outline` latency | 96 µs | 52 µs | 5.0 µs | 1.06 ms | 72 µs | 59 µs | 33 µs | 16.0 µs |
+| `get_project_outline` latency | 362 µs | 1.93 ms | 273 µs | 2.24 ms | 227 µs | 150 µs | 24.5 ms | 43.3 µs |
+| `find_usages` latency | 19.7 ms | 29.6 ms | 11.7 ms | 29.7 ms | 2.0 ms | 139 µs | 3.3 ms | 485 µs |
 
-Token efficiency is the ratio of full-file size to symbol size — how many times cheaper fetching a symbol is versus reading the whole file. Measured across all struct/class/interface/type-alias symbols; median is the typical case.
+Token efficiency is the ratio of full-file size to symbol size — how many times cheaper fetching a symbol is versus reading the whole file. Measured across all struct/class/interface/type-alias symbols; median is the typical case. ¹ Bash has no struct/class symbols — only functions — so the metric does not apply.
 
 > Query latencies are median wall-clock times for a single tool call against a warm in-memory index (no disk I/O, no re-indexing). Measured with Criterion over 100–1,000+ samples depending on the operation.
 >
@@ -320,19 +320,23 @@ bash bench/setup.sh
 **Memory, disk, and token efficiency** (single binary, human-readable output):
 
 ```bash
-cargo run --release --features memory-bench --bin memory_bench -- bench/repos/ripgrep
-cargo run --release --features memory-bench --bin memory_bench -- bench/repos/fastapi
-cargo run --release --features memory-bench --bin memory_bench -- bench/repos/hono
-cargo run --release --features memory-bench --bin memory_bench -- bench/repos/redis
-cargo run --release --features memory-bench --bin memory_bench -- bench/repos/leveldb
-cargo run --release --features memory-bench --bin memory_bench -- bench/repos/gin
-cargo run --release --features memory-bench --bin memory_bench -- bench/repos/guava
+# All repos
+cargo run --release --features memory-bench --bin memory_bench
+
+# One or more repos by name
+cargo run --release --features memory-bench --bin memory_bench -- bats
+cargo run --release --features memory-bench --bin memory_bench -- ripgrep fastapi
 ```
 
 **Query latency** (Criterion, saves baseline for regression tracking):
 
 ```bash
+# All repos
 cargo bench --bench queries
+
+# One repo (Criterion's built-in filter)
+cargo bench --bench queries -- bats
+cargo bench --bench queries -- "ripgrep|gin"
 ```
 
 **Indexing throughput** (Criterion):

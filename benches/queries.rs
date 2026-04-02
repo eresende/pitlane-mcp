@@ -28,6 +28,7 @@ const REPOS: &[&str] = &[
     "bench/repos/leveldb",
     "bench/repos/gin",
     "bench/repos/guava",
+    "bench/repos/bats",
 ];
 
 struct Setup {
@@ -91,8 +92,27 @@ fn prepare(path: &str, rt: &Runtime) -> Option<Setup> {
         })
         .collect();
 
+    // Fall back to functions for languages without struct/class (e.g. Bash).
     if candidates.is_empty() {
-        eprintln!("No struct/class symbols found in {path}");
+        candidates = index
+            .symbols
+            .values()
+            .filter(|s| matches!(s.kind, SymbolKind::Function))
+            .filter_map(|s| {
+                let sym_bytes = s.byte_end.saturating_sub(s.byte_start);
+                if sym_bytes == 0 {
+                    return None;
+                }
+                let file_bytes = fs::metadata(&*s.file)
+                    .map(|m| m.len() as usize)
+                    .unwrap_or(0);
+                Some((s, file_bytes))
+            })
+            .collect();
+    }
+
+    if candidates.is_empty() {
+        eprintln!("No symbols found in {path}");
         return None;
     }
 

@@ -40,14 +40,25 @@ clone_if_missing leveldb  https://github.com/google/leveldb.git     1.23
 clone_if_missing gin      https://github.com/gin-gonic/gin.git      v1.10.0
 # Java baseline: Google core libraries, rich mix of classes, interfaces, and generics
 clone_if_missing guava    https://github.com/google/guava.git       v33.4.8
+# Bash baseline: popular Bash testing framework, idiomatic multi-file shell scripts
+clone_if_missing bats     https://github.com/bats-core/bats-core.git v1.11.1
 echo ""
 echo "Done. Run benchmarks with:"
+echo ""
+echo "  # Memory, disk, and token efficiency (all repos):"
+echo "  cargo run --release --features memory-bench --bin memory_bench"
+echo "  # Memory, disk, and token efficiency (one or more repos by name):"
+echo "  cargo run --release --features memory-bench --bin memory_bench -- hono"
+echo "  cargo run --release --features memory-bench --bin memory_bench -- ripgrep fastapi"
+echo ""
+echo "  # Indexing throughput — Criterion (all repos):"
 echo "  cargo bench --bench indexing"
+echo "  # Indexing throughput — Criterion (one or more repos):"
+echo "  cargo bench --bench indexing -- hono"
+echo "  cargo bench --bench indexing -- \"ripgrep|gin\""
+echo ""
+echo "  # Query latency — Criterion (all repos):"
 echo "  cargo bench --bench queries"
-echo "  cargo run --features memory-bench --bin memory_bench -- bench/repos/ripgrep"
-echo "  cargo run --features memory-bench --bin memory_bench -- bench/repos/fastapi"
-echo "  cargo run --features memory-bench --bin memory_bench -- bench/repos/hono"
-echo "  cargo run --features memory-bench --bin memory_bench -- bench/repos/redis"
-echo "  cargo run --features memory-bench --bin memory_bench -- bench/repos/leveldb"
-echo "  cargo run --features memory-bench --bin memory_bench -- bench/repos/gin"
-echo "  cargo run --features memory-bench --bin memory_bench -- bench/repos/guava"
+echo "  # Query latency — Criterion (one or more repos):"
+echo "  cargo bench --bench queries -- hono"
+echo "  cargo bench --bench queries -- \"ripgrep|gin\""

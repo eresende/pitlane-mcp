@@ -11,9 +11,10 @@
 /// undercount the true first-run peak.
 ///
 /// Usage:
-///   cargo run --bin memory_bench -- <project_path>
-///   cargo run --bin memory_bench -- bench/repos/ripgrep
-///   cargo run --bin memory_bench -- bench/repos/fastapi
+///   cargo run --features memory-bench --bin memory_bench              # run all known repos
+///   cargo run --features memory-bench --bin memory_bench -- ripgrep   # by name
+///   cargo run --features memory-bench --bin memory_bench -- ripgrep fastapi bats  # multiple
+///   cargo run --features memory-bench --bin memory_bench -- bench/repos/ripgrep   # by path
 use pitlane_mcp::{
     indexer::language::SymbolKind,
     tools::index_project::{index_project, load_project_index, IndexProjectParams},
@@ -60,13 +61,45 @@ fn peak_rss_kb() -> Option<u64> {
 /// Number of indexing runs used for timing statistics.
 const TIMING_RUNS: usize = 5;
 
-fn main() {
-    let path = std::env::args().nth(1).unwrap_or_else(|| {
-        eprintln!("Usage: memory_bench <project_path>");
-        eprintln!("  e.g. cargo run --bin memory_bench -- bench/repos/ripgrep");
-        std::process::exit(1);
-    });
+/// Known benchmark repos. Used when resolving short names and when running all repos.
+const KNOWN_REPOS: &[(&str, &str)] = &[
+    ("ripgrep", "bench/repos/ripgrep"),
+    ("fastapi", "bench/repos/fastapi"),
+    ("hono", "bench/repos/hono"),
+    ("redis", "bench/repos/redis"),
+    ("leveldb", "bench/repos/leveldb"),
+    ("gin", "bench/repos/gin"),
+    ("guava", "bench/repos/guava"),
+    ("bats", "bench/repos/bats"),
+];
 
+fn resolve_path(arg: &str) -> String {
+    // If the arg contains a path separator it's already a path.
+    if arg.contains('/') || arg.contains('\\') {
+        return arg.to_string();
+    }
+    // Otherwise look it up in the known repos list.
+    KNOWN_REPOS
+        .iter()
+        .find(|(name, _)| *name == arg)
+        .map(|(_, path)| path.to_string())
+        .unwrap_or_else(|| arg.to_string())
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let paths: Vec<String> = if args.is_empty() {
+        KNOWN_REPOS.iter().map(|(_, p)| p.to_string()).collect()
+    } else {
+        args.iter().map(|a| resolve_path(a)).collect()
+    };
+
+    for path in paths {
+        run_bench(&path);
+    }
+}
+
+fn run_bench(path: &str) {
     let rt = Runtime::new().expect("Failed to create tokio runtime");
 
     let mut times_ms: Vec<u128> = Vec::with_capacity(TIMING_RUNS);
@@ -77,7 +110,7 @@ fn main() {
         let wall_start = Instant::now();
         let result = rt
             .block_on(index_project(IndexProjectParams {
-                path: path.clone(),
+                path: path.to_string(),
                 exclude: None,
                 force: Some(true), // always re-index for a clean measurement
                 max_files: None,
