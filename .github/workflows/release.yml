@@ -73,6 +73,7 @@ jobs:
           Compress-Archive -Path target/release/pitlane-mcp.exe, target/release/pitlane.exe -DestinationPath ${{ matrix.artifact }}
 
       - name: Upload to GitHub release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
