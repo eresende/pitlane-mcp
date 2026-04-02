@@ -10,6 +10,29 @@ keywords = ["mcp", "tree-sitter", "ast", "code-intelligence", "ai"]
 categories = ["development-tools", "command-line-utilities"]
 exclude = ["bench/", "CLAUDE.md", "TODO.md", ".kiro/"]
 
+[package.metadata.binstall]
+bin-dir = "{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides."x86_64-unknown-linux-gnu"]
+pkg-url = "{ repo }/releases/download/v{ version }/pitlane-mcp-linux-x86_64.tar.gz"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides."aarch64-unknown-linux-gnu"]
+pkg-url = "{ repo }/releases/download/v{ version }/pitlane-mcp-linux-aarch64.tar.gz"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides."x86_64-apple-darwin"]
+pkg-url = "{ repo }/releases/download/v{ version }/pitlane-mcp-macos-x86_64.tar.gz"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides."aarch64-apple-darwin"]
+pkg-url = "{ repo }/releases/download/v{ version }/pitlane-mcp-macos-aarch64.tar.gz"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides."x86_64-pc-windows-msvc"]
+pkg-url = "{ repo }/releases/download/v{ version }/pitlane-mcp-windows-x86_64.zip"
+pkg-fmt = "zip"
+
 [lib]
 name = "pitlane_mcp"
 path = "src/lib.rs"
