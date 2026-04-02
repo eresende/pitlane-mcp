@@ -17,7 +17,20 @@ permissions:
   contents: write
 
 jobs:
+  create-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release if it doesn't exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          gh release create "$TAG" --title "$TAG" --generate-notes || true
+
   build:
+    needs: create-release
     name: Build / ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
