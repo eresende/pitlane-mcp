@@ -72,6 +72,7 @@ tree-sitter-c = "0.23"
 tree-sitter-cpp = "0.23"
 tree-sitter-go = "0.23"
 tree-sitter-java = "0.23"
+tree-sitter-bash = "0.25"
 notify = "8"
 bincode = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive", "rc"] }

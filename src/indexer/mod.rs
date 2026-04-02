@@ -1,3 +1,4 @@
+pub mod bash;
 pub mod c;
 pub mod cpp;
 pub mod go;
@@ -249,6 +250,7 @@ impl Indexer {
             language::Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
             language::Language::Go => tree_sitter_go::LANGUAGE.into(),
             language::Language::Java => tree_sitter_java::LANGUAGE.into(),
+            language::Language::Bash => tree_sitter_bash::LANGUAGE.into(),
             language::Language::TypeScript => {
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if ext == "tsx" {
@@ -376,6 +378,8 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "hxx"
             | "go"
             | "java"
+            | "sh"
+            | "bash"
     )
 }
 

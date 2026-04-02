@@ -2,7 +2,7 @@
 
 ## In Progress
 
-### Distribution
+### Language support
 
 ## Planned
 
@@ -27,7 +27,7 @@ _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor,
 
 ### Language support
 
-- [ ] **Bash** — `tree-sitter-bash` exists on crates.io; useful for indexing shell scripts, dotfiles, and DevOps repos
+- [x] **Bash** — `tree-sitter-bash` exists on crates.io; useful for indexing shell scripts, dotfiles, and DevOps repos
 - [x] **Java** — `tree-sitter-java` exists on crates.io; high-value target with large existing corpus of open-source Java projects
 - [x] **Go** — `tree-sitter-go` exists on crates.io; high-value target given Go's prevalence in backend codebases
 - [ ] **C#** — `tree-sitter-c-sharp` exists on crates.io; common in enterprise and game dev (Unity)
