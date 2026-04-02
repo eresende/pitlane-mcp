@@ -6,7 +6,7 @@ Token-efficient code intelligence MCP server. Indexes a codebase once using tree
 
 ## Why
 
-AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), and **19×** on Python ([FastAPI](https://github.com/fastapi/fastapi)).
+AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), and **20×** on Python ([FastAPI](https://github.com/fastapi/fastapi)).
 
 ## Features
 
@@ -278,24 +278,28 @@ Benchmarks use seven pinned open-source projects as test corpora: [ripgrep 14.1.
 
 > **Note:** pitlane-mcp is under active development. New language support and token-efficiency optimizations land frequently, so these numbers are updated with each release and may change significantly between versions.
 
+**Test environment:** AMD Ryzen 9 9950X (16 cores / 32 threads), 32 GB RAM, NVMe SSD.
+
 ### Results
 
 | Metric | ripgrep | FastAPI | Hono | Redis | LevelDB | Gin | Guava |
 |---|---|---|---|---|---|---|---|
-| Indexing time (min / median, 5 runs) | 36 ms / 40 ms | 65 ms / 66 ms | 37 ms / 37 ms | 147 ms / 151 ms | 21 ms / 22 ms | 17 ms / 17 ms | 338 ms / 340 ms |
-| Peak RAM (first-run) | 39.3 MB | 36.0 MB | 30.8 MB | 89.3 MB | 22.2 MB | 20.2 MB | 205.3 MB |
-| Index size on disk | 1.1 MB | 1.6 MB | 275 KB | 3.9 MB | 397 KB | 354 KB | 28.4 MB |
-| Token efficiency — median | **532×** | **19×** | **53×** | **133×** | **418×** | **125×** | **112×** |
+| Indexing time (min / median, 5 runs) | 26 ms / 28 ms | 32 ms / 34 ms | 17 ms / 18 ms | 103 ms / 104 ms | 10 ms / 12 ms | 11 ms / 11 ms | 239 ms / 246 ms |
+| Peak RAM (first-run) | 40.1 MB | 37.8 MB | 31.3 MB | 94.1 MB | 24.1 MB | 21.9 MB | 201.9 MB |
+| Index size on disk | 1.1 MB | 1.6 MB | 275 KB | 3.9 MB | 398 KB | 354 KB | 28.4 MB |
+| Token efficiency — median | **532×** | **20×** | **53×** | **133×** | **418×** | **125×** | **112×** |
 | Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in 26 KB) | 3.2× (`Schema`, 4.8 KB in 15.4 KB) | 1.4× (`RequestHeader`, 4.9 KB in 6.9 KB) | 5.1× (`redisServer`, 37.6 KB in 190 KB) | 34.4× (`TestWritableFile`, 0.5 KB in 15.9 KB) | 6.5× (`Engine`, 3.7 KB in 23.8 KB) | 1.2× (`Network`, 18.6 KB in 22.9 KB) |
-| `search_symbols` latency | 164 µs | 302 µs | 43 µs | 918 µs | 49 µs | 61.6 µs | 91 µs |
-| `get_symbol` latency | 9.0 µs | 11.5 µs | 13.9 µs | 23.7 µs | 15.9 µs | 10.1 µs | 15.9 µs |
-| `get_file_outline` latency | 78 µs | 17.5 µs | 37 µs | 583 µs | 74 µs | 57.3 µs | 37 µs |
-| `get_project_outline` latency | 318 µs | 1.67 ms | 278 µs | 1.91 ms | 240 µs | 155 µs | 17.7 ms |
-| `find_usages` latency | 25.6 ms | 16.0 ms | 104.9 ms | 37.5 ms | 18.0 ms | 0.45 ms | 9.1 ms |
+| `search_symbols` latency | 144 µs | 30 µs | 36 µs | 673 µs | 61 µs | 47 µs | 65 µs |
+| `get_symbol` latency | 3.4 µs | 3.8 µs | 3.8 µs | 10.8 µs | 2.6 µs | 3.5 µs | 6.8 µs |
+| `get_file_outline` latency | 96 µs | 52 µs | 5.0 µs | 1.06 ms | 72 µs | 59 µs | 33 µs |
+| `get_project_outline` latency | 362 µs | 1.93 ms | 273 µs | 2.24 ms | 227 µs | 150 µs | 24.5 ms |
+| `find_usages` latency | 19.7 ms | 29.6 ms | 11.7 ms | 29.7 ms | 2.0 ms | 139 µs | 3.3 ms |
 
 Token efficiency is the ratio of full-file size to symbol size — how many times cheaper fetching a symbol is versus reading the whole file. Measured across all struct/class/interface/type-alias symbols; median is the typical case.
 
-> Redis's high `search_symbols` and `get_file_outline` latencies reflect its 14,591 symbols (4× more than any other corpus) and the `src/server.h` benchmark file being a 190 KB header dense with declarations. LevelDB's 418× median reflects C++ class body trimming: inline method bodies are stripped from the indexed symbol, leaving only the class header. FastAPI's worst-case symbol is `Schema`, a large Pydantic model; the Python median of 19× is representative of normal usage. `find_usages` latency for Hono, Redis, and LevelDB reflects full AST search across all their TypeScript, C, and C++ source files respectively. Gin's sub-millisecond `find_usages` reflects its compact 92-file codebase. Guava's worst case of 1.2× is the `Network` interface — a 18.6 KB file of pure abstract method signatures that cannot be trimmed (interface bodies are never trimmed since their signatures are the API contract); the 112× median across all classes is representative of normal usage. Guava's high `get_project_outline` latency (17.7 ms) and large index size (28.4 MB) reflect its 56,804 symbols — the largest corpus by a factor of 4×.
+> Query latencies are median wall-clock times for a single tool call against a warm in-memory index (no disk I/O, no re-indexing). Measured with Criterion over 100–1,000+ samples depending on the operation.
+>
+> Redis's high `search_symbols` and `get_file_outline` latencies reflect its 14,591 symbols (4× more than any other corpus) and the `src/server.h` benchmark file being a 190 KB header dense with declarations. LevelDB's 418× median reflects C++ class body trimming: inline method bodies are stripped from the indexed symbol, leaving only the class header. FastAPI's worst-case symbol is `Schema`, a large Pydantic model; the Python median of 20× is representative of normal usage. `find_usages` latency for Hono, Redis, and LevelDB reflects full AST search across all their TypeScript, C, and C++ source files respectively. Gin's sub-millisecond `find_usages` reflects its compact 92-file codebase. Guava's worst case of 1.2× is the `Network` interface — a 18.6 KB file of pure abstract method signatures that cannot be trimmed (interface bodies are never trimmed since their signatures are the API contract); the 112× median across all classes is representative of normal usage. Guava's high `get_project_outline` latency (24.5 ms) and large index size (28.4 MB) reflect its 56,804 symbols — the largest corpus by a factor of 4×.
 
 ### Running the benchmarks
 
