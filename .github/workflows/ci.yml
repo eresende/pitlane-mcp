@@ -20,12 +20,19 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux x86_64
+            target: ''
           - os: ubuntu-24.04-arm
             name: Linux ARM64
+            target: ''
           - os: macos-latest
             name: macOS Apple Silicon
+            target: ''
+          - os: macos-latest
+            name: macOS x86_64
+            target: x86_64-apple-darwin
           - os: windows-latest
             name: Windows x86_64
+            target: ''
 
     steps:
       - uses: actions/checkout@v6
@@ -40,11 +47,15 @@ jobs:
         if: runner.os == 'Windows'
         run: Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo", "$env:GITHUB_WORKSPACE\target"
 
+      - name: Add Rust target (macOS x86_64 cross-compile)
+        if: matrix.target != ''
+        run: rustup target add ${{ matrix.target }}
+
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --verbose ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --verbose ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
 
   fmt:
     name: Rustfmt
