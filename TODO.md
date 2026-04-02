@@ -44,7 +44,7 @@ _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor,
 
 - [x] **Publish to crates.io** — project is stable enough at v0.3.x; publish `pitlane-mcp` to the registry
 - [x] **Binary releases via GitHub Actions** — build Linux (x86\_64, aarch64), macOS (x86\_64, Apple Silicon), and Windows (x86\_64) binaries on tag push, attach to GitHub releases
-- [ ] **Homebrew formula** — makes installation trivial for macOS users: `brew install pitlane-mcp`
+- [x] **Homebrew formula** — makes installation trivial for macOS users: `brew install pitlane-mcp`
 - [x] **`cargo-binstall` manifest** — allows `cargo binstall pitlane-mcp` to pull pre-built binaries instead of compiling from source
 
 ## Done

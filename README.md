@@ -36,6 +36,13 @@ TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are automatically ski
 
 Download a pre-built binary from [GitHub Releases](https://github.com/eresende/pitlane-mcp/releases/latest) for Linux (x86\_64, aarch64), macOS (x86\_64, Apple Silicon), and Windows (x86\_64).
 
+Or install via Homebrew (macOS):
+
+```bash
+brew tap eresende/pitlane-mcp
+brew install pitlane-mcp
+```
+
 Or install via [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall) (pulls pre-built binaries, no compilation needed):
 
 ```bash
