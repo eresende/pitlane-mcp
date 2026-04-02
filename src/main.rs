@@ -31,7 +31,7 @@ pub struct SearchSymbolsRequest {
     pub query: String,
     /// Filter by SymbolKind (e.g. "method", "trait")
     pub kind: Option<String>,
-    /// Filter by language ("rust", "python", "javascript", "typescript", "c", "cpp", "go", "java", "bash")
+    /// Filter by language ("rust", "python", "javascript", "typescript", "c", "cpp", "go", "java", "bash", "csharp")
     pub language: Option<String>,
     /// Glob pattern to restrict search to specific files
     pub file: Option<String>,

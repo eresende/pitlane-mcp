@@ -49,10 +49,11 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             "go" => Ok(Language::Go),
             "java" => Ok(Language::Java),
             "bash" | "sh" => Ok(Language::Bash),
+            "csharp" | "c#" | "cs" => Ok(Language::CSharp),
             other => Err(ToolError::InvalidArgument {
                 param: "language".to_string(),
                 message: format!(
-                    "Unknown language '{}'. Supported: rust, python, javascript, typescript, c, cpp, go, java, bash",
+                    "Unknown language '{}'. Supported: rust, python, javascript, typescript, c, cpp, go, java, bash, csharp",
                     other
                 ),
             }),

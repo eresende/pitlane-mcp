@@ -15,6 +15,7 @@ pub enum Language {
     Go,
     Java,
     Bash,
+    CSharp,
 }
 
 impl std::fmt::Display for Language {
@@ -29,6 +30,7 @@ impl std::fmt::Display for Language {
             Language::Go => write!(f, "go"),
             Language::Java => write!(f, "java"),
             Language::Bash => write!(f, "bash"),
+            Language::CSharp => write!(f, "csharp"),
         }
     }
 }

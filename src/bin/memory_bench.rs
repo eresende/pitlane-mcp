@@ -71,6 +71,7 @@ const KNOWN_REPOS: &[(&str, &str)] = &[
     ("gin", "bench/repos/gin"),
     ("guava", "bench/repos/guava"),
     ("bats", "bench/repos/bats"),
+    ("newtonsoft", "bench/repos/newtonsoft"),
 ];
 
 fn resolve_path(arg: &str) -> String {

@@ -1,6 +1,7 @@
 use crate::indexer::bash::BashParser;
 use crate::indexer::c::CParser;
 use crate::indexer::cpp::CppParser;
+use crate::indexer::csharp::CSharpParser;
 use crate::indexer::go::GoParser;
 use crate::indexer::java::JavaParser;
 use crate::indexer::javascript::JavaScriptParser;
@@ -20,5 +21,6 @@ pub fn build_default_registry() -> Vec<Box<dyn LanguageParser>> {
         Box::new(GoParser),
         Box::new(JavaParser),
         Box::new(BashParser),
+        Box::new(CSharpParser),
     ]
 }

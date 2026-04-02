@@ -42,6 +42,8 @@ clone_if_missing gin      https://github.com/gin-gonic/gin.git      v1.10.0
 clone_if_missing guava    https://github.com/google/guava.git       v33.4.8
 # Bash baseline: popular Bash testing framework, idiomatic multi-file shell scripts
 clone_if_missing bats     https://github.com/bats-core/bats-core.git v1.11.1
+# C# baseline: most popular C# JSON library, rich mix of classes, interfaces, generics
+clone_if_missing newtonsoft https://github.com/JamesNK/Newtonsoft.Json.git 13.0.3
 echo ""
 echo "Done. Run benchmarks with:"
 echo ""
