@@ -67,6 +67,10 @@ jobs:
       - name: Cache build artifacts
         uses: Swatinem/rust-cache@v2
 
+      - name: Disable Windows Defender on build directories
+        if: runner.os == 'Windows'
+        run: Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo", "$env:GITHUB_WORKSPACE\target"
+
       - name: Add Rust target (macOS cross-compile)
         if: matrix.target != ''
         run: rustup target add ${{ matrix.target }}
