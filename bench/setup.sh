@@ -44,6 +44,8 @@ clone_if_missing guava    https://github.com/google/guava.git       v33.4.8
 clone_if_missing bats     https://github.com/bats-core/bats-core.git v1.11.1
 # C# baseline: most popular C# JSON library, rich mix of classes, interfaces, generics
 clone_if_missing newtonsoft https://github.com/JamesNK/Newtonsoft.Json.git 13.0.3
+# Ruby baseline: de-facto Ruby linter, hundreds of cop classes and modules
+clone_if_missing rubocop    https://github.com/rubocop/rubocop.git          v1.65.0
 echo ""
 echo "Done. Run benchmarks with:"
 echo ""
