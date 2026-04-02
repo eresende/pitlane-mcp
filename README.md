@@ -6,7 +6,7 @@ Token-efficient code intelligence MCP server. Indexes a codebase once using tree
 
 ## Why
 
-AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), and **20×** on Python ([FastAPI](https://github.com/fastapi/fastapi)).
+AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **20×** on Python ([FastAPI](https://github.com/fastapi/fastapi)), and Bash ([bats-core](https://github.com/bats-core/bats-core))¹.
 
 ## Features
 
