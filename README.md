@@ -31,6 +31,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 | Java | `.java` | class, interface, enum, method |
 | C# | `.cs` | class, struct, interface, enum, method, type alias |
 | Bash | `.sh`, `.bash` | function |
+| Ruby | `.rb` | class, module, method |
 
 TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are automatically skipped.
 

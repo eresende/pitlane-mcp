@@ -8,6 +8,7 @@ pub mod javascript;
 pub mod language;
 pub mod python;
 pub mod registry;
+pub mod ruby;
 pub mod rust;
 pub mod typescript;
 
@@ -247,12 +248,6 @@ impl Indexer {
             language::Language::Rust => tree_sitter_rust::LANGUAGE.into(),
             language::Language::Python => tree_sitter_python::LANGUAGE.into(),
             language::Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-            language::Language::C => tree_sitter_c::LANGUAGE.into(),
-            language::Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
-            language::Language::Go => tree_sitter_go::LANGUAGE.into(),
-            language::Language::Java => tree_sitter_java::LANGUAGE.into(),
-            language::Language::Bash => tree_sitter_bash::LANGUAGE.into(),
-            language::Language::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
             language::Language::TypeScript => {
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                 if ext == "tsx" {
@@ -261,6 +256,13 @@ impl Indexer {
                     tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
                 }
             }
+            language::Language::C => tree_sitter_c::LANGUAGE.into(),
+            language::Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
+            language::Language::Go => tree_sitter_go::LANGUAGE.into(),
+            language::Language::Java => tree_sitter_java::LANGUAGE.into(),
+            language::Language::Bash => tree_sitter_bash::LANGUAGE.into(),
+            language::Language::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            language::Language::Ruby => tree_sitter_ruby::LANGUAGE.into(),
         };
         ts_parser.set_language(&ts_lang)?;
 
@@ -383,6 +385,7 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "sh"
             | "bash"
             | "cs"
+            | "rb"
     )
 }
 
@@ -617,6 +620,31 @@ mod tests {
         assert!(
             !names.contains(&"math"),
             "namespace itself should not be a symbol"
+        );
+    }
+
+    #[test]
+    fn test_index_project_ruby_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("greeter.rb"),
+            b"module Greetable\n  def greet(name)\n  end\nend\n\nclass Greeter\n  include Greetable\n\n  def self.create\n  end\nend\n",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"Greetable"), "module should be extracted");
+        assert!(
+            names.contains(&"greet"),
+            "instance method should be extracted"
+        );
+        assert!(names.contains(&"Greeter"), "class should be extracted");
+        assert!(
+            names.contains(&"create"),
+            "singleton method should be extracted"
         );
     }
 
