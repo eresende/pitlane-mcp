@@ -48,6 +48,7 @@ path = "src/bin/pitlane.rs"
 [[bin]]
 name = "memory_bench"
 path = "src/bin/memory_bench.rs"
+required-features = ["memory-bench"]
 
 [[bench]]
 name = "indexing"
@@ -56,6 +57,9 @@ harness = false
 [[bench]]
 name = "queries"
 harness = false
+
+[features]
+memory-bench = []
 
 [dependencies]
 rmcp = { version = "1.3", features = ["server", "transport-io"] }

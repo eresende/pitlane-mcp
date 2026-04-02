@@ -312,13 +312,13 @@ bash bench/setup.sh
 **Memory, disk, and token efficiency** (single binary, human-readable output):
 
 ```bash
-cargo run --release --bin memory_bench -- bench/repos/ripgrep
-cargo run --release --bin memory_bench -- bench/repos/fastapi
-cargo run --release --bin memory_bench -- bench/repos/hono
-cargo run --release --bin memory_bench -- bench/repos/redis
-cargo run --release --bin memory_bench -- bench/repos/leveldb
-cargo run --release --bin memory_bench -- bench/repos/gin
-cargo run --release --bin memory_bench -- bench/repos/guava
+cargo run --release --features memory-bench --bin memory_bench -- bench/repos/ripgrep
+cargo run --release --features memory-bench --bin memory_bench -- bench/repos/fastapi
+cargo run --release --features memory-bench --bin memory_bench -- bench/repos/hono
+cargo run --release --features memory-bench --bin memory_bench -- bench/repos/redis
+cargo run --release --features memory-bench --bin memory_bench -- bench/repos/leveldb
+cargo run --release --features memory-bench --bin memory_bench -- bench/repos/gin
+cargo run --release --features memory-bench --bin memory_bench -- bench/repos/guava
 ```
 
 **Query latency** (Criterion, saves baseline for regression tracking):
