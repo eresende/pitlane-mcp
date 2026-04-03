@@ -19,6 +19,7 @@ pub enum Language {
     Ruby,
     Swift,
     ObjC,
+    Php,
 }
 
 impl std::fmt::Display for Language {
@@ -37,6 +38,7 @@ impl std::fmt::Display for Language {
             Language::Ruby => write!(f, "ruby"),
             Language::Swift => write!(f, "swift"),
             Language::ObjC => write!(f, "objc"),
+            Language::Php => write!(f, "php"),
         }
     }
 }

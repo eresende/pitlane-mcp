@@ -7,6 +7,7 @@ pub mod java;
 pub mod javascript;
 pub mod language;
 pub mod objc;
+pub mod php;
 pub mod python;
 pub mod registry;
 pub mod ruby;
@@ -267,6 +268,7 @@ impl Indexer {
             language::Language::Ruby => tree_sitter_ruby::LANGUAGE.into(),
             language::Language::Swift => tree_sitter_swift::LANGUAGE.into(),
             language::Language::ObjC => tree_sitter_objc::LANGUAGE.into(),
+            language::Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
         };
         ts_parser.set_language(&ts_lang)?;
 
