@@ -6,11 +6,11 @@ Token-efficient code intelligence MCP server. Indexes a codebase once using tree
 
 ## Why
 
-AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **65×** on C# ([Newtonsoft.Json](https://github.com/JamesNK/Newtonsoft.Json)), **61×** on Ruby ([RuboCop](https://github.com/rubocop/rubocop)), **54×** on Objective-C ([SDWebImage](https://github.com/SDWebImage/SDWebImage)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **52×** on Swift ([SwiftLint](https://github.com/realm/SwiftLint)), **20×** on Python ([FastAPI](https://github.com/fastapi/fastapi)), and Bash ([bats-core](https://github.com/bats-core/bats-core))¹.
+AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **65×** on C# ([Newtonsoft.Json](https://github.com/JamesNK/Newtonsoft.Json)), **61×** on Ruby ([RuboCop](https://github.com/rubocop/rubocop)), **54×** on Objective-C ([SDWebImage](https://github.com/SDWebImage/SDWebImage)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **52×** on Swift ([SwiftLint](https://github.com/realm/SwiftLint)), **20×** on Python ([FastAPI](https://github.com/fastapi/fastapi)), **80×** on PHP ([Laravel](https://github.com/laravel/framework)), and Bash ([bats-core](https://github.com/bats-core/bats-core))¹.
 
 ## Features
 
-- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, Swift, Objective-C, and Bash source into structured symbols
+- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, and Bash source into structured symbols
 - **Ten MCP tools** for navigation: outline, search, fetch, line-range fetch, find usages, index stats, usage stats
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
@@ -34,6 +34,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 | Ruby | `.rb` | class, module, method |
 | Swift | `.swift` | class, struct, enum, protocol, method, function, init, type alias |
 | Objective-C | `.m`, `.mm` | class, protocol, method, function, type alias |
+| PHP | `.php` | class, interface, enum, method, function |
 
 TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are automatically skipped.
 
