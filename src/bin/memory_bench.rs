@@ -92,14 +92,36 @@ fn resolve_path(arg: &str) -> String {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+
+    // When spawned as a child process by ourselves, run the bench directly so
+    // each corpus gets its own isolated VmHWM reading.
+    if args.first().map(|s| s.as_str()) == Some("--_bench-child") {
+        let path = args.get(1).expect("--_bench-child requires a path argument");
+        run_bench(path);
+        return;
+    }
+
     let paths: Vec<String> = if args.is_empty() {
         KNOWN_REPOS.iter().map(|(_, p)| p.to_string()).collect()
     } else {
         args.iter().map(|a| resolve_path(a)).collect()
     };
 
+    // Spawn a fresh subprocess per corpus so memory does not accumulate across
+    // runs and each VmHWM reading reflects only that corpus.
+    let exe = std::env::current_exe().expect("cannot determine executable path");
     for path in paths {
-        run_bench(&path);
+        let status = std::process::Command::new(&exe)
+            .arg("--_bench-child")
+            .arg(&path)
+            .status()
+            .unwrap_or_else(|e| {
+                eprintln!("Failed to spawn child for {path}: {e}");
+                std::process::exit(1);
+            });
+        if !status.success() {
+            std::process::exit(status.code().unwrap_or(1));
+        }
     }
 }
 
