@@ -10,7 +10,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 
 ## Features
 
-- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, and Bash source into structured symbols
+- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, and Bash source into structured symbols
 - **Ten MCP tools** for navigation: outline, search, fetch, line-range fetch, find usages, index stats, usage stats
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
@@ -35,6 +35,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 | Swift | `.swift` | class, struct, enum, protocol, method, function, init, type alias |
 | Objective-C | `.m`, `.mm` | class, protocol, method, function, type alias |
 | PHP | `.php` | class, interface, enum, method, function |
+| Zig | `.zig` | function, method, struct, enum, const |
 
 TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are automatically skipped.
 
@@ -403,7 +404,7 @@ pitlane-mcp is a fully local tool with no network calls. The following design pr
 `index_project`, `find_usages`, and `watch_project` accept any path accessible to the running process — there is no allowlist or project-root confinement. An AI agent (or a prompt-injected instruction) can call these tools with sensitive directories such as `~/.ssh`, `~/.config`, or `/etc`.
 
 Mitigating factors:
-- Only files with recognized source extensions are indexed or read (`.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.c`, `.cpp`, `.h`, `.hpp`, `.go`, `.swift`, `.m`, `.mm`, etc.). Most sensitive files — SSH keys, certificates, `.env` files — have no matching extension and are silently skipped.
+- Only files with recognized source extensions are indexed or read (`.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.c`, `.cpp`, `.h`, `.hpp`, `.go`, `.swift`, `.m`, `.mm`, `.php`, `.zig`, etc.). Most sensitive files — SSH keys, certificates, `.env` files — have no matching extension and are silently skipped.
 - Symbolic links are never followed (`follow_links: false` in all directory walks).
 - Files larger than 1 MiB are skipped.
 

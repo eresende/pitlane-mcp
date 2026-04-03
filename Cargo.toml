@@ -92,6 +92,7 @@ clap = { version = "4", features = ["derive"] }
 tree-sitter-swift = "0.7.1"
 tree-sitter-objc = "3.0.2"
 tree-sitter-php = "0.24"
+tree-sitter-zig = "1.1.2"
 
 [dev-dependencies]
 tempfile = "3"

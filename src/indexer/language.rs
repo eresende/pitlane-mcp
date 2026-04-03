@@ -20,6 +20,7 @@ pub enum Language {
     Swift,
     ObjC,
     Php,
+    Zig,
 }
 
 impl std::fmt::Display for Language {
@@ -39,6 +40,7 @@ impl std::fmt::Display for Language {
             Language::Swift => write!(f, "swift"),
             Language::ObjC => write!(f, "objc"),
             Language::Php => write!(f, "php"),
+            Language::Zig => write!(f, "zig"),
         }
     }
 }

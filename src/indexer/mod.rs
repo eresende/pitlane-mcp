@@ -14,6 +14,7 @@ pub mod ruby;
 pub mod rust;
 pub mod swift;
 pub mod typescript;
+pub mod zig;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -269,6 +270,7 @@ impl Indexer {
             language::Language::Swift => tree_sitter_swift::LANGUAGE.into(),
             language::Language::ObjC => tree_sitter_objc::LANGUAGE.into(),
             language::Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+            language::Language::Zig => tree_sitter_zig::LANGUAGE.into(),
         };
         ts_parser.set_language(&ts_lang)?;
 
@@ -395,6 +397,8 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "swift"
             | "m"
             | "mm"
+            | "php"
+            | "zig"
     )
 }
 

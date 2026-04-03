@@ -13,6 +13,7 @@ use crate::indexer::ruby::RubyParser;
 use crate::indexer::rust::RustParser;
 use crate::indexer::swift::SwiftParser;
 use crate::indexer::typescript::TypeScriptParser;
+use crate::indexer::zig::ZigParser;
 
 pub fn build_default_registry() -> Vec<Box<dyn LanguageParser>> {
     vec![
@@ -30,5 +31,6 @@ pub fn build_default_registry() -> Vec<Box<dyn LanguageParser>> {
         Box::new(SwiftParser),
         Box::new(ObjCParser),
         Box::new(PhpParser),
+        Box::new(ZigParser),
     ]
 }
