@@ -189,7 +189,7 @@ mod tests {
 
         assert_eq!(index.symbol_count(), 1);
         assert_eq!(index.file_count(), 1);
-        assert!(index.by_file.get(&path).is_none());
+        assert!(!index.by_file.contains_key(&path));
         // Remaining symbol is from other.rs
         assert!(index.symbols.values().all(|s| *s.file != path));
     }
@@ -205,7 +205,7 @@ mod tests {
         assert!(index
             .by_kind
             .get(&SymbolKind::Struct)
-            .map_or(true, |v| v.is_empty()));
+            .is_none_or(|v| v.is_empty()));
     }
 
     #[test]

@@ -67,7 +67,7 @@ fn prepare(path: &str, rt: &Runtime) -> Option<Setup> {
     .ok()?;
 
     let index = load_project_index(path).ok()?;
-    let label = path.split('/').last().unwrap_or(path);
+    let label = path.split('/').next_back().unwrap_or(path);
 
     // Collect all struct/class/interface/type-alias symbols with their file sizes
     // for efficiency stats. Including TS kinds ensures TypeScript repos produce
@@ -137,7 +137,7 @@ fn prepare(path: &str, rt: &Runtime) -> Option<Setup> {
     let sym_bytes = target.byte_end.saturating_sub(target.byte_start);
 
     // Extract relative file path from the symbol_id (format: "rel/path::Name#kind").
-    let file_path = target.id.splitn(2, "::").next().unwrap_or("").to_string();
+    let file_path = target.id.split("::").next().unwrap_or("").to_string();
 
     println!("[{label}] benchmark symbol: {}", target.id);
     println!("[{label}] benchmark file:   {file_path}");
@@ -278,7 +278,7 @@ fn query_benchmarks(c: &mut Criterion) {
     let setups: Vec<(&str, Setup)> = REPOS
         .iter()
         .filter_map(|path| {
-            let label = path.split('/').last().unwrap_or(path);
+            let label = path.split('/').next_back().unwrap_or(path);
             prepare(path, &rt).map(|s| (label, s))
         })
         .collect();

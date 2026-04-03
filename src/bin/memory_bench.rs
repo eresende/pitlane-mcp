@@ -184,7 +184,7 @@ fn run_bench(path: &str) {
     // the ratio of its containing file size to the symbol's own byte span. Report
     // both the median (representative) and the largest-symbol value (worst case).
     // Interface and TypeAlias are included so TypeScript repos produce numbers.
-    let efficiency_line = match load_project_index(&path) {
+    let efficiency_line = match load_project_index(path) {
         Ok(index) => {
             let mut candidates: Vec<_> = index
                 .symbols
