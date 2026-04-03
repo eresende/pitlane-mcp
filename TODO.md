@@ -2,7 +2,16 @@
 
 ## In Progress
 
-### Optimizations _(current)_
+### Language support _(current)_
+
+- [ ] **PHP** — `tree-sitter-php` exists on crates.io; massive web ecosystem (WordPress, Laravel, Symfony)
+- [ ] **Lua** — `tree-sitter-lua` exists on crates.io; widely used in game scripting (Roblox, WoW) and embedded configs (Neovim, nginx)
+- [ ] **Zig** — `tree-sitter-zig` exists on crates.io; growing systems-programming language with increasing adoption
+- [ ] **Kotlin** — `tree-sitter-kotlin` exists on crates.io; primary language for Android development and popular on the JVM
+
+## COMPLETED!
+
+### Optimizations
 
 _These items improve token efficiency, usability, and observability of the MCP tools._
 
@@ -12,8 +21,6 @@ _These items improve token efficiency, usability, and observability of the MCP t
 - [x] **`get_symbol` by line range** — add a `get_lines` tool that fetches a file slice by line range for blocks that aren't named symbols _(Medium effort, meaningful impact)_
 - [x] **`get_index_stats` tool** — lightweight tool returning symbol counts by language and kind; lets agents orient in a new codebase without burning tokens on `get_project_outline` _(Medium effort, meaningful impact)_
 - [x] **`watch_project` status query** — add a way to check whether a watcher is already running; prevents duplicate watchers _(Medium effort, meaningful impact)_
-
-## COMPLETED!
 
 ### MCP host integration
 
