@@ -61,6 +61,18 @@ pub struct GetFileOutlineRequest {
     pub file_path: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetLinesRequest {
+    /// Project path (used to resolve relative file paths)
+    pub project: String,
+    /// File path, relative to project root or absolute
+    pub file_path: String,
+    /// First line to return, 1-indexed inclusive
+    pub line_start: u32,
+    /// Last line to return, 1-indexed inclusive (capped at 500 lines per call)
+    pub line_end: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GetProjectOutlineRequest {
     /// Project path
@@ -89,6 +101,14 @@ pub struct WatchProjectRequest {
     pub project: String,
     /// Pass true to stop an existing watcher (default: false)
     pub stop: Option<bool>,
+    /// Pass true to query watcher status without starting or stopping (default: false)
+    pub status_only: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetIndexStatsRequest {
+    /// Project path previously indexed
+    pub project: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -214,7 +234,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Fetch the source of one symbol by its stable ID — more token-efficient than reading the whole file.",
+        description = "Fetch the source of one symbol by its stable ID — more token-efficient than reading the whole file. Full-source responses include a references field listing symbols directly used by this symbol (calls, type references); no separate find_usages call needed to understand dependencies. Structs/classes/interfaces/traits default to signature-only (no body); pass signature_only=false to get full source and references.",
         meta = tool_meta("symbol implementation source code definition"),
         annotations(
             read_only_hint = true,
@@ -252,6 +272,29 @@ impl PitlaneMcp {
             file_path: req.file_path,
         };
         match tools::get_file_outline::get_file_outline(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Fetch a slice of a file by line range — use when you need a specific block that isn't a named symbol (e.g. a macro invocation, initializer table, or inline comment block). Returns source lines with total_file_lines so you can paginate. Capped at 500 lines per call; response includes truncated and next offset when the cap is hit.",
+        meta = tool_meta("lines file slice range source"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_lines(&self, Parameters(req): Parameters<GetLinesRequest>) -> String {
+        let params = tools::get_lines::GetLinesParams {
+            project: req.project,
+            file_path: req.file_path,
+            line_start: req.line_start,
+            line_end: req.line_end,
+        };
+        match tools::get_lines::get_lines(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }
@@ -306,7 +349,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Call after index_project to keep the index current as files change. Pass stop=true to stop the watcher.",
+        description = "Call after index_project to keep the index current as files change. Pass stop=true to stop the watcher. Pass status_only=true to check whether a watcher is already running without starting or stopping it.",
         meta = tool_meta("watch monitor file changes live"),
         annotations(
             read_only_hint = false,
@@ -319,8 +362,29 @@ impl PitlaneMcp {
         let params = tools::watch_project::WatchProjectParams {
             project: req.project,
             stop: req.stop,
+            status_only: req.status_only,
         };
         match tools::watch_project::watch_project(params, &self.watcher_registry).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Return symbol counts by language and kind for an indexed project — lightweight orientation tool. Use instead of get_project_outline when you only need aggregate numbers, not the file tree.",
+        meta = tool_meta("stats symbols language kind count index"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_index_stats(&self, Parameters(req): Parameters<GetIndexStatsRequest>) -> String {
+        let params = tools::get_index_stats::GetIndexStatsParams {
+            project: req.project,
+        };
+        match tools::get_index_stats::get_index_stats(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }

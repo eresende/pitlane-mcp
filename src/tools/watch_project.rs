@@ -12,6 +12,7 @@ use crate::watcher::ProjectWatcher;
 pub struct WatchProjectParams {
     pub project: String,
     pub stop: Option<bool>,
+    pub status_only: Option<bool>,
 }
 
 pub struct WatcherRegistry {
@@ -95,13 +96,28 @@ impl WatcherRegistry {
             })
         }
     }
+
+    pub fn status(&self, project: &str) -> Value {
+        let canonical = Path::new(project)
+            .canonicalize()
+            .unwrap_or_else(|_| Path::new(project).to_path_buf());
+        let key = canonical.display().to_string();
+        let watchers = self.watchers.lock().unwrap();
+        let watching = watchers.contains_key(&key);
+        json!({
+            "project": key,
+            "status": if watching { "watching" } else { "not_watching" },
+        })
+    }
 }
 
 pub async fn watch_project(
     params: WatchProjectParams,
     registry: &WatcherRegistry,
 ) -> anyhow::Result<Value> {
-    if params.stop.unwrap_or(false) {
+    if params.status_only.unwrap_or(false) {
+        Ok(registry.status(&params.project))
+    } else if params.stop.unwrap_or(false) {
         Ok(registry.stop(&params.project))
     } else {
         registry.watch(&params.project).await

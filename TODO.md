@@ -8,10 +8,10 @@ _These items improve token efficiency, usability, and observability of the MCP t
 
 - [x] **`get_symbol` signature-only default for classes** — when fetching a class/struct symbol, return signature + docstring only by default (no method bodies); agents almost always want the shape, not the implementation _(High value, low effort)_
 - [x] **`search_symbols` fuzzy matching** — add Levenshtein or trigram matching as a fallback when substring search returns no results; helps agents recover from slightly wrong names _(High value, low effort)_
-- [ ] **Symbol cross-references in `get_symbol` response** — include a `references` list of symbols directly used by the fetched symbol (calls, type references); saves a separate `find_usages` round-trip _(High value, low effort)_
-- [ ] **`get_symbol` by line range** — add a `get_lines` tool that fetches a file slice by line range for blocks that aren't named symbols _(Medium effort, meaningful impact)_
-- [ ] **`get_index_stats` tool** — lightweight tool returning symbol counts by language and kind; lets agents orient in a new codebase without burning tokens on `get_project_outline` _(Medium effort, meaningful impact)_
-- [ ] **`watch_project` status query** — add a way to check whether a watcher is already running; prevents duplicate watchers _(Medium effort, meaningful impact)_
+- [x] **Symbol cross-references in `get_symbol` response** — include a `references` list of symbols directly used by the fetched symbol (calls, type references); saves a separate `find_usages` round-trip _(High value, low effort)_
+- [x] **`get_symbol` by line range** — add a `get_lines` tool that fetches a file slice by line range for blocks that aren't named symbols _(Medium effort, meaningful impact)_
+- [x] **`get_index_stats` tool** — lightweight tool returning symbol counts by language and kind; lets agents orient in a new codebase without burning tokens on `get_project_outline` _(Medium effort, meaningful impact)_
+- [x] **`watch_project` status query** — add a way to check whether a watcher is already running; prevents duplicate watchers _(Medium effort, meaningful impact)_
 
 ## COMPLETED!
 

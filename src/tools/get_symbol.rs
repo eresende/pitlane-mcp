@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
 use serde_json::{json, Value};
@@ -5,6 +6,18 @@ use serde_json::{json, Value};
 use crate::error::ToolError;
 use crate::indexer::language::SymbolKind;
 use crate::tools::index_project::load_project_index;
+
+const MAX_REFERENCES: usize = 25;
+
+/// Extract unique identifier tokens from source text.
+/// Splits on anything that is not alphanumeric or `_`, filters tokens shorter
+/// than 3 chars (to skip operators, loop vars, etc.) and pure-numeric tokens.
+fn extract_identifiers(source: &str) -> HashSet<&str> {
+    source
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|s| s.len() >= 3 && !s.chars().all(|c| c.is_ascii_digit()))
+        .collect()
+}
 
 pub struct GetSymbolParams {
     pub project: String,
@@ -83,6 +96,28 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
 
     crate::stats::record_get_symbol(&params.project, false, full_source_bytes, full_source_bytes);
 
+    // Resolve cross-references: symbols whose name appears as an identifier in
+    // the source text.  Single pass over the index with O(1) set lookup each.
+    let identifiers = extract_identifiers(&source_text);
+    let mut refs: Vec<Value> = index
+        .symbols
+        .values()
+        .filter(|s| s.id != sym.id && identifiers.contains(s.name.as_str()))
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "name": s.name,
+                "kind": s.kind.to_string(),
+                "file": s.file.to_string_lossy().replace('\\', "/"),
+                "line_start": s.line_start,
+            })
+        })
+        .collect();
+    refs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    refs.dedup_by(|a, b| a["name"] == b["name"]);
+    let references_truncated = refs.len() > MAX_REFERENCES;
+    refs.truncate(MAX_REFERENCES);
+
     Ok(json!({
         "id": sym.id,
         "name": sym.name,
@@ -95,6 +130,8 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         "source": source_text,
         "signature": sym.signature,
         "doc": sym.doc,
+        "references": refs,
+        "references_truncated": references_truncated,
     }))
 }
 
@@ -296,5 +333,96 @@ mod tests {
             result.get("source").is_some(),
             "explicit signature_only=false should return full source"
         );
+    }
+
+    /// Full-source response includes a references list.
+    #[tokio::test]
+    async fn test_full_source_includes_references() {
+        let dir = TempDir::new().unwrap();
+        // helper() is called inside caller() — should appear in references.
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn helper() {}\npub fn caller() { helper(); }",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        // Find the caller symbol id.
+        let index = load_project_index(&project).unwrap();
+        let caller_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == "caller")
+            .map(|s| s.id.clone())
+            .expect("caller symbol must exist");
+
+        let result = get_symbol(GetSymbolParams {
+            project,
+            symbol_id: caller_id,
+            include_context: None,
+            signature_only: Some(false),
+        })
+        .await
+        .unwrap();
+
+        let refs = result["references"]
+            .as_array()
+            .expect("references must be an array");
+        let ref_names: Vec<&str> = refs.iter().map(|r| r["name"].as_str().unwrap()).collect();
+        assert!(
+            ref_names.contains(&"helper"),
+            "helper should appear in references, got: {ref_names:?}"
+        );
+    }
+
+    /// Signature-only response does NOT include a references field.
+    #[tokio::test]
+    async fn test_signature_only_has_no_references() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn helper() {}\npub fn caller() { helper(); }",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = first_symbol_id(&project);
+
+        let result = get_symbol(GetSymbolParams {
+            project,
+            symbol_id,
+            include_context: None,
+            signature_only: Some(true),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            result.get("references").is_none(),
+            "signature_only response should not include references"
+        );
+    }
+
+    /// extract_identifiers unit tests.
+    #[test]
+    fn test_extract_identifiers_basic() {
+        let ids = extract_identifiers("let foo = bar(baz);");
+        assert!(ids.contains("foo"));
+        assert!(ids.contains("bar"));
+        assert!(ids.contains("baz"));
+    }
+
+    #[test]
+    fn test_extract_identifiers_skips_short_tokens() {
+        let ids = extract_identifiers("if x > 0 { foo(); }");
+        assert!(!ids.contains("if"));
+        assert!(!ids.contains("x"));
+        assert!(ids.contains("foo"));
+    }
+
+    #[test]
+    fn test_extract_identifiers_skips_numbers() {
+        let ids = extract_identifiers("let x = 123 + foo;");
+        assert!(!ids.contains("123"));
+        assert!(ids.contains("foo"));
     }
 }
