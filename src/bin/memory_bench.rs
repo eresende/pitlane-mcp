@@ -96,7 +96,9 @@ fn main() {
     // When spawned as a child process by ourselves, run the bench directly so
     // each corpus gets its own isolated VmHWM reading.
     if args.first().map(|s| s.as_str()) == Some("--_bench-child") {
-        let path = args.get(1).expect("--_bench-child requires a path argument");
+        let path = args
+            .get(1)
+            .expect("--_bench-child requires a path argument");
         run_bench(path);
         return;
     }
