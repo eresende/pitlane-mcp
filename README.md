@@ -349,12 +349,13 @@ Each language is benchmarked against a pinned open-source project chosen for rea
 | [RuboCop v1.65.0](https://github.com/rubocop/rubocop) | Ruby | 1,539 | 9,122 | 55 ms | **61×** | 422 µs | 4.4 µs |
 | [SwiftLint 0.57.0](https://github.com/realm/SwiftLint) | Swift | 667 | 3,781 | 27 ms | **52×** | 159 µs | 6.1 µs |
 | [SDWebImage 5.19.0](https://github.com/SDWebImage/SDWebImage) | Objective-C | 271 | 1,564 | 17 ms | **54×** | 57 µs | 2.9 µs |
+| [Laravel v11.9.2](https://github.com/laravel/framework) | PHP | 2,331 | 26,127 | 156 ms | **80×** | 257 µs | 17.9 µs |
 
 ¹ Median of 5 runs. ² Token efficiency is the median ratio of full-file size to symbol size across all class/struct/interface/type-alias symbols — how many times cheaper `get_symbol` is versus reading the whole file. ³ Bash has no class/struct symbols, only functions, so the metric does not apply.
 
 > Query latencies are median wall-clock times for a single tool call against a warm in-memory index. Measured with Criterion over 100–1,000+ samples.
 >
-> Redis's high `search_symbols` latency reflects its 14,618 symbols and `src/server.h` being a 190 KB header dense with declarations. LevelDB's 418× median reflects C++ class body trimming — inline method bodies are stripped, leaving only the class header. FastAPI's 20× median is lower than most because Pydantic models are large by nature (`Schema` alone is 4.8 KB). Guava's 243 ms index time and 56,805 symbols make it the heaviest corpus by a factor of 4×; `get_project_outline` against it takes 18.6 ms vs. sub-2 ms for all others.
+> Redis's high `search_symbols` latency reflects its 14,618 symbols and `src/server.h` being a 190 KB header dense with declarations. LevelDB's 418× median reflects C++ class body trimming — inline method bodies are stripped, leaving only the class header. FastAPI's 20× median is lower than most because Pydantic models are large by nature (`Schema` alone is 4.8 KB). Guava's 243 ms index time and 56,805 symbols make it the heaviest corpus by a factor of 4×; `get_project_outline` against it takes 18.6 ms vs. sub-2 ms for all others. Laravel's `get_symbol` latency of 17.9 µs reflects the benchmark target being `Enumerable` — a 36 KB interface that is nearly the entire file it lives in; interface bodies are never trimmed since their signatures are the API contract.
 
 ### Running the benchmarks
 

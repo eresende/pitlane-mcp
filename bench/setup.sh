@@ -50,6 +50,8 @@ clone_if_missing rubocop    https://github.com/rubocop/rubocop.git          v1.6
 clone_if_missing swiftlint  https://github.com/realm/SwiftLint.git          0.57.0
 # Objective-C baseline: widely-used image loading library, rich mix of classes, protocols, and categories
 clone_if_missing sdwebimage https://github.com/SDWebImage/SDWebImage.git    5.19.0
+# PHP baseline: most popular PHP framework, rich mix of classes, interfaces, and traits
+clone_if_missing laravel    https://github.com/laravel/framework.git        v11.9.2
 echo ""
 echo "Done. Run benchmarks with:"
 echo ""
