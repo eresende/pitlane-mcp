@@ -11,7 +11,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 ## Features
 
 - **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, Swift, Objective-C, and Bash source into structured symbols
-- **Seven MCP tools** for navigation: outline, search, fetch, find usages
+- **Ten MCP tools** for navigation: outline, search, fetch, line-range fetch, find usages, index stats, usage stats
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
 - **Smart exclusions** — automatically skips `.venv`, `node_modules`, `target`, `__pycache__`, `dist`, `.next`, and other dependency/build trees at any depth
@@ -135,6 +135,8 @@ Search by name, kind, language, or file pattern.
 { "project": "/your/project", "query": "authenticate", "kind": "method" }
 ```
 
+If no exact substring match is found, falls back to trigram-based fuzzy matching automatically — results are ranked by similarity and the response includes `"fuzzy": true` so the agent knows the match is approximate.
+
 ### `get_symbol`
 
 Retrieve the source of one symbol by its stable ID. Much cheaper than reading the whole file.
@@ -145,8 +147,10 @@ Retrieve the source of one symbol by its stable ID. Much cheaper than reading th
 
 Optional parameters:
 
-- `signature_only: true` — returns only the indexed metadata (signature, doc comment, file, line range) with no file I/O. Use this when you only need to know what a symbol looks like, not its full body.
+- `signature_only` — returns only the indexed metadata (signature, doc comment, file, line range) with no file I/O. Defaults to `true` for struct, class, interface, and trait kinds; defaults to `false` for functions, methods, and everything else. Pass `signature_only: false` explicitly to get the full body of a container type.
 - `include_context: true` — includes 3 lines of surrounding source before and after the symbol.
+
+Full-source responses include a `references` field — a list of symbols whose names appear as identifiers in the source. This saves a separate `find_usages` call when you want to understand what a symbol depends on.
 
 > **Python/JS/TS/Java classes, C++ classes/structs, C# classes/structs, Ruby classes/modules, and Swift classes/structs**: for classes that contain methods, `get_symbol` returns only the class header (plus docstring for Python) — not the full body. Objective-C `@interface` blocks are returned at full extent (they contain only declarations, not implementations). Retrieve individual methods by their own symbol IDs (e.g. `models.py::MyClass::some_method#method`). Use `get_file_outline` to list all methods first.
 
@@ -176,6 +180,37 @@ Find all locations that reference a symbol by name.
 
 > AST-based reference search — only true identifier nodes are matched. String literals, comments, and substrings of longer identifiers are never returned.
 
+### `get_lines`
+
+Fetch a slice of a file by line range — useful for blocks that are not named symbols (macro invocation tables, initializer arrays, inline comment blocks, etc.).
+
+```json
+{ "project": "/your/project", "file_path": "fs/read_write.c", "line_start": 668, "line_end": 700 }
+```
+
+Returns `source`, `total_file_lines`, and the actual `line_end` after clamping. Capped at 500 lines per call; when the cap is hit the response includes `truncated: true` and a `truncated_note` with the next `line_start` to continue.
+
+### `get_index_stats`
+
+Return symbol counts by language and kind for an indexed project — lightweight orientation tool. Use instead of `get_project_outline` when you only need aggregate numbers, not the file tree.
+
+```json
+{ "project": "/your/project" }
+```
+
+Returns `total_files`, `total_symbols`, `by_language`, and `by_kind`, all sorted by count descending.
+
+### `get_usage_stats`
+
+Return token-efficiency statistics for `get_symbol` calls — how many tokens were saved by signature-only responses, persisted across sessions.
+
+```json
+{}
+{ "project": "/your/project" }
+```
+
+Returns global totals and a per-project breakdown with `get_symbol_calls`, `signature_only_applied`, `full_source_bytes`, `returned_bytes`, and `tokens_saved_approx`. Stats are stored at `~/.pitlane/stats.json`.
+
 ### `watch_project`
 
 Start incremental background re-indexing on file changes.
@@ -183,7 +218,10 @@ Start incremental background re-indexing on file changes.
 ```json
 { "project": "/your/project" }
 { "project": "/your/project", "stop": true }
+{ "project": "/your/project", "status_only": true }
 ```
+
+Pass `status_only: true` to check whether a watcher is already running without starting or stopping it — returns `"status": "watching"` or `"status": "not_watching"`.
 
 ## CLI
 
@@ -277,11 +315,14 @@ Use pitlane-mcp for all code lookups when available.
 
 1. Call index_project at the start of each session to load the index.
 2. Call watch_project right after indexing to keep the index up to date as files change.
-3. Before reading any file, call get_file_outline to see its structure.
-4. Use search_symbols to find functions/types by name.
-5. Use get_symbol to retrieve only the exact implementation you need.
+3. Before reading any file, call get_file_outline to see its structure without consuming its full content.
+4. Use search_symbols to find functions/types by name. If no exact match is found it falls back to fuzzy matching automatically.
+5. Use get_symbol to retrieve only the exact implementation you need, not the whole file.
 6. Use find_usages before refactoring any public symbol.
-7. Fall back to direct file reads only when editing or when full file context is required.
+7. For struct/class/interface/trait symbols, get_symbol returns signature-only by default. Pass signature_only=false to get the full body and the references list.
+8. Use get_lines to fetch a specific block by line range when it isn't a named symbol.
+9. Use get_index_stats to orient yourself in a new codebase without burning tokens on get_project_outline.
+10. Fall back to direct file reads only when editing or when full file context is genuinely required.
 ```
 
 ## Benchmarks
