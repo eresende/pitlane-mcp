@@ -34,6 +34,7 @@ const REPOS: &[&str] = &[
     "bench/repos/swiftlint",
     "bench/repos/sdwebimage",
     "bench/repos/laravel",
+    "bench/repos/zls",
 ];
 
 struct Setup {

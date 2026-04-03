@@ -75,6 +75,8 @@ const KNOWN_REPOS: &[(&str, &str)] = &[
     ("rubocop", "bench/repos/rubocop"),
     ("swiftlint", "bench/repos/swiftlint"),
     ("sdwebimage", "bench/repos/sdwebimage"),
+    ("laravel", "bench/repos/laravel"),
+    ("zls", "bench/repos/zls"),
 ];
 
 fn resolve_path(arg: &str) -> String {

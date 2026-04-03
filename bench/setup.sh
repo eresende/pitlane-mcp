@@ -52,6 +52,8 @@ clone_if_missing swiftlint  https://github.com/realm/SwiftLint.git          0.57
 clone_if_missing sdwebimage https://github.com/SDWebImage/SDWebImage.git    5.19.0
 # PHP baseline: most popular PHP framework, rich mix of classes, interfaces, and traits
 clone_if_missing laravel    https://github.com/laravel/framework.git        v11.9.2
+# Zig baseline: de-facto Zig language server, rich mix of structs, enums, and methods
+clone_if_missing zls        https://github.com/zigtools/zls.git             0.13.0
 echo ""
 echo "Done. Run benchmarks with:"
 echo ""
