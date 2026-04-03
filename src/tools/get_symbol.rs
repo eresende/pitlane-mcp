@@ -30,7 +30,13 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         sym.kind,
         SymbolKind::Struct | SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait
     );
-    if params.signature_only.unwrap_or(class_like) {
+    let use_signature_only = params.signature_only.unwrap_or(class_like);
+    let full_source_bytes = (sym.byte_end - sym.byte_start) as u64;
+
+    if use_signature_only {
+        let returned_bytes = sym.signature.as_deref().unwrap_or("").len() as u64
+            + sym.doc.as_deref().unwrap_or("").len() as u64;
+        crate::stats::record_get_symbol(&params.project, true, full_source_bytes, returned_bytes);
         return Ok(json!({
             "id": sym.id,
             "name": sym.name,
@@ -74,6 +80,8 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         file.read_exact(&mut buf)?;
         String::from_utf8_lossy(&buf).to_string()
     };
+
+    crate::stats::record_get_symbol(&params.project, false, full_source_bytes, full_source_bytes);
 
     Ok(json!({
         "id": sym.id,

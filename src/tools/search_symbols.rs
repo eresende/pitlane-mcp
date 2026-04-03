@@ -1,9 +1,32 @@
-use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::str::FromStr;
+
+use serde_json::{json, Value};
 
 use crate::error::ToolError;
 use crate::indexer::language::{Language, SymbolKind};
 use crate::tools::index_project::load_project_index;
+
+/// Build the set of character trigrams for `s` (lowercased).
+fn trigrams(s: &str) -> HashSet<[char; 3]> {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() < 3 {
+        return HashSet::new();
+    }
+    chars.windows(3).map(|w| [w[0], w[1], w[2]]).collect()
+}
+
+/// Jaccard similarity over trigrams: |A ∩ B| / |A ∪ B|. Returns 0.0 for very short strings.
+fn trigram_similarity(a: &str, b: &str) -> f32 {
+    let ta = trigrams(a);
+    let tb = trigrams(b);
+    if ta.is_empty() || tb.is_empty() {
+        return 0.0;
+    }
+    let intersection = ta.intersection(&tb).count();
+    let union = ta.len() + tb.len() - intersection;
+    intersection as f32 / union as f32
+}
 
 pub struct SearchSymbolsParams {
     pub project: String,
@@ -123,6 +146,81 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
         if candidates.len() > offset + limit {
             break;
         }
+    }
+
+    // If substring search found nothing, fall back to trigram fuzzy matching.
+    // Scan all symbols, score each by Jaccard trigram similarity, keep those
+    // above a minimum threshold, and return them ranked by score.
+    if candidates.is_empty() {
+        const FUZZY_THRESHOLD: f32 = 0.2;
+        let query_lower = params.query.to_lowercase();
+
+        let mut scored: Vec<(f32, Value)> = index
+            .symbols
+            .values()
+            .filter(|sym| {
+                if let Some(ref kf) = kind_filter {
+                    if &sym.kind != kf {
+                        return false;
+                    }
+                }
+                if let Some(ref lf) = lang_filter {
+                    if &sym.language != lf {
+                        return false;
+                    }
+                }
+                if let Some(ref matcher) = file_glob {
+                    let file_str = sym.file.to_string_lossy();
+                    let file_path: &std::path::Path = file_str.as_ref().as_ref();
+                    if !matcher.is_match(file_path) {
+                        return false;
+                    }
+                }
+                true
+            })
+            .filter_map(|sym| {
+                let name_lower = sym.name.to_lowercase();
+                let qualified_lower = sym.qualified.to_lowercase();
+                let score = trigram_similarity(&query_lower, &name_lower)
+                    .max(trigram_similarity(&query_lower, &qualified_lower));
+                if score >= FUZZY_THRESHOLD {
+                    Some((
+                        score,
+                        json!({
+                            "id": sym.id,
+                            "name": sym.name,
+                            "qualified": sym.qualified,
+                            "kind": sym.kind.to_string(),
+                            "language": sym.language.to_string(),
+                            "file": sym.file.to_string_lossy().replace('\\', "/"),
+                            "line_start": sym.line_start,
+                            "line_end": sym.line_end,
+                            "signature": sym.signature,
+                        }),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let fuzzy_page: Vec<_> = scored
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|(_, v)| v)
+            .collect();
+
+        return Ok(json!({
+            "results": fuzzy_page,
+            "count": fuzzy_page.len(),
+            "query": params.query,
+            "truncated": false,
+            "fuzzy": true,
+            "fuzzy_note": "No exact substring match found; results are fuzzy-matched by trigram similarity and ranked by score.",
+        }));
     }
 
     let truncated = candidates.len() > offset + limit;
@@ -801,5 +899,125 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), total, "no duplicate symbols across pages");
+    }
+
+    /// Fuzzy fallback triggers when the query has no substring match.
+    #[tokio::test]
+    async fn test_fuzzy_fallback_on_no_substring_match() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn get_file_outline() {}\npub fn search_symbols() {}",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        // "get_fiel_outline" has a transposition — no substring match, should fuzzy-match.
+        let result = search_symbols(SearchSymbolsParams {
+            project,
+            query: "get_fiel_outline".to_string(),
+            kind: None,
+            language: None,
+            file: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["fuzzy"], true, "should fall back to fuzzy mode");
+        assert!(
+            result["count"].as_u64().unwrap() > 0,
+            "fuzzy search should find get_file_outline"
+        );
+        let names: Vec<_> = result["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["name"].as_str().unwrap())
+            .collect();
+        assert!(
+            names.contains(&"get_file_outline"),
+            "get_file_outline should be in fuzzy results, got: {names:?}"
+        );
+    }
+
+    /// Exact substring match does NOT set fuzzy flag.
+    #[tokio::test]
+    async fn test_exact_match_does_not_set_fuzzy_flag() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn get_file_outline() {}").unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = search_symbols(SearchSymbolsParams {
+            project,
+            query: "get_file_outline".to_string(),
+            kind: None,
+            language: None,
+            file: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            result["fuzzy"].is_null(),
+            "exact match should not set fuzzy flag"
+        );
+        assert_eq!(result["count"].as_u64().unwrap(), 1);
+    }
+
+    /// Completely unrelated query returns empty results (below threshold), not fuzzy garbage.
+    #[tokio::test]
+    async fn test_fuzzy_below_threshold_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn get_file_outline() {}").unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = search_symbols(SearchSymbolsParams {
+            project,
+            query: "zzzzzzzzzz".to_string(),
+            kind: None,
+            language: None,
+            file: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result["count"].as_u64().unwrap(),
+            0,
+            "completely unrelated query should return no results"
+        );
+    }
+
+    /// trigram_similarity unit tests.
+    #[test]
+    fn test_trigram_similarity_identical() {
+        assert!((trigram_similarity("hello", "hello") - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_trigram_similarity_one_char_off() {
+        let score = trigram_similarity("get_symbol", "get_symbo");
+        assert!(score > 0.5, "one char off should score > 0.5, got {score}");
+    }
+
+    #[test]
+    fn test_trigram_similarity_unrelated() {
+        let score = trigram_similarity("abcdef", "xyz123");
+        assert!(
+            score < 0.2,
+            "unrelated strings should score < 0.2, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_trigram_similarity_short_string() {
+        // Strings shorter than 3 chars produce empty trigram sets → 0.0
+        assert_eq!(trigram_similarity("ab", "abc"), 0.0);
     }
 }

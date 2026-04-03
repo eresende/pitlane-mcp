@@ -91,6 +91,12 @@ pub struct WatchProjectRequest {
     pub stop: Option<bool>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetUsageStatsRequest {
+    /// Filter to a single project path (default: return all projects + global total)
+    pub project: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct PitlaneMcp {
     watcher_registry: Arc<WatcherRegistry>,
@@ -315,6 +321,26 @@ impl PitlaneMcp {
             stop: req.stop,
         };
         match tools::watch_project::watch_project(params, &self.watcher_registry).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Return token-efficiency statistics for get_symbol calls — how many tokens were saved by signature-only responses. Pass project to filter to one repo; omit for global totals across all projects.",
+        meta = tool_meta("tokens saved statistics usage efficiency"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_usage_stats(&self, Parameters(req): Parameters<GetUsageStatsRequest>) -> String {
+        let params = tools::get_usage_stats::GetUsageStatsParams {
+            project: req.project,
+        };
+        match tools::get_usage_stats::get_usage_stats(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }
