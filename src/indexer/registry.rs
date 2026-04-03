@@ -6,6 +6,7 @@ use crate::indexer::go::GoParser;
 use crate::indexer::java::JavaParser;
 use crate::indexer::javascript::JavaScriptParser;
 use crate::indexer::language::LanguageParser;
+use crate::indexer::objc::ObjCParser;
 use crate::indexer::python::PythonParser;
 use crate::indexer::ruby::RubyParser;
 use crate::indexer::rust::RustParser;
@@ -26,5 +27,6 @@ pub fn build_default_registry() -> Vec<Box<dyn LanguageParser>> {
         Box::new(CSharpParser),
         Box::new(RubyParser),
         Box::new(SwiftParser),
+        Box::new(ObjCParser),
     ]
 }

@@ -6,6 +6,7 @@ pub mod go;
 pub mod java;
 pub mod javascript;
 pub mod language;
+pub mod objc;
 pub mod python;
 pub mod registry;
 pub mod ruby;
@@ -265,6 +266,7 @@ impl Indexer {
             language::Language::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
             language::Language::Ruby => tree_sitter_ruby::LANGUAGE.into(),
             language::Language::Swift => tree_sitter_swift::LANGUAGE.into(),
+            language::Language::ObjC => tree_sitter_objc::LANGUAGE.into(),
         };
         ts_parser.set_language(&ts_lang)?;
 
@@ -389,6 +391,8 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "cs"
             | "rb"
             | "swift"
+            | "m"
+            | "mm"
     )
 }
 

@@ -33,7 +33,7 @@ _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor,
 - [x] **C#** — `tree-sitter-c-sharp` exists on crates.io; common in enterprise and game dev (Unity)
 - [x] **Ruby** — `tree-sitter-ruby` exists on crates.io; common in Rails codebases
 - [x] **Swift** — `tree-sitter-swift` exists on crates.io (v0.7.1); needs compatibility check against the current tree-sitter 0.26 dependency before adding
-- [ ] **Objective-C** — `tree-sitter-objc` exists on crates.io; less actively maintained, lower priority
+- [x] **Objective-C** — `tree-sitter-objc` exists on crates.io; less actively maintained, lower priority
 
 ### Token efficiency
 
