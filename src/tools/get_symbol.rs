@@ -3,6 +3,7 @@ use std::io::{Read, Seek, SeekFrom};
 use serde_json::{json, Value};
 
 use crate::error::ToolError;
+use crate::indexer::language::SymbolKind;
 use crate::tools::index_project::load_project_index;
 
 pub struct GetSymbolParams {
@@ -22,8 +23,14 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             symbol_id: params.symbol_id.clone(),
         })?;
 
-    // signature_only: return only index-cached fields, no file I/O required.
-    if params.signature_only.unwrap_or(false) {
+    // signature_only defaults to true for container kinds (struct, class,
+    // interface, trait) because agents almost always want the shape, not the
+    // full method bodies.  Pass signature_only=false explicitly to override.
+    let class_like = matches!(
+        sym.kind,
+        SymbolKind::Struct | SymbolKind::Class | SymbolKind::Interface | SymbolKind::Trait
+    );
+    if params.signature_only.unwrap_or(class_like) {
         return Ok(json!({
             "id": sym.id,
             "name": sym.name,
@@ -230,5 +237,56 @@ mod tests {
         assert!(tool_err
             .to_string()
             .contains("nonexistent::symbol#function"));
+    }
+
+    /// struct without explicit signature_only defaults to signature-only mode.
+    #[tokio::test]
+    async fn test_struct_defaults_to_signature_only() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub struct Foo { pub x: i32, pub y: i32 }",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = first_symbol_id(&project);
+
+        let result = get_symbol(GetSymbolParams {
+            project,
+            symbol_id,
+            include_context: None,
+            signature_only: None,
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            result.get("source").is_none(),
+            "struct should default to signature-only (no source)"
+        );
+        assert!(result["signature"].as_str().is_some());
+    }
+
+    /// passing signature_only=false on a struct overrides the default and returns source.
+    #[tokio::test]
+    async fn test_struct_signature_only_false_returns_source() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub struct Foo { pub x: i32 }").unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = first_symbol_id(&project);
+
+        let result = get_symbol(GetSymbolParams {
+            project,
+            symbol_id,
+            include_context: None,
+            signature_only: Some(false),
+        })
+        .await
+        .unwrap();
+
+        assert!(
+            result.get("source").is_some(),
+            "explicit signature_only=false should return full source"
+        );
     }
 }

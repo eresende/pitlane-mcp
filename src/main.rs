@@ -49,7 +49,7 @@ pub struct GetSymbolRequest {
     pub symbol_id: String,
     /// Also return up to 3 lines before/after (default: false)
     pub include_context: Option<bool>,
-    /// Return only the signature and docstring, skipping the full body (default: false)
+    /// Return only the signature and docstring, skipping the full body (default: true for struct/class/interface/trait, false otherwise)
     pub signature_only: Option<bool>,
 }
 
