@@ -46,6 +46,8 @@ clone_if_missing bats     https://github.com/bats-core/bats-core.git v1.11.1
 clone_if_missing newtonsoft https://github.com/JamesNK/Newtonsoft.Json.git 13.0.3
 # Ruby baseline: de-facto Ruby linter, hundreds of cop classes and modules
 clone_if_missing rubocop    https://github.com/rubocop/rubocop.git          v1.65.0
+# Swift baseline: de-facto Swift linter, hundreds of rule structs and protocol implementations
+clone_if_missing swiftlint  https://github.com/realm/SwiftLint.git          0.57.0
 echo ""
 echo "Done. Run benchmarks with:"
 echo ""

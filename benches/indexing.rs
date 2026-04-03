@@ -16,6 +16,7 @@ const REPOS: &[(&str, &str)] = &[
     ("bats", "bench/repos/bats"),
     ("newtonsoft", "bench/repos/newtonsoft"),
     ("rubocop", "bench/repos/rubocop"),
+    ("swiftlint", "bench/repos/swiftlint"),
 ];
 
 fn bench_index_project(c: &mut Criterion) {

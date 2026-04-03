@@ -31,6 +31,7 @@ const REPOS: &[&str] = &[
     "bench/repos/bats",
     "bench/repos/newtonsoft",
     "bench/repos/rubocop",
+    "bench/repos/swiftlint",
 ];
 
 struct Setup {
