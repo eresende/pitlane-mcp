@@ -327,7 +327,7 @@ Use pitlane-mcp for all code lookups when available.
 
 ## Benchmarks
 
-Benchmarks use twelve pinned open-source projects as test corpora: [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) (Rust, 101 files, 3,207 symbols), [FastAPI 0.115.6](https://github.com/fastapi/fastapi) (Python + JS docs, 1,290 files, 4,828 symbols), [Hono v4.7.4](https://github.com/honojs/hono) (TypeScript, 368 files, 992 symbols), [Redis 7.4.2](https://github.com/redis/redis) (C, 798 files, 14,618 symbols), [LevelDB 1.23](https://github.com/google/leveldb) (C++, 132 files, 1,529 symbols), [Gin v1.10.0](https://github.com/gin-gonic/gin) (Go, 92 files, 1,184 symbols), [Guava v33.4.8](https://github.com/google/guava) (Java, 3,273 files, 56,805 symbols), [Newtonsoft.Json 13.0.3](https://github.com/JamesNK/Newtonsoft.Json) (C#, 933 files, 7,284 symbols), [bats-core v1.11.1](https://github.com/bats-core/bats-core) (Bash, 54 files, 147 symbols), [RuboCop v1.65.0](https://github.com/rubocop/rubocop) (Ruby, 1,539 files, 9,122 symbols), [SwiftLint 0.57.0](https://github.com/realm/SwiftLint) (Swift, 667 files, 3,781 symbols), and [SDWebImage 5.19.0](https://github.com/SDWebImage/SDWebImage) (Objective-C, 271 files, 1,564 symbols).
+Each language is benchmarked against a pinned open-source project chosen for real-world representativeness. New corpora are added as language support grows.
 
 > **Note:** pitlane-mcp is under active development. New language support and token-efficiency optimizations land frequently, so these numbers are updated with each release and may change significantly between versions.
 
@@ -335,24 +335,26 @@ Benchmarks use twelve pinned open-source projects as test corpora: [ripgrep 14.1
 
 ### Results
 
-| Metric | ripgrep | FastAPI | Hono | Redis | LevelDB | Gin | Guava | Newtonsoft.Json | bats-core | RuboCop | SwiftLint | SDWebImage |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| Indexing time (min / median, 5 runs) | 26 ms / 27 ms | 32 ms / 33 ms | 17 ms / 18 ms | 80 ms / 116 ms | 11 ms / 13 ms | 10 ms / 11 ms | 213 ms / 243 ms | 81 ms / 84 ms | 2 ms / 2 ms | 53 ms / 55 ms | 25 ms / 27 ms | 16 ms / 17 ms |
-| Peak RAM (first-run) | 42.0 MB | 37.5 MB | 33.3 MB | 97.5 MB | 24.8 MB | 22.4 MB | 211.1 MB | 78.5 MB | 10.3 MB | 43.0 MB | 29.1 MB | 29.5 MB |
-| Index size on disk | 1.1 MB | 1.6 MB | 275 KB | 3.9 MB | 398 KB | 354 KB | 28.5 MB | 3.1 MB | 52.5 KB | 3.1 MB | 1.7 MB | 648 KB |
-| Token efficiency — median | **532×** | **20×** | **53×** | **133×** | **418×** | **125×** | **112×** | **65×** | N/A¹ | **61×** | **52×** | **54×** |
-| Token efficiency — worst case | 8.9× (`LowArgs`, 2.9 KB in 26 KB) | 3.2× (`Schema`, 4.8 KB in 15.4 KB) | 1.4× (`RequestHeader`, 4.9 KB in 6.9 KB) | 5.1× (`redisServer`, 37.6 KB in 190 KB) | 34.4× (`TestWritableFile`, 0.5 KB in 15.9 KB) | 6.5× (`Engine`, 3.7 KB in 23.8 KB) | 1.2× (`Network`, 18.6 KB in 22.9 KB) | 1.1× (`BenchmarkConstants`, 13.3 KB in 14.5 KB) | N/A¹ | 1.0× (`MethodCallWithArgsParentheses`, 8.7 KB in 8.8 KB) | 1.0× (`OpeningBraceRuleExamples`, 15.0 KB in 15.1 KB) | 3.9× (`ItemView`, 1.1 KB in 4.4 KB) |
-| `search_symbols` latency | 143 µs | 38 µs | 36 µs | 674 µs | 62 µs | 55 µs | 73 µs | 394 µs | 7.7 µs | 422 µs | 159 µs | 57 µs |
-| `get_symbol` latency | 3.2 µs | 3.6 µs | 3.6 µs | 10.4 µs | 2.5 µs | 3.3 µs | 6.4 µs | 5.3 µs | 3.5 µs | 4.4 µs | 6.1 µs | 2.9 µs |
-| `get_file_outline` latency | 77 µs | 43 µs | 4.8 µs | 664 µs | 57 µs | 48 µs | 27 µs | 2.7 µs | 17.3 µs | 44.5 µs | 2.7 µs | 6.4 µs |
-| `get_project_outline` latency | 326 µs | 1.61 ms | 250 µs | 1.82 ms | 209 µs | 131 µs | 18.6 ms | 1.72 ms | 40.1 µs | 1.85 ms | 1.1 ms | 221 µs |
-| `find_usages` latency | 18.4 ms | 28.7 ms | 11.3 ms | 28.4 ms | 1.95 ms | 139 µs | 3.3 ms | 938 µs | 433 µs | 1.53 ms | 787 µs | 813 µs |
+| Corpus | Language | Files | Symbols | Index time¹ | Token eff.² | `search_symbols` | `get_symbol` |
+|---|---|---|---|---|---|---|---|
+| [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) | Rust | 101 | 3,207 | 27 ms | **532×** | 143 µs | 3.2 µs |
+| [FastAPI 0.115.6](https://github.com/fastapi/fastapi) | Python | 1,290 | 4,828 | 33 ms | **20×** | 38 µs | 3.6 µs |
+| [Hono v4.7.4](https://github.com/honojs/hono) | TypeScript | 368 | 992 | 18 ms | **53×** | 36 µs | 3.6 µs |
+| [Redis 7.4.2](https://github.com/redis/redis) | C | 798 | 14,618 | 116 ms | **133×** | 674 µs | 10.4 µs |
+| [LevelDB 1.23](https://github.com/google/leveldb) | C++ | 132 | 1,529 | 13 ms | **418×** | 62 µs | 2.5 µs |
+| [Gin v1.10.0](https://github.com/gin-gonic/gin) | Go | 92 | 1,184 | 11 ms | **125×** | 55 µs | 3.3 µs |
+| [Guava v33.4.8](https://github.com/google/guava) | Java | 3,273 | 56,805 | 243 ms | **112×** | 73 µs | 6.4 µs |
+| [Newtonsoft.Json 13.0.3](https://github.com/JamesNK/Newtonsoft.Json) | C# | 933 | 7,284 | 84 ms | **65×** | 394 µs | 5.3 µs |
+| [bats-core v1.11.1](https://github.com/bats-core/bats-core) | Bash | 54 | 147 | 2 ms | N/A³ | 7.7 µs | 3.5 µs |
+| [RuboCop v1.65.0](https://github.com/rubocop/rubocop) | Ruby | 1,539 | 9,122 | 55 ms | **61×** | 422 µs | 4.4 µs |
+| [SwiftLint 0.57.0](https://github.com/realm/SwiftLint) | Swift | 667 | 3,781 | 27 ms | **52×** | 159 µs | 6.1 µs |
+| [SDWebImage 5.19.0](https://github.com/SDWebImage/SDWebImage) | Objective-C | 271 | 1,564 | 17 ms | **54×** | 57 µs | 2.9 µs |
 
-Token efficiency is the ratio of full-file size to symbol size — how many times cheaper fetching a symbol is versus reading the whole file. Measured across all struct/class/interface/type-alias symbols; median is the typical case. ¹ Bash has no struct/class symbols — only functions — so the metric does not apply.
+¹ Median of 5 runs. ² Token efficiency is the median ratio of full-file size to symbol size across all class/struct/interface/type-alias symbols — how many times cheaper `get_symbol` is versus reading the whole file. ³ Bash has no class/struct symbols, only functions, so the metric does not apply.
 
-> Query latencies are median wall-clock times for a single tool call against a warm in-memory index (no disk I/O, no re-indexing). Measured with Criterion over 100–1,000+ samples depending on the operation.
+> Query latencies are median wall-clock times for a single tool call against a warm in-memory index. Measured with Criterion over 100–1,000+ samples.
 >
-> Redis's high `search_symbols` and `get_file_outline` latencies reflect its 14,618 symbols (4× more than any other corpus) and the `src/server.h` benchmark file being a 190 KB header dense with declarations. LevelDB's 418× median reflects C++ class body trimming: inline method bodies are stripped from the indexed symbol, leaving only the class header. FastAPI's worst-case symbol is `Schema`, a large Pydantic model; the Python median of 20× is representative of normal usage. `find_usages` latency for Hono, Redis, and LevelDB reflects full AST search across all their TypeScript, C, and C++ source files respectively. Gin's sub-millisecond `find_usages` reflects its compact 92-file codebase. Guava's worst case of 1.2× is the `Network` interface — a 18.6 KB file of pure abstract method signatures that cannot be trimmed (interface bodies are never trimmed since their signatures are the API contract); the 112× median across all classes is representative of normal usage. Guava's high `get_project_outline` latency (18.6 ms) and large index size (28.5 MB) reflect its 56,805 symbols — the largest corpus by a factor of 4×. Newtonsoft.Json's worst case of 1.1× is `BenchmarkConstants` — a single file containing a large block of constant string data that is itself the entire class body, so there is nothing to trim. RuboCop's worst case of 1.0× is `MethodCallWithArgsParentheses` — a cop class that occupies virtually the entire file it lives in; the 61× median across all cop classes is representative of normal usage. SwiftLint's worst case of 1.0× is `OpeningBraceRuleExamples` — a struct that is a pure collection of string constants (rule violation examples) and occupies virtually the entire file; the 52× median across all rule structs is representative of normal usage. SDWebImage's worst case of 3.9× is `ItemView` — a small Swift struct in the bundled example app; the 54× median across the library's Objective-C classes is representative of normal usage.
+> Redis's high `search_symbols` latency reflects its 14,618 symbols and `src/server.h` being a 190 KB header dense with declarations. LevelDB's 418× median reflects C++ class body trimming — inline method bodies are stripped, leaving only the class header. FastAPI's 20× median is lower than most because Pydantic models are large by nature (`Schema` alone is 4.8 KB). Guava's 243 ms index time and 56,805 symbols make it the heaviest corpus by a factor of 4×; `get_project_outline` against it takes 18.6 ms vs. sub-2 ms for all others.
 
 ### Running the benchmarks
 
