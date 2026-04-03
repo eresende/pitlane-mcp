@@ -17,6 +17,7 @@ pub enum Language {
     Bash,
     CSharp,
     Ruby,
+    Swift,
 }
 
 impl std::fmt::Display for Language {
@@ -33,6 +34,7 @@ impl std::fmt::Display for Language {
             Language::Bash => write!(f, "bash"),
             Language::CSharp => write!(f, "csharp"),
             Language::Ruby => write!(f, "ruby"),
+            Language::Swift => write!(f, "swift"),
         }
     }
 }

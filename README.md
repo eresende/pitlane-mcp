@@ -10,7 +10,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 
 ## Features
 
-- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, and Bash source into structured symbols
+- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, Swift, and Bash source into structured symbols
 - **Seven MCP tools** for navigation: outline, search, fetch, find usages
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
@@ -32,6 +32,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 | C# | `.cs` | class, struct, interface, enum, method, type alias |
 | Bash | `.sh`, `.bash` | function |
 | Ruby | `.rb` | class, module, method |
+| Swift | `.swift` | class, struct, enum, protocol, method, function, init, type alias |
 
 TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are automatically skipped.
 
@@ -146,7 +147,7 @@ Optional parameters:
 - `signature_only: true` — returns only the indexed metadata (signature, doc comment, file, line range) with no file I/O. Use this when you only need to know what a symbol looks like, not its full body.
 - `include_context: true` — includes 3 lines of surrounding source before and after the symbol.
 
-> **Python/JS/TS/Java classes and C++ classes/structs**: for classes that contain methods, `get_symbol` returns only the class header (plus docstring for Python) — not the full body. Retrieve individual methods by their own symbol IDs (e.g. `models.py::MyClass::some_method#method`). Use `get_file_outline` to list all methods first.
+> **Python/JS/TS/Java classes, C++ classes/structs, C# classes/structs, Ruby classes/modules, and Swift classes/structs**: for classes that contain methods, `get_symbol` returns only the class header (plus docstring for Python) — not the full body. Retrieve individual methods by their own symbol IDs (e.g. `models.py::MyClass::some_method#method`). Use `get_file_outline` to list all methods first.
 
 ### `get_file_outline`
 
@@ -356,7 +357,7 @@ pitlane-mcp is a fully local tool with no network calls. The following design pr
 `index_project`, `find_usages`, and `watch_project` accept any path accessible to the running process — there is no allowlist or project-root confinement. An AI agent (or a prompt-injected instruction) can call these tools with sensitive directories such as `~/.ssh`, `~/.config`, or `/etc`.
 
 Mitigating factors:
-- Only files with recognized source extensions are indexed or read (`.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.c`, `.cpp`, `.h`, `.hpp`, `.go`, etc.). Most sensitive files — SSH keys, certificates, `.env` files — have no matching extension and are silently skipped.
+- Only files with recognized source extensions are indexed or read (`.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.c`, `.cpp`, `.h`, `.hpp`, `.go`, `.swift`, etc.). Most sensitive files — SSH keys, certificates, `.env` files — have no matching extension and are silently skipped.
 - Symbolic links are never followed (`follow_links: false` in all directory walks).
 - Files larger than 1 MiB are skipped.
 

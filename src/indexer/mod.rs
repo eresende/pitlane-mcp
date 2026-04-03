@@ -10,6 +10,7 @@ pub mod python;
 pub mod registry;
 pub mod ruby;
 pub mod rust;
+pub mod swift;
 pub mod typescript;
 
 use std::collections::HashMap;
@@ -263,6 +264,7 @@ impl Indexer {
             language::Language::Bash => tree_sitter_bash::LANGUAGE.into(),
             language::Language::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
             language::Language::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+            language::Language::Swift => tree_sitter_swift::LANGUAGE.into(),
         };
         ts_parser.set_language(&ts_lang)?;
 
@@ -386,6 +388,7 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "bash"
             | "cs"
             | "rb"
+            | "swift"
     )
 }
 
