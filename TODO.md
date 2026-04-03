@@ -1,10 +1,6 @@
 # Roadmap
 
-## In Progress
-
-### Language support
-
-## Planned
+## COMPLETED!
 
 ### MCP host integration
 

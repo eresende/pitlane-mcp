@@ -17,6 +17,7 @@ const REPOS: &[(&str, &str)] = &[
     ("newtonsoft", "bench/repos/newtonsoft"),
     ("rubocop", "bench/repos/rubocop"),
     ("swiftlint", "bench/repos/swiftlint"),
+    ("sdwebimage", "bench/repos/sdwebimage"),
 ];
 
 fn bench_index_project(c: &mut Criterion) {

@@ -48,6 +48,8 @@ clone_if_missing newtonsoft https://github.com/JamesNK/Newtonsoft.Json.git 13.0.
 clone_if_missing rubocop    https://github.com/rubocop/rubocop.git          v1.65.0
 # Swift baseline: de-facto Swift linter, hundreds of rule structs and protocol implementations
 clone_if_missing swiftlint  https://github.com/realm/SwiftLint.git          0.57.0
+# Objective-C baseline: widely-used image loading library, rich mix of classes, protocols, and categories
+clone_if_missing sdwebimage https://github.com/SDWebImage/SDWebImage.git    5.19.0
 echo ""
 echo "Done. Run benchmarks with:"
 echo ""
