@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use walkdir::WalkDir;
 
 use crate::error::ToolError;
-use crate::indexer::is_supported_extension;
+use crate::indexer::{is_supported_extension, tree_sitter_language_for_extension};
 use crate::tools::index_project::load_project_index;
 
 pub struct FindUsagesParams {
@@ -118,16 +118,9 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
 fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize, String)>> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-    let ts_lang: tree_sitter::Language = match ext {
-        "rs" => tree_sitter_rust::LANGUAGE.into(),
-        "py" => tree_sitter_python::LANGUAGE.into(),
-        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
-        "ts" | "mts" | "cts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
-        "c" | "h" => tree_sitter_c::LANGUAGE.into(),
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => tree_sitter_cpp::LANGUAGE.into(),
-        "kt" | "kts" => tree_sitter_kotlin_ng::LANGUAGE.into(),
-        _ => return Ok(vec![]),
+    let ts_lang = match tree_sitter_language_for_extension(ext) {
+        Some(lang) => lang,
+        None => return Ok(vec![]),
     };
 
     // Skip oversized files (same guard as the indexer)
@@ -506,6 +499,77 @@ mod tests {
         );
         let hits = search_file_ast(&path, "Greeter").unwrap();
         assert!(hits.is_empty(), "comment mention must not be returned");
+    }
+
+    // ── Luau ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_luau_finds_definition_and_call() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "RotateTool.luau",
+            "local function SetRotation(cf: CFrame)\n    return cf\nend\n\nSetRotation(CFrame.new())\n",
+        );
+        let hits = search_file_ast(&path, "SetRotation").unwrap();
+        let lines: Vec<usize> = hits.iter().map(|(l, _, _)| *l).collect();
+        assert!(lines.contains(&1), "definition on line 1");
+        assert!(lines.contains(&5), "call on line 5");
+    }
+
+    #[tokio::test]
+    async fn test_find_usages_luau_finds_cross_file_call_sites() {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+
+        let dir = TempDir::new().unwrap();
+        write(
+            &dir,
+            "RotateTool.luau",
+            "local RotateTool = {}\n\nfunction RotateTool.SetRotation(cf: CFrame)\n    return cf\nend\n\nreturn RotateTool\n",
+        );
+        write(
+            &dir,
+            "Main.server.luau",
+            "local RotateTool = require(script.Parent.RotateTool)\n\nRotateTool.SetRotation(CFrame.new())\n",
+        );
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let sym_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == "SetRotation")
+            .map(|s| s.id.clone())
+            .expect("SetRotation must be indexed");
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        let usages = response["usages"].as_array().expect("usages must be an array");
+        assert!(
+            usages.iter().any(|usage| usage["file"] == "RotateTool.luau"),
+            "expected definition hit in RotateTool.luau, got: {usages:?}"
+        );
+        assert!(
+            usages
+                .iter()
+                .any(|usage| usage["file"] == "Main.server.luau"),
+            "expected cross-file call hit in Main.server.luau, got: {usages:?}"
+        );
     }
 
     // ── Early-exit across multiple files ────────────────────────────────────

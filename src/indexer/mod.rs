@@ -250,31 +250,9 @@ impl Indexer {
         let lang_parser = &self.parsers[parser_idx];
 
         let mut ts_parser = tree_sitter::Parser::new();
-        let ts_lang = match lang_parser.language() {
-            language::Language::Rust => tree_sitter_rust::LANGUAGE.into(),
-            language::Language::Python => tree_sitter_python::LANGUAGE.into(),
-            language::Language::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
-            language::Language::TypeScript => {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if ext == "tsx" {
-                    tree_sitter_typescript::LANGUAGE_TSX.into()
-                } else {
-                    tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
-                }
-            }
-            language::Language::C => tree_sitter_c::LANGUAGE.into(),
-            language::Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
-            language::Language::Go => tree_sitter_go::LANGUAGE.into(),
-            language::Language::Java => tree_sitter_java::LANGUAGE.into(),
-            language::Language::Bash => tree_sitter_bash::LANGUAGE.into(),
-            language::Language::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
-            language::Language::Ruby => tree_sitter_ruby::LANGUAGE.into(),
-            language::Language::Swift => tree_sitter_swift::LANGUAGE.into(),
-            language::Language::ObjC => tree_sitter_objc::LANGUAGE.into(),
-            language::Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
-            language::Language::Zig => tree_sitter_zig::LANGUAGE.into(),
-            language::Language::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
-            language::Language::Luau => tree_sitter_luau::LANGUAGE.into(),
+        let ts_lang = match tree_sitter_language_for_extension(ext) {
+            Some(lang) => lang,
+            None => return Ok(vec![]),
         };
         ts_parser.set_language(&ts_lang)?;
 
@@ -408,6 +386,33 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "luau"
             | "lua"
     )
+}
+
+/// Returns the tree-sitter language for a supported extension.
+/// Keep this in sync with `is_supported_extension` so indexing and usage search
+/// agree on which parser to use for each file type.
+pub fn tree_sitter_language_for_extension(ext: &str) -> Option<tree_sitter::Language> {
+    Some(match ext {
+        "rs" => tree_sitter_rust::LANGUAGE.into(),
+        "py" => tree_sitter_python::LANGUAGE.into(),
+        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
+        "ts" | "mts" | "cts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "c" | "h" => tree_sitter_c::LANGUAGE.into(),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => tree_sitter_cpp::LANGUAGE.into(),
+        "go" => tree_sitter_go::LANGUAGE.into(),
+        "java" => tree_sitter_java::LANGUAGE.into(),
+        "sh" | "bash" => tree_sitter_bash::LANGUAGE.into(),
+        "cs" => tree_sitter_c_sharp::LANGUAGE.into(),
+        "rb" => tree_sitter_ruby::LANGUAGE.into(),
+        "swift" => tree_sitter_swift::LANGUAGE.into(),
+        "m" | "mm" => tree_sitter_objc::LANGUAGE.into(),
+        "php" => tree_sitter_php::LANGUAGE_PHP.into(),
+        "zig" => tree_sitter_zig::LANGUAGE.into(),
+        "kt" | "kts" => tree_sitter_kotlin_ng::LANGUAGE.into(),
+        "luau" | "lua" => tree_sitter_luau::LANGUAGE.into(),
+        _ => return None,
+    })
 }
 
 pub fn is_excluded_dir_name(name: &str) -> bool {
