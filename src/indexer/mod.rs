@@ -7,6 +7,7 @@ pub mod java;
 pub mod javascript;
 pub mod kotlin;
 pub mod language;
+pub mod luau;
 pub mod objc;
 pub mod php;
 pub mod python;
@@ -273,6 +274,7 @@ impl Indexer {
             language::Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
             language::Language::Zig => tree_sitter_zig::LANGUAGE.into(),
             language::Language::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
+            language::Language::Luau => tree_sitter_luau::LANGUAGE.into(),
         };
         ts_parser.set_language(&ts_lang)?;
 
@@ -403,6 +405,8 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "zig"
             | "kt"
             | "kts"
+            | "luau"
+            | "lua"
     )
 }
 
@@ -514,6 +518,43 @@ mod tests {
 
         assert_eq!(file_count, 1);
         assert_eq!(index.symbol_count(), 2);
+    }
+
+    #[test]
+    fn test_index_project_luau_file() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("init.luau"),
+            b"local function greet()\nend\nexport type Point = { x: number, y: number }\n",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"greet"));
+        assert!(names.contains(&"Point"));
+    }
+
+    #[test]
+    fn test_index_project_lua_extension_uses_luau_parser() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("module.lua"),
+            b"function Greeter:speak()\nend\n",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let method = index
+            .symbols
+            .values()
+            .find(|s| s.name == "speak")
+            .expect("Luau method should be indexed");
+        assert_eq!(method.language, language::Language::Luau);
     }
 
     #[test]
