@@ -5,6 +5,7 @@ use crate::indexer::csharp::CSharpParser;
 use crate::indexer::go::GoParser;
 use crate::indexer::java::JavaParser;
 use crate::indexer::javascript::JavaScriptParser;
+use crate::indexer::kotlin::KotlinParser;
 use crate::indexer::language::LanguageParser;
 use crate::indexer::objc::ObjCParser;
 use crate::indexer::php::PhpParser;
@@ -32,5 +33,6 @@ pub fn build_default_registry() -> Vec<Box<dyn LanguageParser>> {
         Box::new(ObjCParser),
         Box::new(PhpParser),
         Box::new(ZigParser),
+        Box::new(KotlinParser),
     ]
 }

@@ -7,7 +7,7 @@
 - [x] **PHP** — `tree-sitter-php` exists on crates.io; massive web ecosystem (WordPress, Laravel, Symfony)
 - [ ] **Lua** — `tree-sitter-lua` exists on crates.io; widely used in game scripting (Roblox, WoW) and embedded configs (Neovim, nginx)
 - [x] **Zig** — `tree-sitter-zig` exists on crates.io; growing systems-programming language with increasing adoption
-- [ ] **Kotlin** — `tree-sitter-kotlin` exists on crates.io; primary language for Android development and popular on the JVM
+- [x] **Kotlin** — `tree-sitter-kotlin-ng` (v1.1.0); primary language for Android development and popular on the JVM
 
 ## COMPLETED!
 

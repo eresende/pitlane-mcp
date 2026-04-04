@@ -21,6 +21,7 @@ pub enum Language {
     ObjC,
     Php,
     Zig,
+    Kotlin,
 }
 
 impl std::fmt::Display for Language {
@@ -41,6 +42,7 @@ impl std::fmt::Display for Language {
             Language::ObjC => write!(f, "objc"),
             Language::Php => write!(f, "php"),
             Language::Zig => write!(f, "zig"),
+            Language::Kotlin => write!(f, "kotlin"),
         }
     }
 }

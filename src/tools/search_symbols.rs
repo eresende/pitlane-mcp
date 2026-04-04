@@ -76,10 +76,11 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             "ruby" | "rb" => Ok(Language::Ruby),
             "swift" => Ok(Language::Swift),
             "objc" | "objective-c" | "objectivec" => Ok(Language::ObjC),
+            "kotlin" | "kt" => Ok(Language::Kotlin),
             other => Err(ToolError::InvalidArgument {
                 param: "language".to_string(),
                 message: format!(
-                    "Unknown language '{}'. Supported: rust, python, javascript, typescript, c, cpp, go, java, bash, csharp, ruby, swift, objc",
+                    "Unknown language '{}'. Supported: rust, python, javascript, typescript, c, cpp, go, java, bash, csharp, ruby, swift, objc, kotlin",
                     other
                 ),
             }),

@@ -5,6 +5,7 @@ pub mod csharp;
 pub mod go;
 pub mod java;
 pub mod javascript;
+pub mod kotlin;
 pub mod language;
 pub mod objc;
 pub mod php;
@@ -271,6 +272,7 @@ impl Indexer {
             language::Language::ObjC => tree_sitter_objc::LANGUAGE.into(),
             language::Language::Php => tree_sitter_php::LANGUAGE_PHP.into(),
             language::Language::Zig => tree_sitter_zig::LANGUAGE.into(),
+            language::Language::Kotlin => tree_sitter_kotlin_ng::LANGUAGE.into(),
         };
         ts_parser.set_language(&ts_lang)?;
 
@@ -399,6 +401,8 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "mm"
             | "php"
             | "zig"
+            | "kt"
+            | "kts"
     )
 }
 

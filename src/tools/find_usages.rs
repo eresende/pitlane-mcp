@@ -126,6 +126,7 @@ fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize,
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         "c" | "h" => tree_sitter_c::LANGUAGE.into(),
         "cpp" | "cc" | "cxx" | "hpp" | "hxx" => tree_sitter_cpp::LANGUAGE.into(),
+        "kt" | "kts" => tree_sitter_kotlin_ng::LANGUAGE.into(),
         _ => return Ok(vec![]),
     };
 
