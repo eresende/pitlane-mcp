@@ -559,9 +559,13 @@ mod tests {
         .await
         .unwrap();
 
-        let usages = response["usages"].as_array().expect("usages must be an array");
+        let usages = response["usages"]
+            .as_array()
+            .expect("usages must be an array");
         assert!(
-            usages.iter().any(|usage| usage["file"] == "RotateTool.luau"),
+            usages
+                .iter()
+                .any(|usage| usage["file"] == "RotateTool.luau"),
             "expected definition hit in RotateTool.luau, got: {usages:?}"
         );
         assert!(

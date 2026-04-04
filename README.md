@@ -10,7 +10,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 
 ## Features
 
-- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Luau, and Bash source into structured symbols
+- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, and Bash source into structured symbols
 - **Ten MCP tools** for navigation: outline, search, fetch, line-range fetch, find usages, index stats, usage stats
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
@@ -36,7 +36,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 | Objective-C | `.m`, `.mm` | class, protocol, method, function, type alias |
 | PHP | `.php` | class, interface, enum, method, function |
 | Zig | `.zig` | function, method, struct, enum, const |
-| Luau | `.luau`, `.lua` | function, method, type alias |
+| Lua | `.luau`, `.lua` | function, method, type alias |
 | Kotlin | `.kt`, `.kts` | class, interface, enum, object, function, method, type alias |
 
 TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are automatically skipped.

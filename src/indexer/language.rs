@@ -22,7 +22,7 @@ pub enum Language {
     Php,
     Zig,
     Kotlin,
-    Luau,
+    Lua,
 }
 
 impl std::fmt::Display for Language {
@@ -44,7 +44,7 @@ impl std::fmt::Display for Language {
             Language::Php => write!(f, "php"),
             Language::Zig => write!(f, "zig"),
             Language::Kotlin => write!(f, "kotlin"),
-            Language::Luau => write!(f, "luau"),
+            Language::Lua => write!(f, "lua"),
         }
     }
 }
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(Language::C.to_string(), "c");
         assert_eq!(Language::Cpp.to_string(), "cpp");
         assert_eq!(Language::Kotlin.to_string(), "kotlin");
-        assert_eq!(Language::Luau.to_string(), "luau");
+        assert_eq!(Language::Lua.to_string(), "lua");
     }
 
     #[test]

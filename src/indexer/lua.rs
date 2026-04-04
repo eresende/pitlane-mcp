@@ -4,11 +4,11 @@ use tree_sitter::{Node, Tree};
 
 use crate::indexer::language::{make_symbol_id, Language, LanguageParser, Symbol, SymbolKind};
 
-pub struct LuauParser;
+pub struct LuaParser;
 
-impl LanguageParser for LuauParser {
+impl LanguageParser for LuaParser {
     fn language(&self) -> Language {
-        Language::Luau
+        Language::Lua
     }
 
     fn extensions(&self) -> &[&str] {
@@ -35,7 +35,7 @@ fn get_signature(source: &[u8], node: Node) -> Option<String> {
     Some(text.lines().next()?.trim_end().to_string())
 }
 
-/// Walk backwards through preceding siblings collecting contiguous Luau comments.
+/// Walk backwards through preceding siblings collecting contiguous Lua comments.
 fn get_doc_comment(source: &[u8], node: Node) -> Option<String> {
     let mut docs = Vec::new();
     let mut prev = node.prev_sibling();
@@ -73,7 +73,7 @@ fn push_symbol(
         name,
         qualified,
         kind,
-        language: Language::Luau,
+        language: Language::Lua,
         file: Arc::new(path.to_path_buf()),
         byte_start: node.start_byte(),
         byte_end: node.end_byte(),
@@ -270,7 +270,7 @@ mod tests {
             .set_language(&tree_sitter_luau::LANGUAGE.into())
             .unwrap();
         let tree = parser.parse(source, None).unwrap();
-        LuauParser.extract_symbols(source, &tree, Path::new(path))
+        LuaParser.extract_symbols(source, &tree, Path::new(path))
     }
 
     #[test]
@@ -358,9 +358,9 @@ mod tests {
     }
 
     #[test]
-    fn test_language_is_luau_for_lua_extension() {
+    fn test_language_is_lua_for_lua_extension() {
         let source = b"local function greet()\nend";
         let symbols = parse_and_extract(source, "test.lua");
-        assert_eq!(symbols[0].language, Language::Luau);
+        assert_eq!(symbols[0].language, Language::Lua);
     }
 }

@@ -7,7 +7,7 @@ pub mod java;
 pub mod javascript;
 pub mod kotlin;
 pub mod language;
-pub mod luau;
+pub mod lua;
 pub mod objc;
 pub mod php;
 pub mod python;
@@ -558,8 +558,8 @@ mod tests {
             .symbols
             .values()
             .find(|s| s.name == "speak")
-            .expect("Luau method should be indexed");
-        assert_eq!(method.language, language::Language::Luau);
+            .expect("Lua method should be indexed");
+        assert_eq!(method.language, language::Language::Lua);
     }
 
     #[test]

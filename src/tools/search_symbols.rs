@@ -79,11 +79,11 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             "kotlin" | "kt" => Ok(Language::Kotlin),
             "php" => Ok(Language::Php),
             "zig" => Ok(Language::Zig),
-            "luau" | "lua" => Ok(Language::Luau),
+            "luau" | "lua" => Ok(Language::Lua),
             other => Err(ToolError::InvalidArgument {
                 param: "language".to_string(),
                 message: format!(
-                    "Unknown language '{}'. Supported: rust, python, javascript, typescript, c, cpp, go, java, bash, csharp, ruby, swift, objc, php, zig, kotlin, luau",
+                    "Unknown language '{}'. Supported: rust, python, javascript, typescript, c, cpp, go, java, bash, csharp, ruby, swift, objc, php, zig, kotlin, lua",
                     other
                 ),
             }),
@@ -315,6 +315,58 @@ mod tests {
         assert_eq!(tool_err.code(), "INVALID_ARGUMENT");
         assert!(tool_err.to_string().contains("kind"));
         assert!(tool_err.to_string().contains("widget"));
+    }
+
+    #[tokio::test]
+    async fn test_language_filter_lua_matches_luau_files() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("RotateTool.luau"),
+            b"local function SetRotation()\nend\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let response = search_symbols(SearchSymbolsParams {
+            project,
+            query: "SetRotation".to_string(),
+            kind: None,
+            language: Some("lua".to_string()),
+            file: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(response["count"], 1);
+        assert_eq!(response["results"][0]["language"], "lua");
+    }
+
+    #[tokio::test]
+    async fn test_language_filter_luau_alias_maps_to_lua() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("RotateTool.luau"),
+            b"local function SetRotation()\nend\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let response = search_symbols(SearchSymbolsParams {
+            project,
+            query: "SetRotation".to_string(),
+            kind: None,
+            language: Some("luau".to_string()),
+            file: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(response["count"], 1);
+        assert_eq!(response["results"][0]["language"], "lua");
     }
 
     #[tokio::test]
