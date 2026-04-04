@@ -71,6 +71,11 @@ enum Command {
         #[arg(long)]
         sig_only: bool,
     },
+    /// Show index statistics (file/symbol counts by language and kind)
+    Stats {
+        /// Path to the indexed project
+        project: String,
+    },
 }
 
 #[tokio::main]
@@ -153,6 +158,11 @@ async fn main() -> anyhow::Result<()> {
                 signature_only: if sig_only { Some(true) } else { None },
             };
             tools::get_symbol::get_symbol(params).await?
+        }
+
+        Command::Stats { project } => {
+            let params = tools::get_index_stats::GetIndexStatsParams { project };
+            tools::get_index_stats::get_index_stats(params).await?
         }
     };
 
