@@ -54,6 +54,8 @@ clone_if_missing sdwebimage https://github.com/SDWebImage/SDWebImage.git    5.19
 clone_if_missing laravel    https://github.com/laravel/framework.git        v11.9.2
 # Zig baseline: de-facto Zig language server, rich mix of structs, enums, and methods
 clone_if_missing zls        https://github.com/zigtools/zls.git             0.13.0
+# Kotlin baseline: widely-used HTTP client, idiomatic Kotlin with classes, interfaces, and objects
+clone_if_missing okhttp     https://github.com/square/okhttp.git            parent-5.3.2
 echo ""
 echo "Done. Run benchmarks with:"
 echo ""

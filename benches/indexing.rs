@@ -20,6 +20,7 @@ const REPOS: &[(&str, &str)] = &[
     ("sdwebimage", "bench/repos/sdwebimage"),
     ("laravel", "bench/repos/laravel"),
     ("zls", "bench/repos/zls"),
+    ("okhttp", "bench/repos/okhttp"),
 ];
 
 fn bench_index_project(c: &mut Criterion) {
