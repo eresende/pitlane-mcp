@@ -1,14 +1,5 @@
 # Roadmap
 
-## In Progress
-
-### Language support _(current)_
-
-- [x] **PHP** — `tree-sitter-php` exists on crates.io; massive web ecosystem (WordPress, Laravel, Symfony)
-- [x] **Lua / Roblox Lua** — `tree-sitter-luau` exists on crates.io; covers modern Roblox `.luau` and `.lua` codebases
-- [x] **Zig** — `tree-sitter-zig` exists on crates.io; growing systems-programming language with increasing adoption
-- [x] **Kotlin** — `tree-sitter-kotlin-ng` (v1.1.0); primary language for Android development and popular on the JVM
-
 ## COMPLETED!
 
 ### Optimizations
@@ -43,6 +34,10 @@ _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor,
 
 ### Language support
 
+- [x] **PHP** — `tree-sitter-php` exists on crates.io; massive web ecosystem (WordPress, Laravel, Symfony)
+- [x] **Lua / Roblox Lua** — `tree-sitter-luau` exists on crates.io; covers modern Roblox `.luau` and `.lua` codebases
+- [x] **Zig** — `tree-sitter-zig` exists on crates.io; growing systems-programming language with increasing adoption
+- [x] **Kotlin** — `tree-sitter-kotlin-ng` (v1.1.0); primary language for Android development and popular on the JVM
 - [x] **Bash** — `tree-sitter-bash` exists on crates.io; useful for indexing shell scripts, dotfiles, and DevOps repos
 - [x] **Java** — `tree-sitter-java` exists on crates.io; high-value target with large existing corpus of open-source Java projects
 - [x] **Go** — `tree-sitter-go` exists on crates.io; high-value target given Go's prevalence in backend codebases
