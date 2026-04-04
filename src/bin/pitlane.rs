@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 use pitlane_mcp::tools;
 
 #[derive(Parser)]
-#[command(name = "pitlane", about = "pitlane-mcp code intelligence CLI")]
+#[command(name = "pitlane", about = "pitlane-mcp code intelligence CLI", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
