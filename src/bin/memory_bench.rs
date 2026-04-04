@@ -78,6 +78,7 @@ const KNOWN_REPOS: &[(&str, &str)] = &[
     ("laravel", "bench/repos/laravel"),
     ("zls", "bench/repos/zls"),
     ("okhttp", "bench/repos/okhttp"),
+    ("roact", "bench/repos/roact"),
 ];
 
 fn resolve_path(arg: &str) -> String {

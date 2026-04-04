@@ -6,7 +6,7 @@ Token-efficient code intelligence MCP server. Indexes a codebase once using tree
 
 ## Why
 
-AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **65×** on C# ([Newtonsoft.Json](https://github.com/JamesNK/Newtonsoft.Json)), **61×** on Ruby ([RuboCop](https://github.com/rubocop/rubocop)), **54×** on Objective-C ([SDWebImage](https://github.com/SDWebImage/SDWebImage)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **52×** on Swift ([SwiftLint](https://github.com/realm/SwiftLint)), **20×** on Python ([FastAPI](https://github.com/fastapi/fastapi)), **80×** on PHP ([Laravel](https://github.com/laravel/framework)), **801×** on Zig ([zls](https://github.com/zigtools/zls)), **54×** on Kotlin ([OkHttp](https://github.com/square/okhttp)), and Bash ([bats-core](https://github.com/bats-core/bats-core))¹.
+AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **65×** on C# ([Newtonsoft.Json](https://github.com/JamesNK/Newtonsoft.Json)), **61×** on Ruby ([RuboCop](https://github.com/rubocop/rubocop)), **54×** on Objective-C ([SDWebImage](https://github.com/SDWebImage/SDWebImage)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **52×** on Swift ([SwiftLint](https://github.com/realm/SwiftLint)), **20×** on Python ([FastAPI](https://github.com/fastapi/fastapi)), **80×** on PHP ([Laravel](https://github.com/laravel/framework)), **801×** on Zig ([zls](https://github.com/zigtools/zls)), **54×** on Kotlin ([OkHttp](https://github.com/square/okhttp)), **90×** on Lua ([Roact](https://github.com/Roblox/roact)), and Bash ([bats-core](https://github.com/bats-core/bats-core))¹.
 
 ## Features
 
@@ -356,6 +356,7 @@ Each language is benchmarked against a pinned open-source project chosen for rea
 | [Laravel v11.9.2](https://github.com/laravel/framework) | PHP | 2,331 | 26,127 | 156 ms | **80×** | 257 µs | 17.9 µs |
 | [zls 0.13.0](https://github.com/zigtools/zls) | Zig | 67 | 2,422 | 21 ms | **801×** | 59.6 µs | 21.2 µs |
 | [OkHttp 5.3.2](https://github.com/square/okhttp) | Kotlin | 644 | 6,780 | 59 ms | **54×** | 107 µs | 17.7 µs |
+| [Roact v1.4.4](https://github.com/Roblox/roact) | Lua | 95 | 93 | 4 ms | **90×** | 5.3 µs | 19.1 µs |
 
 ¹ Median of 5 runs. ² Token efficiency is the median ratio of full-file size to symbol size across all class/struct/interface/type-alias symbols — how many times cheaper `get_symbol` is versus reading the whole file. ³ Bash has no class/struct symbols, only functions, so the metric does not apply.
 

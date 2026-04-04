@@ -56,6 +56,8 @@ clone_if_missing laravel    https://github.com/laravel/framework.git        v11.
 clone_if_missing zls        https://github.com/zigtools/zls.git             0.13.0
 # Kotlin baseline: widely-used HTTP client, idiomatic Kotlin with classes, interfaces, and objects
 clone_if_missing okhttp     https://github.com/square/okhttp.git            parent-5.3.2
+# Lua baseline: Roblox UI library, idiomatic OOP Lua with dot/colon method notation and type aliases
+clone_if_missing roact      https://github.com/Roblox/roact.git             v1.4.4
 echo ""
 echo "Done. Run benchmarks with:"
 echo ""

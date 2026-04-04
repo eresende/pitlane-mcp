@@ -36,6 +36,7 @@ const REPOS: &[&str] = &[
     "bench/repos/laravel",
     "bench/repos/zls",
     "bench/repos/okhttp",
+    "bench/repos/roact",
 ];
 
 struct Setup {
