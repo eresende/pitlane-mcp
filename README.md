@@ -11,6 +11,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 ## Features
 
 - **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, and Bash source into structured symbols
+- **BM25 full-text search** — tantivy-backed ranked search over name, qualified name, signature, and doc fields; falls back to exact substring match if the index isn't ready
 - **Ten MCP tools** for navigation: outline, search, fetch, line-range fetch, find usages, index stats, usage stats
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
@@ -139,7 +140,7 @@ Search by name, kind, language, or file pattern.
 { "project": "/your/project", "query": "authenticate", "kind": "method" }
 ```
 
-If no exact substring match is found, falls back to trigram-based fuzzy matching automatically — results are ranked by similarity and the response includes `"fuzzy": true` so the agent knows the match is approximate.
+Defaults to BM25 ranked full-text search (via tantivy) over name, qualified name, signature, and doc fields — results are ordered by relevance. Pass `"mode": "exact"` for substring matching or `"mode": "fuzzy"` for trigram similarity. If the BM25 index isn't ready yet (e.g. first call after an upgrade), it falls back to exact automatically.
 
 ### `get_symbol`
 
@@ -209,7 +210,6 @@ Returns `total_files`, `total_symbols`, `by_language`, and `by_kind`, all sorted
 Return token-efficiency statistics for `get_symbol` calls — how many tokens were saved by signature-only responses, persisted across sessions.
 
 ```json
-{}
 { "project": "/your/project" }
 ```
 
@@ -341,28 +341,28 @@ Each language is benchmarked against a pinned open-source project chosen for rea
 
 | Corpus | Language | Files | Symbols | Index time¹ | Token eff.² | `search_symbols` | `get_symbol` |
 |---|---|---|---|---|---|---|---|
-| [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) | Rust | 101 | 3,207 | 27 ms | **532×** | 143 µs | 3.2 µs |
-| [FastAPI 0.115.6](https://github.com/fastapi/fastapi) | Python | 1,290 | 4,828 | 33 ms | **20×** | 38 µs | 3.6 µs |
-| [Hono v4.7.4](https://github.com/honojs/hono) | TypeScript | 368 | 992 | 18 ms | **53×** | 36 µs | 3.6 µs |
-| [Redis 7.4.2](https://github.com/redis/redis) | C | 798 | 14,618 | 116 ms | **133×** | 674 µs | 10.4 µs |
-| [LevelDB 1.23](https://github.com/google/leveldb) | C++ | 132 | 1,529 | 13 ms | **418×** | 62 µs | 2.5 µs |
-| [Gin v1.10.0](https://github.com/gin-gonic/gin) | Go | 92 | 1,184 | 11 ms | **125×** | 55 µs | 3.3 µs |
-| [Guava v33.4.8](https://github.com/google/guava) | Java | 3,273 | 56,805 | 243 ms | **112×** | 73 µs | 6.4 µs |
-| [Newtonsoft.Json 13.0.3](https://github.com/JamesNK/Newtonsoft.Json) | C# | 933 | 7,284 | 84 ms | **65×** | 394 µs | 5.3 µs |
-| [bats-core v1.11.1](https://github.com/bats-core/bats-core) | Bash | 54 | 147 | 2 ms | N/A³ | 7.7 µs | 3.5 µs |
-| [RuboCop v1.65.0](https://github.com/rubocop/rubocop) | Ruby | 1,539 | 9,122 | 55 ms | **61×** | 422 µs | 4.4 µs |
-| [SwiftLint 0.57.0](https://github.com/realm/SwiftLint) | Swift | 667 | 3,781 | 27 ms | **52×** | 159 µs | 6.1 µs |
-| [SDWebImage 5.19.0](https://github.com/SDWebImage/SDWebImage) | Objective-C | 271 | 1,564 | 17 ms | **54×** | 57 µs | 2.9 µs |
-| [Laravel v11.9.2](https://github.com/laravel/framework) | PHP | 2,331 | 26,127 | 156 ms | **80×** | 257 µs | 17.9 µs |
-| [zls 0.13.0](https://github.com/zigtools/zls) | Zig | 67 | 2,422 | 21 ms | **801×** | 59.6 µs | 21.2 µs |
-| [OkHttp 5.3.2](https://github.com/square/okhttp) | Kotlin | 644 | 6,780 | 59 ms | **54×** | 107 µs | 17.7 µs |
-| [Roact v1.4.4](https://github.com/Roblox/roact) | Lua | 95 | 93 | 4 ms | **90×** | 5.3 µs | 19.1 µs |
+| [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) | Rust | 101 | 3,207 | 27 ms | **532×** | 48 µs | 3.2 µs |
+| [FastAPI 0.115.6](https://github.com/fastapi/fastapi) | Python | 1,290 | 4,828 | 33 ms | **20×** | 51 µs | 3.6 µs |
+| [Hono v4.7.4](https://github.com/honojs/hono) | TypeScript | 368 | 992 | 18 ms | **53×** | 21 µs | 3.6 µs |
+| [Redis 7.4.2](https://github.com/redis/redis) | C | 798 | 14,618 | 116 ms | **133×** | 21 µs | 10.4 µs |
+| [LevelDB 1.23](https://github.com/google/leveldb) | C++ | 132 | 1,529 | 13 ms | **418×** | 31 µs | 2.5 µs |
+| [Gin v1.10.0](https://github.com/gin-gonic/gin) | Go | 92 | 1,184 | 11 ms | **125×** | 48 µs | 3.3 µs |
+| [Guava v33.4.8](https://github.com/google/guava) | Java | 3,273 | 56,805 | 243 ms | **112×** | 79 µs | 6.4 µs |
+| [Newtonsoft.Json 13.0.3](https://github.com/JamesNK/Newtonsoft.Json) | C# | 933 | 7,284 | 84 ms | **65×** | 21 µs | 5.3 µs |
+| [bats-core v1.11.1](https://github.com/bats-core/bats-core) | Bash | 54 | 147 | 2 ms | N/A³ | 21 µs | 3.5 µs |
+| [RuboCop v1.65.0](https://github.com/rubocop/rubocop) | Ruby | 1,539 | 9,122 | 55 ms | **61×** | 31 µs | 4.4 µs |
+| [SwiftLint 0.57.0](https://github.com/realm/SwiftLint) | Swift | 667 | 3,781 | 27 ms | **52×** | 21 µs | 6.1 µs |
+| [SDWebImage 5.19.0](https://github.com/SDWebImage/SDWebImage) | Objective-C | 271 | 1,564 | 17 ms | **54×** | 20 µs | 2.9 µs |
+| [Laravel v11.9.2](https://github.com/laravel/framework) | PHP | 2,331 | 26,127 | 156 ms | **80×** | 65 µs | 17.9 µs |
+| [zls 0.13.0](https://github.com/zigtools/zls) | Zig | 67 | 2,422 | 21 ms | **801×** | 50 µs | 21.2 µs |
+| [OkHttp 5.3.2](https://github.com/square/okhttp) | Kotlin | 644 | 6,780 | 59 ms | **54×** | 47 µs | 17.7 µs |
+| [Roact v1.4.4](https://github.com/Roblox/roact) | Lua | 95 | 93 | 4 ms | **90×** | 20 µs | 19.1 µs |
 
 ¹ Median of 5 runs. ² Token efficiency is the median ratio of full-file size to symbol size across all class/struct/interface/type-alias symbols — how many times cheaper `get_symbol` is versus reading the whole file. ³ Bash has no class/struct symbols, only functions, so the metric does not apply.
 
-> Query latencies are median wall-clock times for a single tool call against a warm in-memory index. Measured with Criterion over 100–1,000+ samples.
+> `search_symbols` latencies use the default BM25 mode (tantivy ranked full-text). Measured with Criterion over 100 samples per corpus. BM25 query time is largely independent of corpus size — 20–80 µs across all 16 repos — because tantivy's inverted index avoids a linear symbol scan. The exact substring fallback scales linearly and is 3–32× slower depending on symbol count; fuzzy (trigram) is 44–886× slower and is an explicit opt-in.
 >
-> Redis's high `search_symbols` latency reflects its 14,618 symbols and `src/server.h` being a 190 KB header dense with declarations. LevelDB's 418× median reflects C++ class body trimming — inline method bodies are stripped, leaving only the class header. FastAPI's 20× median is lower than most because Pydantic models are large by nature (`Schema` alone is 4.8 KB). Guava's 243 ms index time and 56,805 symbols make it the heaviest corpus by a factor of 4×; `get_project_outline` against it takes 18.6 ms vs. sub-2 ms for all others. Laravel's `get_symbol` latency of 17.9 µs reflects the benchmark target being `Enumerable` — a 36 KB interface that is nearly the entire file it lives in; interface bodies are never trimmed since their signatures are the API contract. zls's 801× median reflects Zig's tendency toward large files with many small struct/enum declarations; `src/lsp.zig` alone is 347 KB and contains hundreds of compact LSP message types.
+> LevelDB's 418× median reflects C++ class body trimming — inline method bodies are stripped, leaving only the class header. FastAPI's 20× median is lower than most because Pydantic models are large by nature (`Schema` alone is 4.8 KB). Guava's 243 ms index time and 56,805 symbols make it the heaviest corpus by a factor of 4×; `get_project_outline` against it takes ~20 ms vs. sub-2 ms for all others. Laravel's `get_symbol` latency of 17.9 µs reflects the benchmark target being `Enumerable` — a 36 KB interface that is nearly the entire file it lives in; interface bodies are never trimmed since their signatures are the API contract. zls's 801× median reflects Zig's tendency toward large files with many small struct/enum declarations; `src/lsp.zig` alone is 347 KB and contains hundreds of compact LSP message types.
 
 ### Running the benchmarks
 
