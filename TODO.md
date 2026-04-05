@@ -1,5 +1,9 @@
 # Roadmap
 
+## TODO
+
+- [ ] **BM25 camelCase tokenizer** — tantivy's default tokenizer splits on non-alphanumeric chars only, so `LowerInstruction` is indexed as a single token and won't match queries for "lower instruction". Add a custom tokenizer that also splits at camelCase boundaries (e.g. `LowerInstruction` → `["lower", "instruction"]`). Required for good BM25 quality on C++, Java, Swift, Kotlin, and C# codebases. Confirmed broken on LLVM.
+
 ## COMPLETED!
 
 ### Optimizations

@@ -166,7 +166,7 @@ fn bench_search_symbols(c: &mut Criterion, setups: &[(&str, Setup)]) {
     let mut group = c.benchmark_group("search_symbols");
     for (label, setup) in setups {
         group.bench_with_input(
-            BenchmarkId::new("search", label),
+            BenchmarkId::new("bm25", label),
             &setup.search_query,
             |b, query| {
                 b.iter(|| {
@@ -178,6 +178,61 @@ fn bench_search_symbols(c: &mut Criterion, setups: &[(&str, Setup)]) {
                         file: None,
                         limit: Some(20),
                         offset: None,
+                        mode: Some("bm25".to_string()),
+                    }))
+                    .unwrap()
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_search_symbols_exact(c: &mut Criterion, setups: &[(&str, Setup)]) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("search_symbols");
+    for (label, setup) in setups {
+        group.bench_with_input(
+            BenchmarkId::new("exact", label),
+            &setup.search_query,
+            |b, query| {
+                b.iter(|| {
+                    rt.block_on(search_symbols(SearchSymbolsParams {
+                        project: setup.project.clone(),
+                        query: query.clone(),
+                        kind: None,
+                        language: None,
+                        file: None,
+                        limit: Some(20),
+                        offset: None,
+                        mode: Some("exact".to_string()),
+                    }))
+                    .unwrap()
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_search_symbols_fuzzy(c: &mut Criterion, setups: &[(&str, Setup)]) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("search_symbols");
+    for (label, setup) in setups {
+        group.bench_with_input(
+            BenchmarkId::new("fuzzy", label),
+            &setup.search_query,
+            |b, query| {
+                b.iter(|| {
+                    rt.block_on(search_symbols(SearchSymbolsParams {
+                        project: setup.project.clone(),
+                        query: query.clone(),
+                        kind: None,
+                        language: None,
+                        file: None,
+                        limit: Some(20),
+                        offset: None,
+                        mode: Some("fuzzy".to_string()),
                     }))
                     .unwrap()
                 })
@@ -293,6 +348,8 @@ fn query_benchmarks(c: &mut Criterion) {
     }
 
     bench_search_symbols(c, &setups);
+    bench_search_symbols_exact(c, &setups);
+    bench_search_symbols_fuzzy(c, &setups);
     bench_get_symbol(c, &setups);
     bench_get_file_outline(c, &setups);
     bench_get_project_outline(c, &setups);

@@ -128,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
                 file,
                 limit: Some(limit),
                 offset: Some(offset),
+                mode: None,
             };
             tools::search_symbols::search_symbols(params).await?
         }

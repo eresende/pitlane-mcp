@@ -1,3 +1,4 @@
+pub mod bm25;
 pub mod format;
 
 use crate::indexer::language::{Language, Symbol, SymbolId, SymbolKind};

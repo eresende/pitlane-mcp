@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 
-use crate::index::format::{load_meta, save_index, save_meta, IndexMeta};
+use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
 use crate::indexer::is_supported_extension;
 use crate::indexer::{registry, Indexer};
@@ -138,6 +138,14 @@ async fn reindex_batch(
         // Invalidate the in-memory cache so the next query reloads the fresh
         // snapshot from disk rather than serving stale data.
         crate::cache::invalidate(root);
+
+        // Mark the BM25 index stale so the next BM25 search rebuilds it from
+        // the updated symbol set. We remove .ready rather than rebuilding here
+        // to avoid holding the write lock during tantivy I/O.
+        if let Ok(tantivy_dir) = index_dir(root).map(|d| d.join("tantivy")) {
+            let _ = std::fs::remove_file(tantivy_dir.join(".ready"));
+        }
+        crate::index::bm25::invalidate(root);
     }
 
     // Update file_mtimes in meta for the changed paths so is_index_up_to_date

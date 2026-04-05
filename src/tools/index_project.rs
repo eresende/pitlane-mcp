@@ -66,6 +66,12 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
                 if let Ok(index) = crate::index::format::load_index(&index_path) {
                     let symbol_count = index.symbol_count();
                     let file_count = index.file_count();
+                    // Silently build the BM25 index if it is missing — this is the
+                    // upgrade path for users who indexed before BM25 was added.
+                    let tantivy_dir = idx_dir.join("tantivy");
+                    if let Err(e) = crate::index::bm25::ensure(&index.symbols, &tantivy_dir) {
+                        tracing::warn!(error = %e, "BM25 ensure failed; search will fall back to exact");
+                    }
                     // Populate the in-memory cache so subsequent queries skip disk I/O.
                     crate::cache::insert(canonical.clone(), index);
                     let elapsed = start.elapsed().as_millis() as u64;
@@ -167,6 +173,14 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     let mut meta = IndexMeta::new(&canonical_for_meta);
     meta.file_mtimes = file_mtimes;
     save_meta(&meta, &meta_path)?;
+
+    // Build the BM25 index. Invalidate any stale cached reader first so the
+    // next search opens the freshly written index.
+    let tantivy_dir = idx_dir.join("tantivy");
+    crate::index::bm25::invalidate(&canonical_for_meta);
+    if let Err(e) = crate::index::bm25::build(&index.symbols, &tantivy_dir) {
+        tracing::warn!(error = %e, "BM25 index build failed; search will fall back to exact");
+    }
 
     crate::cache::insert(canonical_for_meta, index);
 

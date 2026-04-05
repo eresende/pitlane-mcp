@@ -39,6 +39,8 @@ pub struct SearchSymbolsRequest {
     pub limit: Option<usize>,
     /// Offset into results for pagination (default: 0)
     pub offset: Option<usize>,
+    /// Search mode: "bm25" (default, BM25 ranked full-text over name/qualified/signature/doc), "exact" (substring on name/qualified), "fuzzy" (trigram similarity ranking), "semantic" (reserved)
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -226,6 +228,7 @@ impl PitlaneMcp {
             file: req.file,
             limit: req.limit,
             offset: req.offset,
+            mode: req.mode,
         };
         match tools::search_symbols::search_symbols(params).await {
             Ok(v) => value_to_text(v),
