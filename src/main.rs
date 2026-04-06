@@ -40,7 +40,7 @@ pub struct SearchSymbolsRequest {
     pub limit: Option<usize>,
     /// Offset into results for pagination (default: 0)
     pub offset: Option<usize>,
-    /// Search mode: "bm25" (default, BM25 ranked full-text over name/qualified/signature/doc), "exact" (substring on name/qualified), "fuzzy" (trigram similarity ranking), "semantic" (reserved)
+    /// Search mode: "bm25" (default, BM25 ranked full-text over name/qualified/signature/doc), "exact" (substring on name/qualified), "fuzzy" (trigram similarity ranking), "semantic" (vector similarity search — requires PITLANE_EMBED_URL and PITLANE_EMBED_MODEL to be set and index_project to have been run with embeddings enabled)
     pub mode: Option<String>,
 }
 
@@ -190,7 +190,7 @@ fn err_to_text(e: anyhow::Error) -> String {
 #[tool_router]
 impl PitlaneMcp {
     #[tool(
-        description = "Call first to parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time.",
+        description = "Call first to parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time. Also generates vector embeddings for semantic search (mode=\"semantic\") when PITLANE_EMBED_URL and PITLANE_EMBED_MODEL are configured — no separate step needed.",
         meta = tool_meta("index parse cache project"),
         annotations(
             read_only_hint = false,
