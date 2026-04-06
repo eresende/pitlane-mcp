@@ -144,6 +144,9 @@ async fn main() -> anyhow::Result<()> {
             let params = tools::get_project_outline::GetProjectOutlineParams {
                 project,
                 depth: Some(depth),
+                path: None,
+                max_dirs: None,
+                summary: None,
             };
             tools::get_project_outline::get_project_outline(params).await?
         }

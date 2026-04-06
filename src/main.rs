@@ -82,6 +82,12 @@ pub struct GetProjectOutlineRequest {
     pub project: String,
     /// Directory depth to show (default: 2)
     pub depth: Option<u32>,
+    /// Only include files under this directory prefix (relative to project root), e.g. "kernel/sched"
+    pub path: Option<String>,
+    /// Maximum directory entries to return (default: 50, max: 500). Use with 'path' to drill into large codebases.
+    pub max_dirs: Option<usize>,
+    /// When true, return only directory names with file and symbol counts — no per-file items or kind breakdowns. Use for very large codebases (>10k files) where the full outline exceeds token limits.
+    pub summary: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -310,7 +316,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Orient yourself in a codebase: files grouped by directory with symbol counts per kind.",
+        description = "Orient yourself in a codebase: files grouped by directory with symbol counts per kind. For very large projects (>10k files), if the result exceeds token limits, retry with summary=true to get a lightweight directory-only view (just dir names with file/symbol counts). Use 'path' to drill into a specific subtree for full detail.",
         meta = tool_meta("project overview codebase directory structure"),
         annotations(
             read_only_hint = true,
@@ -326,6 +332,9 @@ impl PitlaneMcp {
         let params = tools::get_project_outline::GetProjectOutlineParams {
             project: req.project,
             depth: req.depth,
+            path: req.path,
+            max_dirs: req.max_dirs,
+            summary: req.summary,
         };
         match tools::get_project_outline::get_project_outline(params).await {
             Ok(v) => value_to_text(v),
