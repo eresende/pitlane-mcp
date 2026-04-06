@@ -165,7 +165,9 @@ impl EmbedClient {
             return Ok(vec);
         }
 
-        anyhow::bail!("embed_query: response has neither 'data', 'embeddings', nor 'embedding' field")
+        anyhow::bail!(
+            "embed_query: response has neither 'data', 'embeddings', nor 'embedding' field"
+        )
     }
 }
 

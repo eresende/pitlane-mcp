@@ -168,7 +168,8 @@ pub async fn generate_embeddings(
             // Log progress every 10 batches or on the last batch
             let is_last = chunk_idx + 1 == total_chunks;
             if chunk_idx % 10 == 0 || is_last {
-                let pct = (completed_symbols as f64 * 100.0 / total.max(1) as f64 * 100.0).round() / 100.0;
+                let pct = (completed_symbols as f64 * 100.0 / total.max(1) as f64 * 100.0).round()
+                    / 100.0;
                 tracing::info!(
                     completed = completed_symbols,
                     total,

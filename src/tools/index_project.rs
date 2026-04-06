@@ -148,15 +148,18 @@ async fn do_index_project(
     // into a channel; a concurrent async task drains it and calls notify_progress.
     // This avoids block_in_place (invalid inside tokio::spawn) while keeping
     // notifications live as parsing progresses.
-    let (progress_tx, mut progress_rx) =
-        tokio::sync::mpsc::channel::<(usize, usize, String)>(256);
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<(usize, usize, String)>(256);
 
     // Spawn the drainer task before the blocking work starts.
     let drain_handle: Option<tokio::task::JoinHandle<()>> =
         if let (Some(token), Some(peer)) = (progress_token.clone(), peer.clone()) {
             Some(tokio::spawn(async move {
                 while let Some((current, total, msg)) = progress_rx.recv().await {
-                    tracing::debug!(current, total, "index_project: sending progress notification");
+                    tracing::debug!(
+                        current,
+                        total,
+                        "index_project: sending progress notification"
+                    );
                     let notif = ProgressNotificationParam::new(token.clone(), current as f64)
                         .with_total(total as f64)
                         .with_message(msg);
@@ -189,7 +192,12 @@ async fn do_index_project(
                     // Non-blocking send — drop the tick if the channel is full
                     // rather than stalling the rayon thread.
                     let result = tx.try_send((current, total, msg));
-                    tracing::debug!(current, total, sent = result.is_ok(), "index_project: progress tick");
+                    tracing::debug!(
+                        current,
+                        total,
+                        sent = result.is_ok(),
+                        "index_project: progress tick"
+                    );
                 }))
             } else {
                 Some(Box::new(move |current, total| {
@@ -258,65 +266,60 @@ async fn do_index_project(
     let cached_index = crate::cache::insert(canonical_for_meta, index);
 
     // Embedding phase (opt-in)
-    let (embed_status, embed_count, embed_skipped, embed_ms, embed_error) =
-        if let Some(cfg) = &params.embed_config {
-            let store_path = idx_dir.join("embeddings.bin");
+    let (embed_status, embed_count, embed_skipped, embed_ms, embed_error) = if let Some(cfg) =
+        &params.embed_config
+    {
+        let store_path = idx_dir.join("embeddings.bin");
 
-            // Wire up MCP progress notifications for the embedding phase.
-            let embed_peer = params.peer.clone();
-            let embed_token = params.progress_token.clone();
-            let progress_cb: Option<Box<dyn Fn(usize, usize) + Send + Sync>> =
-                if embed_peer.is_some() && embed_token.is_some() {
-                    let peer = embed_peer.unwrap();
-                    let token = embed_token.unwrap();
-                    // Spawn a drainer for embedding progress notifications.
-                    let (embed_tx, mut embed_rx) =
-                        tokio::sync::mpsc::channel::<(usize, usize)>(256);
-                    tokio::spawn(async move {
-                        while let Some((completed, total)) = embed_rx.recv().await {
-                            let notif = ProgressNotificationParam::new(
-                                token.clone(),
-                                completed as f64,
-                            )
+        // Wire up MCP progress notifications for the embedding phase.
+        let embed_peer = params.peer.clone();
+        let embed_token = params.progress_token.clone();
+        let progress_cb: Option<Box<dyn Fn(usize, usize) + Send + Sync>> =
+            if embed_peer.is_some() && embed_token.is_some() {
+                let peer = embed_peer.unwrap();
+                let token = embed_token.unwrap();
+                // Spawn a drainer for embedding progress notifications.
+                let (embed_tx, mut embed_rx) = tokio::sync::mpsc::channel::<(usize, usize)>(256);
+                tokio::spawn(async move {
+                    while let Some((completed, total)) = embed_rx.recv().await {
+                        let notif = ProgressNotificationParam::new(token.clone(), completed as f64)
                             .with_total(total as f64)
-                            .with_message(format!(
-                                "Embedding symbols… {completed}/{total}",
-                            ));
-                            let _ = peer.notify_progress(notif).await;
-                        }
-                    });
-                    Some(Box::new(move |completed, total| {
-                        let _ = embed_tx.try_send((completed, total));
-                    }))
-                } else {
-                    None
-                };
-
-            let result = crate::embed::generate_embeddings(
-                &cached_index,
-                cfg,
-                &store_path,
-                force,
-                progress_cb.as_deref(),
-            )
-            .await;
-            let status = if result.error.is_some() {
-                "error"
-            } else if result.skipped > 0 {
-                "partial"
+                            .with_message(format!("Embedding symbols… {completed}/{total}",));
+                        let _ = peer.notify_progress(notif).await;
+                    }
+                });
+                Some(Box::new(move |completed, total| {
+                    let _ = embed_tx.try_send((completed, total));
+                }))
             } else {
-                "ok"
+                None
             };
-            (
-                status,
-                result.stored,
-                result.skipped,
-                result.elapsed_ms,
-                result.error,
-            )
+
+        let result = crate::embed::generate_embeddings(
+            &cached_index,
+            cfg,
+            &store_path,
+            force,
+            progress_cb.as_deref(),
+        )
+        .await;
+        let status = if result.error.is_some() {
+            "error"
+        } else if result.skipped > 0 {
+            "partial"
         } else {
-            ("disabled", 0, 0, 0, None)
+            "ok"
         };
+        (
+            status,
+            result.stored,
+            result.skipped,
+            result.elapsed_ms,
+            result.error,
+        )
+    } else {
+        ("disabled", 0, 0, 0, None)
+    };
 
     let elapsed = start.elapsed().as_millis() as u64;
 

@@ -187,8 +187,7 @@ impl Indexer {
                 .filter_map(|path| {
                     let result = self.parse_file(path, root).ok();
                     if let Some(cb) = on_progress {
-                        let prev = completed
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let prev = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let current = prev + 1;
                         // Fire on every tick_interval boundary.
                         if current % tick_interval == 0 {
