@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use pitlane_mcp::embed::EmbedConfig;
 use pitlane_mcp::tools;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -122,6 +123,7 @@ pub struct GetUsageStatsRequest {
 #[derive(Clone)]
 pub struct PitlaneMcp {
     watcher_registry: Arc<WatcherRegistry>,
+    embed_config: Option<Arc<EmbedConfig>>,
     tool_router: ToolRouter<Self>,
 }
 
@@ -134,8 +136,10 @@ impl Default for PitlaneMcp {
 impl PitlaneMcp {
     pub fn new() -> Self {
         let watcher_registry = Arc::new(WatcherRegistry::new());
+        let embed_config = EmbedConfig::from_env().map(Arc::new);
         Self {
             watcher_registry,
+            embed_config,
             tool_router: Self::tool_router(),
         }
     }
@@ -202,6 +206,7 @@ impl PitlaneMcp {
             max_files: req.max_files,
             progress_token: meta.get_progress_token(),
             peer: Some(peer),
+            embed_config: self.embed_config.clone(),
         };
         match tools::index_project::index_project(params).await {
             Ok(v) => value_to_text(v),
@@ -210,8 +215,8 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Search indexed symbols by name; filter by kind, language, or file glob to narrow results. Returns matching symbols with IDs, kinds, and locations.",
-        meta = tool_meta("search find symbol function method class type"),
+        description = "Search indexed symbols by name or concept. Mode selection: use mode=\"semantic\" when you know what a symbol does but not its name (describe intent, e.g. \"retry logic for failed HTTP requests\"); use mode=\"bm25\" (default) when you know the name or a distinctive keyword. Filter by kind, language, or file glob to narrow results. Returns matching symbols with IDs, kinds, and locations.",
+        meta = tool_meta("search find symbol function method class type semantic"),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -229,6 +234,7 @@ impl PitlaneMcp {
             limit: req.limit,
             offset: req.offset,
             mode: req.mode,
+            embed_config: self.embed_config.clone(),
         };
         match tools::search_symbols::search_symbols(params).await {
             Ok(v) => value_to_text(v),
@@ -366,6 +372,7 @@ impl PitlaneMcp {
             project: req.project,
             stop: req.stop,
             status_only: req.status_only,
+            embed_config: self.embed_config.clone(),
         };
         match tools::watch_project::watch_project(params, &self.watcher_registry).await {
             Ok(v) => value_to_text(v),

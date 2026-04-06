@@ -6,6 +6,7 @@ use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, Instant};
 
+use crate::embed::EmbedConfig;
 use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
 use crate::indexer::is_supported_extension;
@@ -24,6 +25,7 @@ impl ProjectWatcher {
         index: Arc<RwLock<SymbolIndex>>,
         index_path: PathBuf,
         meta_path: PathBuf,
+        embed_config: Option<Arc<EmbedConfig>>,
     ) -> anyhow::Result<Self> {
         let project_path_clone = project_path.clone();
 
@@ -40,6 +42,7 @@ impl ProjectWatcher {
             DEBOUNCE_WINDOW,
             index_path,
             meta_path,
+            embed_config,
         ));
 
         let handler = move |result: notify::Result<Event>| {
@@ -70,6 +73,7 @@ impl ProjectWatcher {
 /// Collects file paths from `rx` into a `HashSet` (deduplication) and flushes
 /// the batch through a single write-lock acquisition once the debounce window
 /// expires without a new event, or when the channel is closed.
+#[allow(clippy::too_many_arguments)]
 async fn run_debounce_loop(
     mut rx: mpsc::Receiver<PathBuf>,
     root: PathBuf,
@@ -78,6 +82,7 @@ async fn run_debounce_loop(
     debounce_window: Duration,
     index_path: PathBuf,
     meta_path: PathBuf,
+    embed_config: Option<Arc<EmbedConfig>>,
 ) {
     let mut pending: HashSet<PathBuf> = HashSet::new();
     let mut deadline: Option<Instant> = None;
@@ -97,7 +102,7 @@ async fn run_debounce_loop(
                     // Channel closed — flush whatever is pending and exit.
                     None => {
                         if !pending.is_empty() {
-                            reindex_batch(&pending, &root, &indexer, &index, &index_path, &meta_path).await;
+                            reindex_batch(&pending, &root, &indexer, &index, &index_path, &meta_path, embed_config.as_ref().map(Arc::clone)).await;
                         }
                         return;
                     }
@@ -106,7 +111,7 @@ async fn run_debounce_loop(
 
             // Debounce window expired — flush the batch.
             _ = tokio::time::sleep(timeout), if deadline.is_some() => {
-                reindex_batch(&pending, &root, &indexer, &index, &index_path, &meta_path).await;
+                reindex_batch(&pending, &root, &indexer, &index, &index_path, &meta_path, embed_config.as_ref().map(Arc::clone)).await;
                 pending.clear();
                 deadline = None;
             }
@@ -121,9 +126,16 @@ async fn reindex_batch(
     index: &Arc<RwLock<SymbolIndex>>,
     index_path: &Path,
     meta_path: &Path,
+    embed_config: Option<Arc<EmbedConfig>>,
 ) {
+    let removed_ids: Vec<crate::indexer::language::SymbolId>;
     {
         let mut idx = index.write().await;
+        // Capture symbol IDs for changed files BEFORE reindex_file mutates by_file
+        removed_ids = paths
+            .iter()
+            .flat_map(|p| idx.by_file.get(p).cloned().unwrap_or_default())
+            .collect();
         for path in paths {
             if let Err(e) = indexer.reindex_file(path, root, &mut idx) {
                 eprintln!("Error re-indexing {:?}: {}", path, e);
@@ -146,6 +158,25 @@ async fn reindex_batch(
             let _ = std::fs::remove_file(tantivy_dir.join(".ready"));
         }
         crate::index::bm25::invalidate(root);
+    }
+    // write lock released — safe to re-acquire index.read() below
+
+    if let Some(cfg) = &embed_config {
+        let store_path = match index_dir(root) {
+            Ok(d) => d.join("embeddings.bin"),
+            Err(e) => {
+                tracing::warn!("embed: cannot resolve store path: {e}");
+                return;
+            }
+        };
+        crate::embed::update_embeddings_for_files(
+            &*index.read().await,
+            paths,
+            &removed_ids,
+            cfg,
+            &store_path,
+        )
+        .await;
     }
 
     // Update file_mtimes in meta for the changed paths so is_index_up_to_date
@@ -203,6 +234,7 @@ mod tests {
             TEST_DEBOUNCE,
             index_path,
             meta_path,
+            None,
         ))
     }
 

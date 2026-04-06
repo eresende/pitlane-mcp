@@ -148,6 +148,7 @@ fn run_bench(path: &str) {
                 max_files: None,
                 progress_token: None,
                 peer: None,
+                embed_config: None,
             }))
             .unwrap_or_else(|e| {
                 eprintln!("Indexing failed: {e}");

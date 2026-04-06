@@ -1,9 +1,13 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
+use crate::embed::client::{cosine_similarity, EmbedClient};
+use crate::embed::store::EmbedStore;
+use crate::embed::EmbedConfig;
 use crate::error::ToolError;
 use crate::index::format::index_dir;
 use crate::indexer::language::{Language, SymbolKind};
@@ -40,6 +44,8 @@ pub struct SearchSymbolsParams {
     pub offset: Option<usize>,
     /// "bm25" (default), "exact", "fuzzy", or "semantic" (reserved)
     pub mode: Option<String>,
+    /// Embedding config passed programmatically (not a serde field)
+    pub embed_config: Option<Arc<EmbedConfig>>,
 }
 
 pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value> {
@@ -50,23 +56,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
     let explicit_mode = params.mode.as_deref();
     let mode = explicit_mode.unwrap_or("bm25");
 
-    match mode {
-        "exact" | "fuzzy" | "bm25" => {}
-        "semantic" => {
-            return Err(anyhow::anyhow!(
-                "Semantic search is not yet available. It will be enabled in a future version."
-            ));
-        }
-        other => {
-            return Err(ToolError::InvalidArgument {
-                param: "mode".to_string(),
-                message: format!("Unknown mode '{}'. Supported: bm25, exact, fuzzy", other),
-            }
-            .into());
-        }
-    }
-
-    // Parse filters — shared across all modes.
+    // Parse filters — shared across all modes (including semantic).
     let kind_filter: Option<SymbolKind> = params
         .kind
         .as_deref()
@@ -122,6 +112,130 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 .map(|g| g.compile_matcher())
         })
         .transpose()?;
+
+    match mode {
+        "exact" | "fuzzy" | "bm25" => {}
+        "semantic" => {
+            // Sub-task 1: require embed_config
+            let embed_cfg = params.embed_config.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Semantic search requires PITLANE_EMBED_URL and PITLANE_EMBED_MODEL to be set"
+                )
+            })?;
+
+            let project_path = Path::new(&params.project);
+            let canonical = project_path
+                .canonicalize()
+                .unwrap_or_else(|_| project_path.to_path_buf());
+
+            // Sub-task 2: load EmbedStore
+            let store_path = index_dir(&canonical)?.join("embeddings.bin");
+            let store = EmbedStore::load(&store_path).unwrap_or_default();
+
+            // Sub-task 3: error when store is empty
+            if store.vectors.is_empty() {
+                return Err(anyhow::anyhow!(
+                    "No embeddings found for this project. Run index_project first"
+                ));
+            }
+
+            // Sub-task 4: embed the query
+            let client = EmbedClient::new(Arc::clone(embed_cfg));
+            let query_vec = client.embed_query(&params.query).await?;
+
+            // Sub-task 5: verify dimension consistency
+            if store.dimension() != Some(query_vec.len()) {
+                return Err(anyhow::anyhow!(
+                    "Embedding dimension mismatch: store has dimension {:?} but query produced dimension {}. Re-run index_project to rebuild embeddings.",
+                    store.dimension(),
+                    query_vec.len()
+                ));
+            }
+
+            // Sub-task 6: apply kind/language/file filters
+            let mut scored: Vec<(f32, Value)> = index
+                .symbols
+                .values()
+                .filter(|sym| {
+                    if let Some(ref kf) = kind_filter {
+                        if &sym.kind != kf {
+                            return false;
+                        }
+                    }
+                    if let Some(ref lf) = lang_filter {
+                        if &sym.language != lf {
+                            return false;
+                        }
+                    }
+                    if let Some(ref matcher) = file_glob {
+                        let file_str = sym.file.to_string_lossy();
+                        let file_path: &Path = file_str.as_ref().as_ref();
+                        if !matcher.is_match(file_path) {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                // Sub-task 7: score each symbol present in the store
+                .filter_map(|sym| {
+                    let vec = store.vectors.get(&sym.id)?;
+                    let score = cosine_similarity(&query_vec, vec);
+                    Some((
+                        score,
+                        json!({
+                            "id": sym.id,
+                            "name": sym.name,
+                            "qualified": sym.qualified,
+                            "kind": sym.kind.to_string(),
+                            "language": sym.language.to_string(),
+                            "file": sym.file.to_string_lossy().replace('\\', "/"),
+                            "line_start": sym.line_start,
+                            "line_end": sym.line_end,
+                            "signature": sym.signature,
+                            "doc": sym.doc,
+                        }),
+                    ))
+                })
+                .collect();
+
+            // Sort descending by score
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Sub-task 8: apply offset/limit and return
+            let total = scored.len();
+            let page: Vec<Value> = scored
+                .into_iter()
+                .skip(offset)
+                .take(limit)
+                .map(|(_, v)| v)
+                .collect();
+
+            let truncated = offset + page.len() < total;
+            let mut resp = json!({
+                "results": page,
+                "count": page.len(),
+                "query": params.query,
+                "truncated": truncated,
+            });
+            if truncated {
+                resp["next_page_message"] = json!(format!(
+                    "More results available. Call again with offset: {}",
+                    offset + limit
+                ));
+            }
+            return Ok(resp);
+        }
+        other => {
+            return Err(ToolError::InvalidArgument {
+                param: "mode".to_string(),
+                message: format!(
+                    "Unknown mode '{}'. Supported: bm25, exact, fuzzy, semantic",
+                    other
+                ),
+            }
+            .into());
+        }
+    }
 
     // ------------------------------------------------------------------
     // BM25 path — ranked full-text search over name, qualified, signature,
@@ -365,4 +479,203 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
         "fuzzy": true,
         "fuzzy_note": "Results are fuzzy-matched by trigram similarity and ranked by score.",
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embed::store::EmbedStore;
+    use crate::embed::EmbedConfig;
+    use crate::index::format::{index_dir, save_index};
+    use crate::indexer::{registry, Indexer};
+    use tempfile::TempDir;
+
+    /// Helper: write a simple Rust file, index it, and save the index to disk.
+    /// Returns the project path string.
+    fn setup_indexed_project(dir: &TempDir) -> String {
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn hello() {}").unwrap();
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        // Invalidate cache so load_project_index reads from disk.
+        crate::cache::invalidate(&canonical);
+        dir.path().to_string_lossy().to_string()
+    }
+
+    /// Requirements 5.3: semantic search with embed_config=None returns the exact error message.
+    #[tokio::test]
+    async fn test_semantic_disabled_returns_exact_error() {
+        let dir = TempDir::new().unwrap();
+        let project = setup_indexed_project(&dir);
+
+        let params = SearchSymbolsParams {
+            project,
+            query: "hello".to_string(),
+            kind: None,
+            language: None,
+            file: None,
+            limit: None,
+            offset: None,
+            mode: Some("semantic".to_string()),
+            embed_config: None,
+        };
+
+        let err = search_symbols(params).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Semantic search requires PITLANE_EMBED_URL and PITLANE_EMBED_MODEL to be set",
+            "error message must match Requirement 5.3 exactly"
+        );
+    }
+
+    /// Requirements 5.4: semantic search with a valid embed_config but no embeddings.bin
+    /// (empty store) returns the exact error message.
+    #[tokio::test]
+    async fn test_semantic_missing_store_returns_exact_error() {
+        let dir = TempDir::new().unwrap();
+        let project = setup_indexed_project(&dir);
+
+        // Provide a valid embed_config but do NOT write any embeddings.bin.
+        let embed_config = Some(Arc::new(EmbedConfig {
+            url: "http://localhost:11434/api/embeddings".to_string(),
+            model: "nomic-embed-text".to_string(),
+        }));
+
+        let params = SearchSymbolsParams {
+            project,
+            query: "hello".to_string(),
+            kind: None,
+            language: None,
+            file: None,
+            limit: None,
+            offset: None,
+            mode: Some("semantic".to_string()),
+            embed_config,
+        };
+
+        let err = search_symbols(params).await.unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "No embeddings found for this project. Run index_project first",
+            "error message must match Requirement 5.4 exactly"
+        );
+    }
+
+    // Feature: ollama-lmstudio-embeddings, Property 11: Non-semantic search modes are unaffected by embedding state
+    // Validates: Requirements 4a.4, 8.1, 8.2
+    //
+    // For each of exact, fuzzy, and bm25 modes, call search_symbols twice with the same
+    // query but different embed_config values (None vs Some pointing to a non-existent server).
+    // Both calls must return identical results, proving embed_config has no effect on
+    // non-semantic search modes.
+    #[tokio::test]
+    async fn test_non_semantic_modes_unaffected_by_embedding_state() {
+        for mode in &["exact", "fuzzy", "bm25"] {
+            let dir = TempDir::new().unwrap();
+            let project = setup_indexed_project(&dir);
+
+            // Call 1: embeddings disabled (None)
+            let params_no_embed = SearchSymbolsParams {
+                project: project.clone(),
+                query: "hello".to_string(),
+                kind: None,
+                language: None,
+                file: None,
+                limit: None,
+                offset: None,
+                mode: Some(mode.to_string()),
+                embed_config: None,
+            };
+            let result_no_embed = search_symbols(params_no_embed)
+                .await
+                .unwrap_or_else(|e| panic!("mode={mode}, embed_config=None failed: {e}"));
+
+            // Call 2: embeddings enabled but pointing to a non-existent server
+            // (enabled-but-broken state — the server is unreachable)
+            let embed_config_broken = Some(Arc::new(EmbedConfig {
+                url: "http://127.0.0.1:19999/api/embeddings".to_string(),
+                model: "nomic-embed-text".to_string(),
+            }));
+            let params_with_embed = SearchSymbolsParams {
+                project: project.clone(),
+                query: "hello".to_string(),
+                kind: None,
+                language: None,
+                file: None,
+                limit: None,
+                offset: None,
+                mode: Some(mode.to_string()),
+                embed_config: embed_config_broken,
+            };
+            let result_with_embed = search_symbols(params_with_embed)
+                .await
+                .unwrap_or_else(|e| panic!("mode={mode}, embed_config=Some(broken) failed: {e}"));
+
+            assert_eq!(
+                result_no_embed, result_with_embed,
+                "mode={mode}: results must be identical regardless of embed_config"
+            );
+        }
+    }
+
+    /// Requirements 6.4: dimension mismatch between the store and the query vector
+    /// returns a descriptive error containing "dimension mismatch".
+    #[tokio::test]
+    async fn test_semantic_dimension_mismatch_returns_descriptive_error() {
+        use httpmock::prelude::*;
+
+        let dir = TempDir::new().unwrap();
+        let project = setup_indexed_project(&dir);
+
+        // Write an embeddings.bin with vectors of dimension 3.
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        let store_path = idx_dir.join("embeddings.bin");
+
+        let mut store = EmbedStore::new();
+        store.update("some::symbol".to_string(), vec![0.1_f32, 0.2_f32, 0.3_f32]);
+        store.save(&store_path).unwrap();
+
+        // Mock server returns a vector of dimension 5 (mismatches the store's dim 3).
+        let query_vec: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4, 0.5];
+        let response_body = serde_json::json!({
+            "data": [{ "embedding": query_vec }]
+        })
+        .to_string();
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(response_body);
+        });
+
+        let embed_config = Some(Arc::new(EmbedConfig {
+            url: server.url("/"),
+            model: "test-model".to_string(),
+        }));
+
+        let params = SearchSymbolsParams {
+            project,
+            query: "hello".to_string(),
+            kind: None,
+            language: None,
+            file: None,
+            limit: None,
+            offset: None,
+            mode: Some("semantic".to_string()),
+            embed_config,
+        };
+
+        let err = search_symbols(params).await.unwrap_err();
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("dimension mismatch"),
+            "error should mention 'dimension mismatch', got: {err}"
+        );
+    }
 }

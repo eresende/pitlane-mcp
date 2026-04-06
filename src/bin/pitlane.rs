@@ -42,6 +42,9 @@ enum Command {
         /// Skip first N results
         #[arg(long, default_value = "0")]
         offset: usize,
+        /// Search mode: bm25 (default), exact, fuzzy, semantic
+        #[arg(long)]
+        mode: Option<String>,
     },
     /// Show a project's directory/symbol overview
     Outline {
@@ -107,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
                 max_files: None,
                 progress_token: None,
                 peer: None,
+                embed_config: pitlane_mcp::embed::EmbedConfig::from_env().map(std::sync::Arc::new),
             };
             tools::index_project::index_project(params).await?
         }
@@ -119,7 +123,9 @@ async fn main() -> anyhow::Result<()> {
             file,
             limit,
             offset,
+            mode,
         } => {
+            let embed_config = pitlane_mcp::embed::EmbedConfig::from_env().map(std::sync::Arc::new);
             let params = tools::search_symbols::SearchSymbolsParams {
                 project,
                 query,
@@ -128,7 +134,8 @@ async fn main() -> anyhow::Result<()> {
                 file,
                 limit: Some(limit),
                 offset: Some(offset),
-                mode: None,
+                mode,
+                embed_config,
             };
             tools::search_symbols::search_symbols(params).await?
         }

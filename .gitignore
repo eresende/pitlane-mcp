@@ -15,3 +15,6 @@
 .vscode/
 *.swp
 *.swo
+
+# proptest cache directory
+proptest-regressions/

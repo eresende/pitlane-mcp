@@ -11,13 +11,11 @@ use serde_json::{json, Value};
 
 use tracing::info;
 
+use crate::embed::EmbedConfig;
 use crate::error::ToolError;
 use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
 use crate::indexer::{load_gitignore_patterns, registry, Indexer};
-
-/// Minimum file count before progress notifications are emitted.
-const PROGRESS_THRESHOLD: usize = 500;
 
 /// Default cap on the number of eligible source files per walk.
 /// Prevents accidental full-filesystem indexing (e.g. `index_project("/")`).
@@ -33,11 +31,12 @@ pub struct IndexProjectParams {
     /// If present, progress notifications are sent to this peer.
     pub progress_token: Option<ProgressToken>,
     pub peer: Option<Peer<RoleServer>>,
+    /// Optional embedding configuration. When `Some`, embeddings are generated
+    /// after indexing. Passed programmatically — not part of the MCP tool schema.
+    pub embed_config: Option<Arc<EmbedConfig>>,
 }
 
-pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> {
-    let start = Instant::now();
-
+pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Value> {
     let path = Path::new(&params.path);
     let canonical = path
         .canonicalize()
@@ -46,8 +45,7 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     info!(path = %canonical.display(), "index_project: start");
 
     let force = params.force.unwrap_or(false);
-
-    let mut exclude = params.exclude.unwrap_or_default();
+    let mut exclude = params.exclude.take().unwrap_or_default();
     if exclude.is_empty() {
         exclude = default_excludes();
     }
@@ -74,80 +72,158 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
                     }
                     // Populate the in-memory cache so subsequent queries skip disk I/O.
                     crate::cache::insert(canonical.clone(), index);
-                    let elapsed = start.elapsed().as_millis() as u64;
                     return Ok(json!({
                         "status": "cached",
                         "symbol_count": symbol_count,
                         "file_count": file_count,
                         "index_path": index_path.display().to_string(),
-                        "elapsed_ms": elapsed,
+                        "embeddings": "disabled",
                     }));
                 }
             }
         }
     }
 
-    // Create index directory
+    // Create index directory up-front so errors surface before we potentially
+    // return "started" to the client.
     std::fs::create_dir_all(&idx_dir)?;
 
-    // Run the indexer, wiring up progress notifications when a token is present.
-    let parsers = registry::build_default_registry();
-    let indexer = Indexer::new(parsers);
+    // When the caller supplies a progress token, stay synchronous — the client
+    // is actively listening for progress notifications during the request and
+    // will display them as the index builds. Returning early would close the
+    // request context and silence all subsequent notifications.
+    //
+    // When there is NO progress token AND a peer is present (e.g. OpenCode which
+    // times out on long requests), spawn indexing in the background and return
+    // "started" immediately so the client doesn't time out. The INDEXING_IN_PROGRESS
+    // guard in load_project_index prevents other tools from querying a partial index.
+    //
+    // When there is no peer at all (tests, CLI), stay synchronous so callers get
+    // the full result.
+    if params.progress_token.is_none() && params.peer.is_some() {
+        let path_str = canonical.display().to_string();
+        crate::indexing::mark(canonical.clone());
+        tokio::spawn(async move {
+            match do_index_project(params, canonical.clone(), exclude, idx_dir, force).await {
+                Ok(_) => crate::indexing::unmark(&canonical),
+                Err(e) => {
+                    crate::indexing::unmark(&canonical);
+                    tracing::error!(path = %path_str, error = %e, "background index_project failed");
+                }
+            }
+        });
 
+        return Ok(json!({
+            "status": "started",
+            "message": "Indexing started in the background. Other pitlane tools will return INDEXING_IN_PROGRESS until complete.",
+        }));
+    }
+
+    // Synchronous path: either a progress token is present (client shows live
+    // progress while the call is in-flight) or there is no peer (tests/CLI).
+    do_index_project(params, canonical, exclude, idx_dir, force).await
+}
+
+async fn do_index_project(
+    params: IndexProjectParams,
+    canonical: std::path::PathBuf,
+    exclude: Vec<String>,
+    idx_dir: std::path::PathBuf,
+    force: bool,
+) -> anyhow::Result<Value> {
+    let start = Instant::now();
+
+    let index_path = idx_dir.join("index.bin");
+    let meta_path = idx_dir.join("meta.json");
     let max_files = params.max_files.unwrap_or(DEFAULT_MAX_FILES);
     let progress_token = params.progress_token.clone();
     let peer = params.peer.clone();
 
-    // Channel: blocking thread → async task for progress events (started, done).
-    // Each message is (current, total).
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<(usize, usize)>(4);
+    let parsers = registry::build_default_registry();
+    let indexer = Indexer::new(parsers);
 
     info!(path = %canonical.display(), "index_project: walking files");
 
-    let (index, file_count) = tokio::task::spawn_blocking(move || {
-        let cb: Option<Box<dyn Fn(usize, usize) + Send>> = if progress_token.is_some() {
-            let tx = tx.clone();
-            Some(Box::new(move |current, total| {
-                if current == 0 {
-                    tracing::info!(total, "index_project: discovered files, starting parse");
+    // Progress notifications bridge: the rayon callback sends (current, total)
+    // into a channel; a concurrent async task drains it and calls notify_progress.
+    // This avoids block_in_place (invalid inside tokio::spawn) while keeping
+    // notifications live as parsing progresses.
+    let (progress_tx, mut progress_rx) =
+        tokio::sync::mpsc::channel::<(usize, usize, String)>(256);
+
+    // Spawn the drainer task before the blocking work starts.
+    let drain_handle: Option<tokio::task::JoinHandle<()>> =
+        if let (Some(token), Some(peer)) = (progress_token.clone(), peer.clone()) {
+            Some(tokio::spawn(async move {
+                while let Some((current, total, msg)) = progress_rx.recv().await {
+                    tracing::debug!(current, total, "index_project: sending progress notification");
+                    let notif = ProgressNotificationParam::new(token.clone(), current as f64)
+                        .with_total(total as f64)
+                        .with_message(msg);
+                    let _ = peer.notify_progress(notif).await;
                 }
-                // Only emit MCP progress for large projects.
-                if total >= PROGRESS_THRESHOLD {
-                    let _ = tx.blocking_send((current, total));
-                }
+                tracing::debug!("index_project: progress drainer finished");
             }))
         } else {
-            Some(Box::new(move |current, total| {
-                if current == 0 {
-                    tracing::info!(total, "index_project: discovered files, starting parse");
-                }
-                let _ = (current, total);
-            }))
+            None
         };
-        indexer.index_project_with_progress(&canonical, &exclude, max_files, cb.as_deref())
+
+    // Build the progress callback — sends into the channel, never blocks.
+    let make_cb = {
+        let has_token = progress_token.is_some() && drain_handle.is_some();
+        let tx_for_cb = progress_tx.clone(); // clone for the callback; original dropped below
+        move || -> Option<Box<dyn Fn(usize, usize) + Send + Sync>> {
+            if has_token {
+                let tx = tx_for_cb.clone();
+                Some(Box::new(move |current, total| {
+                    if current == 0 {
+                        tracing::info!(total, "index_project: discovered files, starting parse");
+                    }
+                    let msg = if current == 0 {
+                        format!("Indexing {total} files…")
+                    } else if current == total {
+                        format!("Parsed {total} files")
+                    } else {
+                        format!("Parsing files… {current}/{total}")
+                    };
+                    // Non-blocking send — drop the tick if the channel is full
+                    // rather than stalling the rayon thread.
+                    let result = tx.try_send((current, total, msg));
+                    tracing::debug!(current, total, sent = result.is_ok(), "index_project: progress tick");
+                }))
+            } else {
+                Some(Box::new(move |current, total| {
+                    if current == 0 {
+                        tracing::info!(total, "index_project: discovered files, starting parse");
+                    }
+                    let _ = (current, total);
+                }))
+            }
+        }
+    };
+
+    let canonical_clone = canonical.clone();
+    let (index, file_count) = tokio::task::spawn_blocking(move || {
+        let cb = make_cb();
+        indexer.index_project_with_progress(&canonical_clone, &exclude, max_files, cb.as_deref())
     })
     .await
     .context("Indexing task panicked")??;
+
+    // Explicitly drop the original sender so the drainer sees EOF and exits.
+    // The clone inside make_cb was moved into spawn_blocking and is already dropped.
+    drop(progress_tx);
+
+    // Wait for the drainer to flush all pending notifications before continuing.
+    if let Some(handle) = drain_handle {
+        let _ = handle.await;
+    }
 
     info!(
         file_count,
         symbol_count = index.symbol_count(),
         "index_project: parsing complete"
     );
-
-    // Drain progress events and forward as MCP notifications.
-    if let (Some(token), Some(peer)) = (params.progress_token, peer) {
-        while let Ok((current, total)) = rx.try_recv() {
-            let mut notif = ProgressNotificationParam::new(token.clone(), current as f64)
-                .with_total(total as f64);
-            if current == 0 {
-                notif = notif.with_message(format!("Indexing {total} files…"));
-            } else {
-                notif = notif.with_message(format!("Indexed {total} files"));
-            }
-            let _ = peer.notify_progress(notif).await;
-        }
-    }
 
     let symbol_count = index.symbol_count();
 
@@ -166,10 +242,7 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
     // Save index to disk, then populate the in-memory cache.
     save_index(&index, &index_path)?;
 
-    // Save meta
-    let canonical_for_meta = Path::new(&params.path)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(&params.path).to_path_buf());
+    let canonical_for_meta = canonical.clone();
     let mut meta = IndexMeta::new(&canonical_for_meta);
     meta.file_mtimes = file_mtimes;
     save_meta(&meta, &meta_path)?;
@@ -182,17 +255,91 @@ pub async fn index_project(params: IndexProjectParams) -> anyhow::Result<Value> 
         tracing::warn!(error = %e, "BM25 index build failed; search will fall back to exact");
     }
 
-    crate::cache::insert(canonical_for_meta, index);
+    let cached_index = crate::cache::insert(canonical_for_meta, index);
+
+    // Embedding phase (opt-in)
+    let (embed_status, embed_count, embed_skipped, embed_ms, embed_error) =
+        if let Some(cfg) = &params.embed_config {
+            let store_path = idx_dir.join("embeddings.bin");
+
+            // Wire up MCP progress notifications for the embedding phase.
+            let embed_peer = params.peer.clone();
+            let embed_token = params.progress_token.clone();
+            let progress_cb: Option<Box<dyn Fn(usize, usize) + Send + Sync>> =
+                if embed_peer.is_some() && embed_token.is_some() {
+                    let peer = embed_peer.unwrap();
+                    let token = embed_token.unwrap();
+                    // Spawn a drainer for embedding progress notifications.
+                    let (embed_tx, mut embed_rx) =
+                        tokio::sync::mpsc::channel::<(usize, usize)>(256);
+                    tokio::spawn(async move {
+                        while let Some((completed, total)) = embed_rx.recv().await {
+                            let notif = ProgressNotificationParam::new(
+                                token.clone(),
+                                completed as f64,
+                            )
+                            .with_total(total as f64)
+                            .with_message(format!(
+                                "Embedding symbols… {completed}/{total}",
+                            ));
+                            let _ = peer.notify_progress(notif).await;
+                        }
+                    });
+                    Some(Box::new(move |completed, total| {
+                        let _ = embed_tx.try_send((completed, total));
+                    }))
+                } else {
+                    None
+                };
+
+            let result = crate::embed::generate_embeddings(
+                &cached_index,
+                cfg,
+                &store_path,
+                force,
+                progress_cb.as_deref(),
+            )
+            .await;
+            let status = if result.error.is_some() {
+                "error"
+            } else if result.skipped > 0 {
+                "partial"
+            } else {
+                "ok"
+            };
+            (
+                status,
+                result.stored,
+                result.skipped,
+                result.elapsed_ms,
+                result.error,
+            )
+        } else {
+            ("disabled", 0, 0, 0, None)
+        };
 
     let elapsed = start.elapsed().as_millis() as u64;
 
-    Ok(json!({
+    let mut response = json!({
         "status": "indexed",
         "symbol_count": symbol_count,
         "file_count": file_count,
         "index_path": index_path.display().to_string(),
         "elapsed_ms": elapsed,
-    }))
+        "embeddings": embed_status,
+    });
+
+    if embed_status != "disabled" {
+        let obj = response.as_object_mut().unwrap();
+        obj.insert("embeddings_count".to_string(), json!(embed_count));
+        obj.insert("embeddings_skipped".to_string(), json!(embed_skipped));
+        obj.insert("embeddings_ms".to_string(), json!(embed_ms));
+        if let Some(err) = embed_error {
+            obj.insert("embeddings_error".to_string(), json!(err));
+        }
+    }
+
+    Ok(response)
 }
 
 fn default_excludes() -> Vec<String> {
@@ -241,6 +388,14 @@ pub fn load_project_index(project: &str) -> anyhow::Result<Arc<SymbolIndex>> {
         .canonicalize()
         .with_context(|| format!("Cannot canonicalize path: {}", project))?;
 
+    // Refuse to serve a partial index while background indexing is running.
+    if crate::indexing::is_indexing(&canonical) {
+        return Err(ToolError::IndexingInProgress {
+            project: project.to_string(),
+        }
+        .into());
+    }
+
     // Cache hit — no disk I/O needed.
     if let Some(cached) = crate::cache::get(&canonical) {
         return Ok(cached);
@@ -264,6 +419,7 @@ pub fn load_project_index(project: &str) -> anyhow::Result<Arc<SymbolIndex>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embed::EmbedConfig;
     use crate::index::format::{index_dir, save_index};
     use crate::indexer::{registry, Indexer};
     use tempfile::TempDir;
@@ -345,6 +501,7 @@ mod tests {
             max_files: None,
             progress_token: None,
             peer: None,
+            embed_config: None,
         };
         let err = index_project(params).await.unwrap_err();
         let tool_err = err
@@ -360,5 +517,142 @@ mod tests {
             ),
             "expected FileLimitExceeded with limit={DEFAULT_MAX_FILES}, got: {tool_err:?}"
         );
+    }
+
+    // ── Task 6.3: embedding response field tests ──────────────────────────────
+
+    /// Requirements 9.3: response includes `"embeddings": "disabled"` when embed_config is None.
+    #[tokio::test]
+    async fn test_index_project_embeddings_disabled() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn foo() {}").unwrap();
+
+        let params = IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        };
+
+        let response = index_project(params).await.unwrap();
+        assert_eq!(
+            response["embeddings"],
+            serde_json::json!("disabled"),
+            "expected embeddings=disabled when embed_config is None"
+        );
+        // count/skipped/ms fields must be absent when disabled
+        assert!(
+            response.get("embeddings_count").is_none(),
+            "embeddings_count should be absent when disabled"
+        );
+        assert!(
+            response.get("embeddings_skipped").is_none(),
+            "embeddings_skipped should be absent when disabled"
+        );
+    }
+
+    /// Requirements 9.1: response includes `"embeddings": "ok"` and correct `embeddings_count`
+    /// when all symbols are embedded successfully.
+    #[tokio::test]
+    async fn test_index_project_embeddings_ok() {
+        use httpmock::prelude::*;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn foo() {}\npub fn bar() {}",
+        )
+        .unwrap();
+
+        // Mock server returns a valid OpenAI-format response with BATCH_SIZE items.
+        let embedding: Vec<f32> = vec![1.0_f32, 0.0_f32, 0.0_f32];
+        let data_items: Vec<serde_json::Value> = (0..crate::embed::client::BATCH_SIZE)
+            .map(|_| serde_json::json!({ "embedding": embedding }))
+            .collect();
+        let response_body = serde_json::json!({ "data": data_items }).to_string();
+
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(response_body);
+        });
+
+        let embed_config = Some(Arc::new(EmbedConfig {
+            url: server.url("/"),
+            model: "test".to_string(),
+        }));
+
+        let params = IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config,
+        };
+
+        let response = index_project(params).await.unwrap();
+        assert_eq!(
+            response["embeddings"],
+            serde_json::json!("ok"),
+            "expected embeddings=ok when all symbols embedded; response={response}"
+        );
+        let count = response["embeddings_count"]
+            .as_u64()
+            .expect("embeddings_count should be a number");
+        assert!(count > 0, "embeddings_count should be > 0");
+    }
+
+    /// Requirements 9.2: response includes `"embeddings": "partial"` and `embeddings_skipped > 0`
+    /// when the mock server returns HTTP 500 for all requests.
+    #[tokio::test]
+    async fn test_index_project_embeddings_partial() {
+        use httpmock::prelude::*;
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn foo() {}\npub fn bar() {}",
+        )
+        .unwrap();
+
+        // Mock server always returns HTTP 500 → all symbols skipped.
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(500).body("internal server error");
+        });
+
+        let embed_config = Some(Arc::new(EmbedConfig {
+            url: server.url("/"),
+            model: "test".to_string(),
+        }));
+
+        let params = IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config,
+        };
+
+        let response = index_project(params).await.unwrap();
+        assert_eq!(
+            response["embeddings"],
+            serde_json::json!("partial"),
+            "expected embeddings=partial when server returns 500; response={response}"
+        );
+        let skipped = response["embeddings_skipped"]
+            .as_u64()
+            .expect("embeddings_skipped should be a number");
+        assert!(skipped > 0, "embeddings_skipped should be > 0");
     }
 }

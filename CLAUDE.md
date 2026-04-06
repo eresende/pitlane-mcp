@@ -12,3 +12,15 @@ Use pitlane-mcp for all code lookups when available.
 8. Use get_lines to fetch a specific block by line range when it isn't a named symbol.
 9. Use get_index_stats to orient yourself in a new codebase without burning tokens on get_project_outline.
 10. Fall back to direct file reads only when editing or when full file context is genuinely required.
+
+# Semantic Search
+
+When pitlane-mcp semantic search is available (PITLANE_EMBED_URL and PITLANE_EMBED_MODEL are set):
+
+1. Use mode="semantic" when you know what a symbol does but not its name — describe the intent, e.g. "retry logic for failed HTTP requests".
+2. Use mode="bm25" or mode="exact" when you know the symbol name or a distinctive substring.
+3. Write semantic queries as intent descriptions, not keywords — combine action + subject: "serialize struct to JSON bytes", not just "serialize".
+4. Always scan the top 3–5 semantic results before concluding — the top hit is not always the best match.
+5. If semantic results look unrelated, rephrase with more context or fall back to mode="bm25".
+6. After finding a candidate, call get_symbol to read the full implementation before acting on it.
+7. If search_symbols with mode="semantic" returns an error, fall back to mode="bm25" automatically — do not surface the error to the user.

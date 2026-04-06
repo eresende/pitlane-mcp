@@ -400,6 +400,14 @@ cargo bench --bench queries -- "ripgrep|gin"
 cargo bench --bench indexing
 ```
 
+## Experimental Features
+
+### Semantic Search
+
+pitlane-mcp supports opt-in semantic search powered by locally-running embedding models via [Ollama](https://ollama.com) or [LM Studio](https://lmstudio.ai). When enabled, `search_symbols` gains a `"semantic"` mode that ranks results by meaning rather than keyword overlap — useful for finding symbols by concept when you don't know their exact names.
+
+See [SEMANTIC_SEARCH.md](SEMANTIC_SEARCH.md) for setup instructions, model recommendations, and known limitations.
+
 ## Security
 
 pitlane-mcp is a fully local tool with no network calls. The following design properties are intentional but worth understanding before deploying it with AI agents.

@@ -82,7 +82,7 @@ impl Indexer {
         root: &Path,
         exclude_patterns: &[String],
         max_files: usize,
-        on_progress: Option<&(dyn Fn(usize, usize) + Send)>,
+        on_progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
     ) -> anyhow::Result<(SymbolIndex, usize)> {
         let exclude_set = Self::build_exclude_set(exclude_patterns)?;
 
@@ -152,9 +152,11 @@ impl Indexer {
             .into());
         }
 
+        let total_files = eligible.len();
+
         // Notify: Phase 1 complete — we now know the total file count.
         if let Some(cb) = on_progress {
-            cb(0, eligible.len());
+            cb(0, total_files);
         }
 
         // Phase 2 — parse files in parallel.
@@ -172,10 +174,29 @@ impl Indexer {
             .stack_size(64 * 1024 * 1024)
             .build()
             .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
+
+        // Throttle progress ticks: fire every ~5% of files, minimum every 10 files,
+        // but at least once. This keeps notification overhead negligible even for
+        // large codebases while still giving visible progress for small ones.
+        let tick_interval = ((total_files / 20).max(10)).max(1);
+        let completed = std::sync::atomic::AtomicUsize::new(0);
+
         let parsed: Vec<Vec<language::Symbol>> = pool.install(|| {
             eligible
                 .par_iter()
-                .filter_map(|path| self.parse_file(path, root).ok())
+                .filter_map(|path| {
+                    let result = self.parse_file(path, root).ok();
+                    if let Some(cb) = on_progress {
+                        let prev = completed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let current = prev + 1;
+                        // Fire on every tick_interval boundary.
+                        if current % tick_interval == 0 {
+                            cb(current, total_files);
+                        }
+                    }
+                    result
+                })
                 .collect()
         });
 
@@ -188,9 +209,9 @@ impl Indexer {
             }
         }
 
-        // Notify: Phase 2+3 complete.
+        // Notify: Phase 2+3 complete (always fire the final tick).
         if let Some(cb) = on_progress {
-            cb(file_count, file_count);
+            cb(file_count, total_files);
         }
 
         Ok((index, file_count))

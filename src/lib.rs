@@ -1,7 +1,9 @@
 pub mod cache;
+pub mod embed;
 pub mod error;
 pub mod index;
 pub mod indexer;
+pub mod indexing;
 pub mod stats;
 pub mod tools;
 pub mod watcher;

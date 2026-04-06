@@ -67,6 +67,7 @@ fn prepare(path: &str, rt: &Runtime) -> Option<Setup> {
         max_files: None,
         progress_token: None,
         peer: None,
+        embed_config: None,
     }))
     .ok()?;
 
@@ -179,6 +180,7 @@ fn bench_search_symbols(c: &mut Criterion, setups: &[(&str, Setup)]) {
                         limit: Some(20),
                         offset: None,
                         mode: Some("bm25".to_string()),
+                        embed_config: None,
                     }))
                     .unwrap()
                 })
@@ -206,6 +208,7 @@ fn bench_search_symbols_exact(c: &mut Criterion, setups: &[(&str, Setup)]) {
                         limit: Some(20),
                         offset: None,
                         mode: Some("exact".to_string()),
+                        embed_config: None,
                     }))
                     .unwrap()
                 })
@@ -233,6 +236,7 @@ fn bench_search_symbols_fuzzy(c: &mut Criterion, setups: &[(&str, Setup)]) {
                         limit: Some(20),
                         offset: None,
                         mode: Some("fuzzy".to_string()),
+                        embed_config: None,
                     }))
                     .unwrap()
                 })

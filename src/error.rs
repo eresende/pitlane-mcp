@@ -22,6 +22,8 @@ pub enum ToolError {
     InvalidArgument { param: String, message: String },
     /// The file walk would exceed the configured max-file cap.
     FileLimitExceeded { path: String, limit: usize },
+    /// Indexing is running in the background for this project; the index is not ready yet.
+    IndexingInProgress { project: String },
     /// Catch-all for unexpected I/O or internal failures.
     Internal { message: String },
 }
@@ -33,6 +35,7 @@ impl ToolError {
             ToolError::SymbolNotFound { .. } => "SYMBOL_NOT_FOUND",
             ToolError::InvalidArgument { .. } => "INVALID_ARGUMENT",
             ToolError::FileLimitExceeded { .. } => "FILE_LIMIT_EXCEEDED",
+            ToolError::IndexingInProgress { .. } => "INDEXING_IN_PROGRESS",
             ToolError::Internal { .. } => "INTERNAL_ERROR",
         }
     }
@@ -48,6 +51,9 @@ impl ToolError {
             }
             ToolError::FileLimitExceeded { .. } => {
                 "Narrow the project path, add exclude patterns, or raise max_files."
+            }
+            ToolError::IndexingInProgress { .. } => {
+                "Wait for the background index_project to complete, then retry."
             }
             ToolError::Internal { .. } => "Check the project path and try again.",
         }
@@ -81,6 +87,11 @@ impl std::fmt::Display for ToolError {
                 f,
                 "Indexing '{}' would exceed the {}-file cap.",
                 path, limit
+            ),
+            ToolError::IndexingInProgress { project } => write!(
+                f,
+                "Project '{}' is currently being indexed in the background. Please wait for indexing to complete before querying.",
+                project
             ),
             ToolError::Internal { message } => write!(f, "{}", message),
         }

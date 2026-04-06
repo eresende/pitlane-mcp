@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
+use crate::embed::EmbedConfig;
 use crate::index::format::index_dir;
 use crate::tools::index_project::load_project_index;
 use crate::watcher::ProjectWatcher;
@@ -13,6 +14,7 @@ pub struct WatchProjectParams {
     pub project: String,
     pub stop: Option<bool>,
     pub status_only: Option<bool>,
+    pub embed_config: Option<Arc<EmbedConfig>>,
 }
 
 pub struct WatcherRegistry {
@@ -32,7 +34,11 @@ impl WatcherRegistry {
         }
     }
 
-    pub async fn watch(&self, project: &str) -> anyhow::Result<Value> {
+    pub async fn watch(
+        &self,
+        project: &str,
+        embed_config: Option<Arc<EmbedConfig>>,
+    ) -> anyhow::Result<Value> {
         let canonical = Path::new(project)
             .canonicalize()
             .unwrap_or_else(|_| Path::new(project).to_path_buf());
@@ -62,8 +68,13 @@ impl WatcherRegistry {
         let index_path = idx_dir.join("index.bin");
         let meta_path = idx_dir.join("meta.json");
 
-        let watcher =
-            ProjectWatcher::start(canonical.clone(), project_index_arc, index_path, meta_path)?;
+        let watcher = ProjectWatcher::start(
+            canonical.clone(),
+            project_index_arc,
+            index_path,
+            meta_path,
+            embed_config,
+        )?;
 
         {
             let mut watchers = self.watchers.lock().unwrap();
@@ -120,6 +131,6 @@ pub async fn watch_project(
     } else if params.stop.unwrap_or(false) {
         Ok(registry.stop(&params.project))
     } else {
-        registry.watch(&params.project).await
+        registry.watch(&params.project, params.embed_config).await
     }
 }
