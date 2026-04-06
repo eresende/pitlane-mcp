@@ -175,6 +175,12 @@ High-level overview of the project: files grouped by directory with symbol count
 { "project": "/your/project", "depth": 2 }
 ```
 
+Optional parameters:
+
+- `summary: true` — return only directory names with file and symbol counts, no per-file items or kind breakdowns. Use for very large codebases (>10k files) where the full outline exceeds token limits. Agents should retry with this flag if the normal response is too large.
+- `path` — scope the outline to a subtree (e.g. `"kernel/sched"`). Combine with `depth` to drill into a specific area of a large repo.
+- `max_dirs` — cap the number of directory entries returned (default: 50, max: 500). When the result is truncated, the response includes a `hint` suggesting `path` or `summary: true`.
+
 ### `find_usages`
 
 Find all locations that reference a symbol by name.

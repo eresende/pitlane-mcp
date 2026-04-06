@@ -298,6 +298,9 @@ fn bench_get_project_outline(c: &mut Criterion, setups: &[(&str, Setup)]) {
                     rt.block_on(get_project_outline(GetProjectOutlineParams {
                         project: project.clone(),
                         depth: Some(2),
+                        path: None,
+                        max_dirs: None,
+                        summary: None,
                     }))
                     .unwrap()
                 })
