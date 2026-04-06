@@ -88,39 +88,9 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
     // return "started" to the client.
     std::fs::create_dir_all(&idx_dir)?;
 
-    // When the caller supplies a progress token, stay synchronous — the client
-    // is actively listening for progress notifications during the request and
-    // will display them as the index builds. Returning early would close the
-    // request context and silence all subsequent notifications.
-    //
-    // When there is NO progress token AND a peer is present (e.g. OpenCode which
-    // times out on long requests), spawn indexing in the background and return
-    // "started" immediately so the client doesn't time out. The INDEXING_IN_PROGRESS
-    // guard in load_project_index prevents other tools from querying a partial index.
-    //
-    // When there is no peer at all (tests, CLI), stay synchronous so callers get
-    // the full result.
-    if params.progress_token.is_none() && params.peer.is_some() {
-        let path_str = canonical.display().to_string();
-        crate::indexing::mark(canonical.clone());
-        tokio::spawn(async move {
-            match do_index_project(params, canonical.clone(), exclude, idx_dir, force).await {
-                Ok(_) => crate::indexing::unmark(&canonical),
-                Err(e) => {
-                    crate::indexing::unmark(&canonical);
-                    tracing::error!(path = %path_str, error = %e, "background index_project failed");
-                }
-            }
-        });
-
-        return Ok(json!({
-            "status": "started",
-            "message": "Indexing started in the background. Other pitlane tools will return INDEXING_IN_PROGRESS until complete.",
-        }));
-    }
-
-    // Synchronous path: either a progress token is present (client shows live
-    // progress while the call is in-flight) or there is no peer (tests/CLI).
+    // Always run synchronously so the caller can immediately use the index
+    // after this call returns, regardless of whether a progress token or peer
+    // is present.
     do_index_project(params, canonical, exclude, idx_dir, force).await
 }
 
