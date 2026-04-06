@@ -55,8 +55,7 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
             let rel_str = rel.to_string_lossy().replace('\\', "/");
 
             if let Some(ref prefix) = path_filter {
-                if !rel_str.starts_with(prefix.as_str())
-                    && rel_str != prefix.trim_end_matches('/')
+                if !rel_str.starts_with(prefix.as_str()) && rel_str != prefix.trim_end_matches('/')
                 {
                     continue;
                 }
@@ -81,9 +80,9 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
         let dirs_json: Vec<Value> = dir_summary
             .iter()
             .take(max_dirs)
-            .map(|(dir, (files, symbols))| {
-                json!({ "dir": dir, "files": files, "symbols": symbols })
-            })
+            .map(
+                |(dir, (files, symbols))| json!({ "dir": dir, "files": files, "symbols": symbols }),
+            )
             .collect();
 
         let mut result = json!({
