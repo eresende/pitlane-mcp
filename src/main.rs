@@ -190,7 +190,7 @@ fn err_to_text(e: anyhow::Error) -> String {
 #[tool_router]
 impl PitlaneMcp {
     #[tool(
-        description = "Call first to parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time. Also generates vector embeddings for semantic search (mode=\"semantic\") when PITLANE_EMBED_URL and PITLANE_EMBED_MODEL are configured — no separate step needed.",
+        description = "Call first to parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time. Also generates vector embeddings for semantic search (mode=\"semantic\") when PITLANE_EMBED_URL and PITLANE_EMBED_MODEL are configured — embeddings are generated in the background so the call returns immediately even for large repos. The response includes an \"embeddings\" field: \"running\" means generation is in progress (semantic search will work once it completes), \"ok\" means embeddings are ready, \"disabled\" means no embed config was found.",
         meta = tool_meta("index parse cache project"),
         annotations(
             read_only_hint = false,
@@ -390,7 +390,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Return symbol counts by language and kind for an indexed project — lightweight orientation tool. Use instead of get_project_outline when you only need aggregate numbers, not the file tree.",
+        description = "Return symbol counts by language and kind for an indexed project — lightweight orientation tool. Use instead of get_project_outline when you only need aggregate numbers, not the file tree. Also reports embedding progress: \"embeddings\" is \"disabled\", \"running\", or \"ok\"; when enabled, includes embeddings_stored, embeddings_total, and embeddings_percent fields so you can poll completion.",
         meta = tool_meta("stats symbols language kind count index"),
         annotations(
             read_only_hint = true,

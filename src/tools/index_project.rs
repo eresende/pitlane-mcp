@@ -71,13 +71,54 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
                         tracing::warn!(error = %e, "BM25 ensure failed; search will fall back to exact");
                     }
                     // Populate the in-memory cache so subsequent queries skip disk I/O.
-                    crate::cache::insert(canonical.clone(), index);
+                    let cached_index = crate::cache::insert(canonical.clone(), index);
+
+                    // If embeddings are configured but the store is missing or empty,
+                    // kick off background embedding so the cached index gets vectors
+                    // without requiring a force re-index.
+                    let store_path = idx_dir.join("embeddings.bin");
+                    let embed_status = if let Some(cfg) = params.embed_config.clone() {
+                        let needs_embed = !store_path.exists() || {
+                            crate::embed::store::EmbedStore::load(&store_path)
+                                .map(|s| s.vectors.is_empty())
+                                .unwrap_or(true)
+                        };
+                        if needs_embed {
+                            let index_for_embed = Arc::clone(&cached_index);
+                            let cfg_clone = Arc::clone(&cfg);
+                            tokio::spawn(async move {
+                                let result = crate::embed::generate_embeddings(
+                                    &index_for_embed,
+                                    &cfg_clone,
+                                    &store_path,
+                                    false,
+                                    None,
+                                )
+                                .await;
+                                if let Some(err) = result.error {
+                                    tracing::error!(error = %err, "embed: background embedding failed");
+                                } else {
+                                    tracing::info!(
+                                        stored = result.stored,
+                                        elapsed_ms = result.elapsed_ms,
+                                        "embed: background embedding complete"
+                                    );
+                                }
+                            });
+                            "running"
+                        } else {
+                            "ok"
+                        }
+                    } else {
+                        "disabled"
+                    };
+
                     return Ok(json!({
                         "status": "cached",
                         "symbol_count": symbol_count,
                         "file_count": file_count,
                         "index_path": index_path.display().to_string(),
-                        "embeddings": "disabled",
+                        "embeddings": embed_status,
                     }));
                 }
             }
@@ -235,82 +276,72 @@ async fn do_index_project(
 
     let cached_index = crate::cache::insert(canonical_for_meta, index);
 
-    // Embedding phase (opt-in)
-    let (embed_status, embed_count, embed_skipped, embed_ms, embed_error) = if let Some(cfg) =
-        &params.embed_config
-    {
+    // Embedding phase (opt-in) — runs in a background task so the MCP response
+    // is returned immediately, avoiding client-side timeouts on large repos.
+    let embed_status = if let Some(cfg) = params.embed_config.clone() {
         let store_path = idx_dir.join("embeddings.bin");
-
-        // Wire up MCP progress notifications for the embedding phase.
         let embed_peer = params.peer.clone();
         let embed_token = params.progress_token.clone();
-        let progress_cb: Option<Box<dyn Fn(usize, usize) + Send + Sync>> =
-            if let (Some(peer), Some(token)) = (embed_peer, embed_token) {
-                // Spawn a drainer for embedding progress notifications.
-                let (embed_tx, mut embed_rx) = tokio::sync::mpsc::channel::<(usize, usize)>(256);
-                tokio::spawn(async move {
-                    while let Some((completed, total)) = embed_rx.recv().await {
-                        let notif = ProgressNotificationParam::new(token.clone(), completed as f64)
-                            .with_total(total as f64)
-                            .with_message(format!("Embedding symbols… {completed}/{total}",));
-                        let _ = peer.notify_progress(notif).await;
-                    }
-                });
-                Some(Box::new(move |completed, total| {
-                    let _ = embed_tx.try_send((completed, total));
-                }))
-            } else {
-                None
-            };
+        let index_for_embed = Arc::clone(&cached_index);
+        let cfg_clone = Arc::clone(&cfg);
 
-        let result = crate::embed::generate_embeddings(
-            &cached_index,
-            cfg,
-            &store_path,
-            force,
-            progress_cb.as_deref(),
-        )
-        .await;
-        let status = if result.error.is_some() {
-            "error"
-        } else if result.skipped > 0 {
-            "partial"
-        } else {
-            "ok"
-        };
-        (
-            status,
-            result.stored,
-            result.skipped,
-            result.elapsed_ms,
-            result.error,
-        )
+        tokio::spawn(async move {
+            let progress_cb: Option<Box<dyn Fn(usize, usize) + Send + Sync>> =
+                if let (Some(peer), Some(token)) = (embed_peer, embed_token) {
+                    let (embed_tx, mut embed_rx) =
+                        tokio::sync::mpsc::channel::<(usize, usize)>(256);
+                    tokio::spawn(async move {
+                        while let Some((completed, total)) = embed_rx.recv().await {
+                            let notif =
+                                ProgressNotificationParam::new(token.clone(), completed as f64)
+                                    .with_total(total as f64)
+                                    .with_message(format!("Embedding symbols… {completed}/{total}"));
+                            let _ = peer.notify_progress(notif).await;
+                        }
+                    });
+                    Some(Box::new(move |completed, total| {
+                        let _ = embed_tx.try_send((completed, total));
+                    }) as Box<dyn Fn(usize, usize) + Send + Sync>)
+                } else {
+                    None
+                };
+
+            let result = crate::embed::generate_embeddings(
+                &index_for_embed,
+                &cfg_clone,
+                &store_path,
+                force,
+                progress_cb.as_deref(),
+            )
+            .await;
+
+            if let Some(err) = result.error {
+                tracing::error!(error = %err, "embed: background embedding failed");
+            } else {
+                tracing::info!(
+                    stored = result.stored,
+                    skipped = result.skipped,
+                    elapsed_ms = result.elapsed_ms,
+                    "embed: background embedding complete"
+                );
+            }
+        });
+
+        "running"
     } else {
-        ("disabled", 0, 0, 0, None)
+        "disabled"
     };
 
     let elapsed = start.elapsed().as_millis() as u64;
 
-    let mut response = json!({
+    Ok(json!({
         "status": "indexed",
         "symbol_count": symbol_count,
         "file_count": file_count,
         "index_path": index_path.display().to_string(),
         "elapsed_ms": elapsed,
         "embeddings": embed_status,
-    });
-
-    if embed_status != "disabled" {
-        let obj = response.as_object_mut().unwrap();
-        obj.insert("embeddings_count".to_string(), json!(embed_count));
-        obj.insert("embeddings_skipped".to_string(), json!(embed_skipped));
-        obj.insert("embeddings_ms".to_string(), json!(embed_ms));
-        if let Some(err) = embed_error {
-            obj.insert("embeddings_error".to_string(), json!(err));
-        }
-    }
-
-    Ok(response)
+    }))
 }
 
 fn default_excludes() -> Vec<String> {
