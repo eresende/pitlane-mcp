@@ -43,12 +43,66 @@ struct Setup {
     project: String,
     symbol_id: String,
     search_query: String,
+    /// The search_query split into lowercase words at camelCase/digit boundaries,
+    /// joined with spaces. Used to benchmark BM25 with partial-word queries.
+    search_query_split: String,
     /// Relative path of the file containing the benchmark target symbol.
     /// Derived from the symbol_id prefix (format: `path/to/file::Name#kind`).
     file_path: String,
 }
 
-/// Index the repo (if not already up-to-date), load the index, and pick a
+/// Split a camelCase/snake_case identifier into lowercase words, mirroring the
+/// `CamelCaseTokenizer` in `src/index/bm25.rs`. Used to build split-word BM25
+/// queries that exercise the tokenizer's camelCase decomposition.
+fn split_identifier(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let n = chars.len();
+    let mut words: Vec<String> = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+
+    while i <= n {
+        let split = if i == n || !chars[i].is_alphanumeric() {
+            true
+        } else if i > start {
+            let prev = chars[i - 1];
+            let cur = chars[i];
+            let lower_to_upper =
+                (prev.is_lowercase() || prev.is_ascii_digit()) && cur.is_uppercase();
+            let caps_run_end = i + 1 < n
+                && prev.is_uppercase()
+                && cur.is_uppercase()
+                && chars[i + 1].is_lowercase();
+            let digit_letter = (prev.is_ascii_digit() && cur.is_alphabetic())
+                || (prev.is_alphabetic() && cur.is_ascii_digit());
+            lower_to_upper || caps_run_end || digit_letter
+        } else {
+            false
+        };
+
+        if split {
+            if i > start {
+                let word: String = chars[start..i]
+                    .iter()
+                    .map(|c| c.to_lowercase().next().unwrap())
+                    .collect();
+                words.push(word);
+            }
+            if i < n && !chars[i].is_alphanumeric() {
+                i += 1;
+            }
+            start = i;
+            if i == n {
+                break;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    words.join(" ")
+}
+
 /// representative struct/class as the benchmark target symbol.
 ///
 /// Also reports the median token efficiency across all struct/class symbols,
@@ -158,6 +212,7 @@ fn prepare(path: &str, rt: &Runtime) -> Option<Setup> {
         project: path.to_string(),
         symbol_id: target.id.clone(),
         search_query: target.name.clone(),
+        search_query_split: split_identifier(&target.name),
         file_path,
     })
 }
@@ -208,6 +263,38 @@ fn bench_search_symbols_exact(c: &mut Criterion, setups: &[(&str, Setup)]) {
                         limit: Some(20),
                         offset: None,
                         mode: Some("exact".to_string()),
+                        embed_config: None,
+                    }))
+                    .unwrap()
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_search_symbols_bm25_split(c: &mut Criterion, setups: &[(&str, Setup)]) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("search_symbols");
+    for (label, setup) in setups {
+        // Only meaningful when the name actually splits into multiple words.
+        if !setup.search_query_split.contains(' ') {
+            continue;
+        }
+        group.bench_with_input(
+            BenchmarkId::new("bm25_split", label),
+            &setup.search_query_split,
+            |b, query| {
+                b.iter(|| {
+                    rt.block_on(search_symbols(SearchSymbolsParams {
+                        project: setup.project.clone(),
+                        query: query.clone(),
+                        kind: None,
+                        language: None,
+                        file: None,
+                        limit: Some(20),
+                        offset: None,
+                        mode: Some("bm25".to_string()),
                         embed_config: None,
                     }))
                     .unwrap()
@@ -357,6 +444,7 @@ fn query_benchmarks(c: &mut Criterion) {
     bench_search_symbols(c, &setups);
     bench_search_symbols_exact(c, &setups);
     bench_search_symbols_fuzzy(c, &setups);
+    bench_search_symbols_bm25_split(c, &setups);
     bench_get_symbol(c, &setups);
     bench_get_file_outline(c, &setups);
     bench_get_project_outline(c, &setups);
