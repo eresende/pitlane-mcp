@@ -190,7 +190,7 @@ impl Indexer {
                         let prev = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let current = prev + 1;
                         // Fire on every tick_interval boundary.
-                        if current % tick_interval == 0 {
+                        if current.is_multiple_of(tick_interval) {
                             cb(current, total_files);
                         }
                     }

@@ -189,6 +189,7 @@ pub fn normalise(v: &mut [f32]) {
 ///   1. OpenAI: `data[i].embedding` (array of objects)
 ///   2. Ollama /api/embed: `embeddings[i]` (nested array, plural) — current API
 ///   3. Ollama /api/embeddings: `embedding` (flat array, singular) — legacy API
+///
 /// Returns `vec![None; n]` on any parse failure.
 pub(crate) fn parse_response(json: &serde_json::Value, n: usize) -> Vec<Option<Vec<f32>>> {
     // 1. OpenAI format: data[i].embedding

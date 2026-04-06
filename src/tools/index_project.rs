@@ -275,9 +275,7 @@ async fn do_index_project(
         let embed_peer = params.peer.clone();
         let embed_token = params.progress_token.clone();
         let progress_cb: Option<Box<dyn Fn(usize, usize) + Send + Sync>> =
-            if embed_peer.is_some() && embed_token.is_some() {
-                let peer = embed_peer.unwrap();
-                let token = embed_token.unwrap();
+            if let (Some(peer), Some(token)) = (embed_peer, embed_token) {
                 // Spawn a drainer for embedding progress notifications.
                 let (embed_tx, mut embed_rx) = tokio::sync::mpsc::channel::<(usize, usize)>(256);
                 tokio::spawn(async move {
