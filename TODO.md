@@ -1,15 +1,12 @@
 # Roadmap
 
-## TODO
-
-- [ ] **BM25 camelCase tokenizer** — tantivy's default tokenizer splits on non-alphanumeric chars only, so `LowerInstruction` is indexed as a single token and won't match queries for "lower instruction". Add a custom tokenizer that also splits at camelCase boundaries (e.g. `LowerInstruction` → `["lower", "instruction"]`). Required for good BM25 quality on C++, Java, Swift, Kotlin, and C# codebases. Confirmed broken on LLVM.
-
 ## COMPLETED!
 
 ### Optimizations
 
 _These items improve token efficiency, usability, and observability of the MCP tools._
 
+- [x] **BM25 camelCase tokenizer** — custom tantivy tokenizer splits at camelCase/digit boundaries (`LowerInstruction` → `["lower", "instruction"]`); improves BM25 quality on C++, Java, Swift, Kotlin, and C# codebases
 - [x] **`get_symbol` signature-only default for classes** — when fetching a class/struct symbol, return signature + docstring only by default (no method bodies); agents almost always want the shape, not the implementation _(High value, low effort)_
 - [x] **`search_symbols` fuzzy matching** — add Levenshtein or trigram matching as a fallback when substring search returns no results; helps agents recover from slightly wrong names _(High value, low effort)_
 - [x] **Symbol cross-references in `get_symbol` response** — include a `references` list of symbols directly used by the fetched symbol (calls, type references); saves a separate `find_usages` round-trip _(High value, low effort)_

@@ -11,7 +11,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 ## Features
 
 - **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, and Bash source into structured symbols
-- **BM25 full-text search** — tantivy-backed ranked search over name, qualified name, signature, and doc fields; falls back to exact substring match if the index isn't ready
+- **BM25 full-text search** — tantivy-backed ranked search over name, qualified name, signature, and doc fields with a custom camelCase tokenizer (`LowerInstruction` → `["lower", "instruction"]`); falls back to exact substring match if the index isn't ready
 - **Ten MCP tools** for navigation: outline, search, fetch, line-range fetch, find usages, index stats, usage stats
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
