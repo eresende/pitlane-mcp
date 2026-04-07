@@ -161,13 +161,12 @@ impl Indexer {
 
         // Phase 2 — parse files in parallel.
         // Each parse_file call is CPU-bound and independent: it creates its own
-        // tree-sitter Parser and reads a single file. A dedicated thread pool
-        // caps parallelism at 6 to avoid OOM on large codebases (e.g. LLVM).
-        // Stack size is bumped to 64 MiB per thread: tree-sitter recurses deeply
-        // into heavily-templated C++ (e.g. LLVM headers) and overflows the
-        // default 8 MiB stack.
+        // tree-sitter Parser and reads a single file. Thread count is capped at
+        // min(available_parallelism, 16) to avoid OOM on very large codebases
+        // (e.g. LLVM). Stack size is bumped to 64 MiB per thread: tree-sitter
+        // recurses deeply into heavily-templated C++ and overflows the default 8 MiB.
         let threads = std::thread::available_parallelism()
-            .map(|n| (n.get() / 2).max(1))
+            .map(|n| n.get().min(16))
             .unwrap_or(4);
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)

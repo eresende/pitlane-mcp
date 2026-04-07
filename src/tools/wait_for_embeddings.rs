@@ -23,8 +23,6 @@ pub struct WaitForEmbeddingsParams {
     pub embed_config: Option<Arc<EmbedConfig>>,
 }
 
-
-
 pub async fn wait_for_embeddings(params: WaitForEmbeddingsParams) -> anyhow::Result<Value> {
     // Embeddings disabled — return immediately.
     if params.embed_config.is_none() {
@@ -92,7 +90,11 @@ pub async fn wait_for_embeddings(params: WaitForEmbeddingsParams) -> anyhow::Res
         }
 
         if std::time::Instant::now() >= deadline {
-            let pct = if total == 0 { 100.0 } else { (stored as f64 / total as f64 * 100.0).min(100.0) };
+            let pct = if total == 0 {
+                100.0
+            } else {
+                (stored as f64 / total as f64 * 100.0).min(100.0)
+            };
             return Ok(json!({
                 "status": "timeout",
                 "embeddings_stored": stored,

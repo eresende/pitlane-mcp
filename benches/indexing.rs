@@ -26,8 +26,9 @@ const REPOS: &[(&str, &str)] = &[
 
 fn bench_index_project(c: &mut Criterion) {
     let mut group = c.benchmark_group("index_project");
-    // Indexing a full repo is slow; use flat sampling with a small sample size.
-    group.measurement_time(Duration::from_secs(60));
+    // Flat sampling: each sample is one full index_project call.
+    // 15s window gives enough iterations even for the slowest repos (~80ms each).
+    group.measurement_time(Duration::from_secs(15));
     group.sample_size(10);
     group.sampling_mode(SamplingMode::Flat);
 

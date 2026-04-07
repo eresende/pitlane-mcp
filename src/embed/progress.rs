@@ -6,7 +6,7 @@
 //! finishes.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,9 +31,9 @@ static REGISTRY: LazyLock<RwLock<HashMap<PathBuf, EmbedProgress>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Record that embedding has started for a project.
-pub fn start(project: &PathBuf, total: usize) {
+pub fn start(project: &Path, total: usize) {
     REGISTRY.write().unwrap().insert(
-        project.clone(),
+        project.to_path_buf(),
         EmbedProgress {
             stored: 0,
             total,
@@ -45,14 +45,14 @@ pub fn start(project: &PathBuf, total: usize) {
 
 /// Set the current progress for a project (keyed by canonical path).
 /// Preserves `started_at` from the existing entry if present.
-pub fn set(project: &PathBuf, stored: usize, total: usize) {
+pub fn set(project: &Path, stored: usize, total: usize) {
     let mut reg = REGISTRY.write().unwrap();
     let started_at = reg
         .get(project)
         .map(|p| p.started_at)
         .unwrap_or_else(now_secs);
     reg.insert(
-        project.clone(),
+        project.to_path_buf(),
         EmbedProgress {
             stored,
             total,
@@ -63,7 +63,7 @@ pub fn set(project: &PathBuf, stored: usize, total: usize) {
 }
 
 /// Mark embedding as finished, recording the completion timestamp.
-pub fn finish(project: &PathBuf) {
+pub fn finish(project: &Path) {
     let mut reg = REGISTRY.write().unwrap();
     if let Some(entry) = reg.get_mut(project) {
         entry.finished_at = Some(now_secs());
@@ -71,11 +71,11 @@ pub fn finish(project: &PathBuf) {
 }
 
 /// Get the current progress for a project, or `None` if not tracked.
-pub fn get(project: &PathBuf) -> Option<EmbedProgress> {
+pub fn get(project: &Path) -> Option<EmbedProgress> {
     REGISTRY.read().unwrap().get(project).copied()
 }
 
 /// Remove the entry once embedding is complete (optional cleanup).
-pub fn remove(project: &PathBuf) {
+pub fn remove(project: &Path) {
     REGISTRY.write().unwrap().remove(project);
 }

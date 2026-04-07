@@ -79,7 +79,9 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
                     // kick off background embedding so the cached index gets vectors
                     // without requiring a force re-index.
                     let store_path = idx_dir.join("embeddings.bin");
-                    let (embed_status, embed_started_at) = if let Some(cfg) = params.embed_config.clone() {
+                    let (embed_status, embed_started_at) = if let Some(cfg) =
+                        params.embed_config.clone()
+                    {
                         let needs_embed = !store_path.exists() || {
                             crate::embed::store::EmbedStore::load(&store_path)
                                 .map(|s| s.vectors.is_empty())
