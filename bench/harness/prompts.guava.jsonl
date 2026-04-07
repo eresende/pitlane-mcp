@@ -1,0 +1,12 @@
+{"id":"symbol_immutable_list","category":"symbol_grounding","prompt":"Find where ImmutableList is implemented in this repository. Show the main source file, the builder implementation, and the most relevant test files. Explain the relationship between them."}
+{"id":"symbol_cache_builder","category":"symbol_grounding","prompt":"Find the implementation of CacheBuilder and trace how it leads to a concrete cache implementation at runtime. List the most important classes involved."}
+{"id":"symbol_range","category":"symbol_grounding","prompt":"Locate the code that implements Range and explain which classes handle contiguous ranges, cuts, and comparisons."}
+{"id":"usage_loading_cache","category":"find_usages","prompt":"Trace how LoadingCache.get(K) works internally in Guava. Start from the public API and walk through the main internal call path until the value is loaded."}
+{"id":"usage_futures_transform","category":"find_usages","prompt":"Find where Futures.transform is implemented and identify the classes responsible for scheduling and executing the transformation callback."}
+{"id":"usage_multimaps_index","category":"find_usages","prompt":"Show me the call chain from Multimaps.index to the data structures it returns. Explain which collection types are created underneath."}
+{"id":"tests_splitter","category":"find_tests","prompt":"I want to understand Splitter behavior. Find the most relevant production files and the best tests that document tricky edge cases. Summarize the edge cases covered by the tests."}
+{"id":"tests_immutable_set_builder","category":"find_tests","prompt":"Find tests for ImmutableSet.Builder duplicate handling and explain what behavior is guaranteed."}
+{"id":"tests_rate_limiter_warmup","category":"find_tests","prompt":"Find the best tests covering RateLimiter warmup behavior and explain what scenarios they validate."}
+{"id":"arch_graph_api","category":"architecture","prompt":"Explain how Guava’s graph APIs are organized. Identify the main public interfaces, key implementations, and any immutable or mutable variants. Point me to the most central files."}
+{"id":"arch_cache_subsystem","category":"architecture","prompt":"Give me a high-level map of Guava’s caching subsystem. Group the important classes by role: public API, builders/config, core cache logic, eviction/maintenance, and tests."}
+{"id":"arch_collect_package","category":"architecture","prompt":"Explain the package structure around com.google.common.collect. Which files look foundational, and which are convenience utilities layered on top?"}
