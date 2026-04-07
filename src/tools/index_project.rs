@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
-use rmcp::model::{ProgressNotificationParam, ProgressToken};
+use rmcp::model::{
+    LoggingLevel, LoggingMessageNotificationParam, ProgressNotificationParam, ProgressToken,
+};
 use rmcp::service::Peer;
 use rmcp::RoleServer;
 use serde_json::{json, Value};
@@ -85,23 +87,22 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
                         };
                         if needs_embed {
                             let index_for_embed = Arc::clone(&cached_index);
-                            let cfg_clone = Arc::clone(&cfg);
                             tokio::spawn(async move {
                                 let result = crate::embed::generate_embeddings(
                                     &index_for_embed,
-                                    &cfg_clone,
+                                    &cfg,
                                     &store_path,
                                     false,
                                     None,
                                 )
                                 .await;
                                 if let Some(err) = result.error {
-                                    tracing::error!(error = %err, "embed: background embedding failed");
+                                    tracing::error!(error = %err, "embed: background embedding failed (cached path)");
                                 } else {
                                     tracing::info!(
                                         stored = result.stored,
                                         elapsed_ms = result.elapsed_ms,
-                                        "embed: background embedding complete"
+                                        "embed: background embedding complete (cached path)"
                                     );
                                 }
                             });
@@ -156,38 +157,52 @@ async fn do_index_project(
     info!(path = %canonical.display(), "index_project: walking files");
 
     // Progress notifications bridge: the rayon callback sends (current, total)
-    // into a channel; a concurrent async task drains it and calls notify_progress.
+    // into a channel; a concurrent async task drains it and sends notifications.
     // This avoids block_in_place (invalid inside tokio::spawn) while keeping
     // notifications live as parsing progresses.
+    // Two notification channels are used:
+    //   1. notifications/message (logging) — works for all clients
+    //   2. notifications/progress — only when the client sent a progress_token
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<(usize, usize, String)>(256);
 
     // Spawn the drainer task before the blocking work starts.
-    let drain_handle: Option<tokio::task::JoinHandle<()>> =
-        if let (Some(token), Some(peer)) = (progress_token.clone(), peer.clone()) {
-            Some(tokio::spawn(async move {
-                while let Some((current, total, msg)) = progress_rx.recv().await {
-                    tracing::debug!(
-                        current,
-                        total,
-                        "index_project: sending progress notification"
-                    );
+    let drain_handle: Option<tokio::task::JoinHandle<()>> = if let Some(peer) = peer.clone() {
+        let token = progress_token.clone();
+        Some(tokio::spawn(async move {
+            while let Some((current, total, msg)) = progress_rx.recv().await {
+                tracing::debug!(
+                    current,
+                    total,
+                    "index_project: sending progress notification"
+                );
+                // Always send a logging message.
+                let log_notif = LoggingMessageNotificationParam::new(
+                    LoggingLevel::Info,
+                    serde_json::json!(msg),
+                )
+                .with_logger("pitlane-index".to_string());
+                let _ = peer.notify_logging_message(log_notif).await;
+
+                // Also send progress notification if the client provided a token.
+                if let Some(ref token) = token {
                     let notif = ProgressNotificationParam::new(token.clone(), current as f64)
                         .with_total(total as f64)
                         .with_message(msg);
                     let _ = peer.notify_progress(notif).await;
                 }
-                tracing::debug!("index_project: progress drainer finished");
-            }))
-        } else {
-            None
-        };
+            }
+            tracing::debug!("index_project: progress drainer finished");
+        }))
+    } else {
+        None
+    };
 
     // Build the progress callback — sends into the channel, never blocks.
     let make_cb = {
-        let has_token = progress_token.is_some() && drain_handle.is_some();
+        let has_peer = drain_handle.is_some();
         let tx_for_cb = progress_tx.clone(); // clone for the callback; original dropped below
         move || -> Option<Box<dyn Fn(usize, usize) + Send + Sync>> {
-            if has_token {
+            if has_peer {
                 let tx = tx_for_cb.clone();
                 Some(Box::new(move |current, total| {
                     if current == 0 {
@@ -276,39 +291,76 @@ async fn do_index_project(
 
     let cached_index = crate::cache::insert(canonical_for_meta, index);
 
-    // Embedding phase (opt-in) — runs in a background task so the MCP response
-    // is returned immediately, avoiding client-side timeouts on large repos.
+    // Embedding phase (opt-in) — runs in a detached background task so the
+    // MCP response returns as soon as the symbol index is ready. Semantic
+    // search becomes available once the background task finishes.
+    // Progress is reported via:
+    //   1. notifications/progress (if the client sent a progress_token)
+    //   2. notifications/message (logging) — works for all clients
     let embed_status = if let Some(cfg) = params.embed_config.clone() {
         let store_path = idx_dir.join("embeddings.bin");
         let embed_peer = params.peer.clone();
         let embed_token = params.progress_token.clone();
         let index_for_embed = Arc::clone(&cached_index);
-        let cfg_clone = Arc::clone(&cfg);
+
+        // Notify the agent immediately so it knows to wait before using semantic search.
+        if let Some(ref peer) = params.peer {
+            let kickoff = LoggingMessageNotificationParam::new(
+                LoggingLevel::Info,
+                serde_json::json!(format!(
+                    "Embedding {symbol_count} symbols in background. \
+                     Call get_index_stats and wait until embeddings_percent=100 \
+                     before using mode=\"semantic\"."
+                )),
+            )
+            .with_logger("pitlane-embed".to_string());
+            let _ = peer.notify_logging_message(kickoff).await;
+        }
 
         tokio::spawn(async move {
-            let progress_cb: Option<Box<dyn Fn(usize, usize) + Send + Sync>> =
-                if let (Some(peer), Some(token)) = (embed_peer, embed_token) {
-                    let (embed_tx, mut embed_rx) =
-                        tokio::sync::mpsc::channel::<(usize, usize)>(256);
-                    tokio::spawn(async move {
-                        while let Some((completed, total)) = embed_rx.recv().await {
+            let done_peer: Option<Peer<RoleServer>> = embed_peer.clone();
+            let progress_cb: Option<Box<dyn Fn(usize, usize) + Send + Sync>> = if let Some(peer) =
+                embed_peer
+            {
+                let (embed_tx, mut embed_rx) = tokio::sync::mpsc::channel::<(usize, usize)>(256);
+                let token = embed_token;
+                tokio::spawn(async move {
+                    while let Some((completed, total)) = embed_rx.recv().await {
+                        // Always send a logging message so all clients see progress.
+                        let pct = if total > 0 {
+                            (completed as f64 / total as f64 * 100.0).round() as u64
+                        } else {
+                            0
+                        };
+                        let msg = format!("Embedding symbols… {completed}/{total} ({pct}%)");
+                        let log_notif = LoggingMessageNotificationParam::new(
+                            LoggingLevel::Info,
+                            serde_json::json!(msg),
+                        )
+                        .with_logger("pitlane-embed".to_string());
+                        let _ = peer.notify_logging_message(log_notif).await;
+
+                        // Also send progress notification if the client provided a token.
+                        if let Some(ref token) = token {
                             let notif =
                                 ProgressNotificationParam::new(token.clone(), completed as f64)
                                     .with_total(total as f64)
-                                    .with_message(format!("Embedding symbols… {completed}/{total}"));
+                                    .with_message(msg);
                             let _ = peer.notify_progress(notif).await;
                         }
-                    });
-                    Some(Box::new(move |completed, total| {
-                        let _ = embed_tx.try_send((completed, total));
-                    }) as Box<dyn Fn(usize, usize) + Send + Sync>)
-                } else {
-                    None
-                };
+                    }
+                });
+                Some(Box::new(move |completed, total| {
+                    let _ = embed_tx.try_send((completed, total));
+                })
+                    as Box<dyn Fn(usize, usize) + Send + Sync>)
+            } else {
+                None
+            };
 
             let result = crate::embed::generate_embeddings(
                 &index_for_embed,
-                &cfg_clone,
+                &cfg,
                 &store_path,
                 force,
                 progress_cb.as_deref(),
@@ -317,6 +369,17 @@ async fn do_index_project(
 
             if let Some(err) = result.error {
                 tracing::error!(error = %err, "embed: background embedding failed");
+                // Notify the agent that embedding failed.
+                if let Some(peer) = done_peer {
+                    let notif = LoggingMessageNotificationParam::new(
+                        LoggingLevel::Warning,
+                        serde_json::json!(format!(
+                            "Embedding failed: {err}. Semantic search (mode=\"semantic\") is unavailable."
+                        )),
+                    )
+                    .with_logger("pitlane-embed".to_string());
+                    let _ = peer.notify_logging_message(notif).await;
+                }
             } else {
                 tracing::info!(
                     stored = result.stored,
@@ -324,6 +387,19 @@ async fn do_index_project(
                     elapsed_ms = result.elapsed_ms,
                     "embed: background embedding complete"
                 );
+                // Notify the agent that semantic search is now ready.
+                if let Some(peer) = done_peer {
+                    let notif = LoggingMessageNotificationParam::new(
+                        LoggingLevel::Info,
+                        serde_json::json!(format!(
+                            "Embedding complete: {} symbols stored in {}ms. \
+                             Semantic search (mode=\"semantic\") is now ready.",
+                            result.stored, result.elapsed_ms
+                        )),
+                    )
+                    .with_logger("pitlane-embed".to_string());
+                    let _ = peer.notify_logging_message(notif).await;
+                }
             }
         });
 
@@ -556,8 +632,8 @@ mod tests {
         );
     }
 
-    /// Requirements 9.1: response includes `"embeddings": "ok"` and correct `embeddings_count`
-    /// when all symbols are embedded successfully.
+    /// Requirements 9.1: response includes `"embeddings": "running"` when embed_config is
+    /// provided. The background task completes and writes the store to disk.
     #[tokio::test]
     async fn test_index_project_embeddings_ok() {
         use httpmock::prelude::*;
@@ -602,17 +678,23 @@ mod tests {
         let response = index_project(params).await.unwrap();
         assert_eq!(
             response["embeddings"],
-            serde_json::json!("ok"),
-            "expected embeddings=ok when all symbols embedded; response={response}"
+            serde_json::json!("running"),
+            "expected embeddings=running (background); response={response}"
         );
-        let count = response["embeddings_count"]
-            .as_u64()
-            .expect("embeddings_count should be a number");
-        assert!(count > 0, "embeddings_count should be > 0");
+
+        // Let the background task finish, then verify the store on disk.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = crate::index::format::index_dir(&canonical).unwrap();
+        let store = crate::embed::store::EmbedStore::load(&idx_dir.join("embeddings.bin")).unwrap();
+        assert!(
+            !store.vectors.is_empty(),
+            "background task should have written embeddings"
+        );
     }
 
-    /// Requirements 9.2: response includes `"embeddings": "partial"` and `embeddings_skipped > 0`
-    /// when the mock server returns HTTP 500 for all requests.
+    /// Requirements 9.2: when the mock server returns HTTP 500, the background task
+    /// still runs (response says "running") but the store ends up empty.
     #[tokio::test]
     async fn test_index_project_embeddings_partial() {
         use httpmock::prelude::*;
@@ -649,12 +731,19 @@ mod tests {
         let response = index_project(params).await.unwrap();
         assert_eq!(
             response["embeddings"],
-            serde_json::json!("partial"),
-            "expected embeddings=partial when server returns 500; response={response}"
+            serde_json::json!("running"),
+            "expected embeddings=running (background); response={response}"
         );
-        let skipped = response["embeddings_skipped"]
-            .as_u64()
-            .expect("embeddings_skipped should be a number");
-        assert!(skipped > 0, "embeddings_skipped should be > 0");
+
+        // Let the background task finish, then verify the store is empty (all skipped).
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = crate::index::format::index_dir(&canonical).unwrap();
+        let store_path = idx_dir.join("embeddings.bin");
+        let store = crate::embed::store::EmbedStore::load(&store_path).unwrap();
+        assert!(
+            store.vectors.is_empty(),
+            "all symbols should have been skipped (server 500)"
+        );
     }
 }

@@ -346,16 +346,15 @@ mod tests {
 
         let response = index_project(params).await.unwrap();
 
-        // Verify response contains "embeddings": "ok"
+        // Embeddings run in the background — response says "running".
         assert_eq!(
             response["embeddings"],
-            serde_json::json!("ok"),
-            "expected embeddings=ok; response={response}"
+            serde_json::json!("running"),
+            "expected embeddings=running; response={response}"
         );
-        let embeddings_count = response["embeddings_count"]
-            .as_u64()
-            .expect("embeddings_count should be present");
-        assert!(embeddings_count > 0, "embeddings_count should be > 0");
+
+        // Let the background task finish.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         // Verify embeddings.bin was written to disk
         let canonical = dir.path().canonicalize().unwrap();
@@ -449,7 +448,11 @@ mod tests {
             embed_config: embed_config.clone(),
         };
         let resp1 = index_project(params1).await.unwrap();
-        assert_eq!(resp1["embeddings"], serde_json::json!("ok"));
+        assert_eq!(resp1["embeddings"], serde_json::json!("running"));
+
+        // Let the background task finish so the store is written.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
         let hits_after_first = mock.hits();
         assert!(
             hits_after_first > 0,

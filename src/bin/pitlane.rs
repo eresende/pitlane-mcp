@@ -99,8 +99,12 @@ async fn main() -> anyhow::Result<()> {
             force,
             exclude,
         } => {
+            let embed_config = pitlane_mcp::embed::EmbedConfig::from_env();
+
+            // Pass embed_config=None so index_project doesn't spawn a background
+            // embedding task that would be killed when the CLI process exits.
             let params = tools::index_project::IndexProjectParams {
-                path,
+                path: path.clone(),
                 exclude: if exclude.is_empty() {
                     None
                 } else {
@@ -110,9 +114,45 @@ async fn main() -> anyhow::Result<()> {
                 max_files: None,
                 progress_token: None,
                 peer: None,
-                embed_config: pitlane_mcp::embed::EmbedConfig::from_env().map(std::sync::Arc::new),
+                embed_config: None,
             };
-            tools::index_project::index_project(params).await?
+            let mut result = tools::index_project::index_project(params).await?;
+
+            // Run embeddings synchronously so the CLI waits for them to finish.
+            if let Some(cfg) = embed_config {
+                let canonical = std::path::Path::new(&path)
+                    .canonicalize()
+                    .unwrap_or_else(|_| std::path::PathBuf::from(&path));
+                let idx_dir = pitlane_mcp::index::format::index_dir(&canonical)?;
+                let store_path = idx_dir.join("embeddings.bin");
+                let index = tools::index_project::load_project_index(&path)?;
+                let force_embed = force;
+                let embed_result = pitlane_mcp::embed::generate_embeddings(
+                    &index,
+                    &cfg,
+                    &store_path,
+                    force_embed,
+                    None,
+                )
+                .await;
+                let embed_status = if embed_result.error.is_some() {
+                    "error"
+                } else {
+                    "ok"
+                };
+                if let Some(obj) = result.as_object_mut() {
+                    obj.insert("embeddings".into(), serde_json::json!(embed_status));
+                    obj.insert(
+                        "embeddings_stored".into(),
+                        serde_json::json!(embed_result.stored),
+                    );
+                    if let Some(err) = embed_result.error {
+                        obj.insert("embeddings_error".into(), serde_json::json!(err));
+                    }
+                }
+            }
+
+            result
         }
 
         Command::Search {

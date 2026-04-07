@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -44,10 +45,23 @@ impl EmbedClient {
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(120);
-        let http = reqwest::ClientBuilder::new()
-            .timeout(std::time::Duration::from_secs(timeout_secs))
-            .build()
-            .unwrap();
+
+        // If the URL uses "localhost", override DNS to resolve it to 127.0.0.1
+        // (IPv4 only). Ollama typically listens on 127.0.0.1 but not ::1, and
+        // reqwest with rustls-tls does not fall back to the next address when
+        // the first one (::1) is refused, causing all requests to fail.
+        let mut builder =
+            reqwest::ClientBuilder::new().timeout(std::time::Duration::from_secs(timeout_secs));
+
+        if let Ok(url) = reqwest::Url::parse(&config.url) {
+            if url.host_str() == Some("localhost") {
+                let port = url.port_or_known_default().unwrap_or(80);
+                let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+                builder = builder.resolve("localhost", addr);
+            }
+        }
+
+        let http = builder.build().unwrap();
         Self { http, config }
     }
 
