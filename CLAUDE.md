@@ -17,10 +17,11 @@ Use pitlane-mcp for all code lookups when available.
 
 When pitlane-mcp semantic search is available (PITLANE_EMBED_URL and PITLANE_EMBED_MODEL are set):
 
-1. Use mode="semantic" when you know what a symbol does but not its name — describe the intent, e.g. "retry logic for failed HTTP requests".
-2. Use mode="bm25" or mode="exact" when you know the symbol name or a distinctive substring.
-3. Write semantic queries as intent descriptions, not keywords — combine action + subject: "serialize struct to JSON bytes", not just "serialize".
-4. Always scan the top 3–5 semantic results before concluding — the top hit is not always the best match.
-5. If semantic results look unrelated, rephrase with more context or fall back to mode="bm25".
-6. After finding a candidate, call get_symbol to read the full implementation before acting on it.
-7. If search_symbols with mode="semantic" returns an error, fall back to mode="bm25" automatically — do not surface the error to the user.
+1. If index_project returns embeddings="running", call wait_for_embeddings immediately — it blocks and streams a live progress bar until generation is complete. Do NOT poll get_index_stats in a loop.
+2. Use mode="semantic" when you know what a symbol does but not its name — describe the intent, e.g. "retry logic for failed HTTP requests".
+3. Use mode="bm25" or mode="exact" when you know the symbol name or a distinctive substring.
+4. Write semantic queries as intent descriptions, not keywords — combine action + subject: "serialize struct to JSON bytes", not just "serialize".
+5. Always scan the top 3–5 semantic results before concluding — the top hit is not always the best match.
+6. If semantic results look unrelated, rephrase with more context or fall back to mode="bm25".
+7. After finding a candidate, call get_symbol to read the full implementation before acting on it.
+8. If search_symbols with mode="semantic" returns an error, fall back to mode="bm25" automatically — do not surface the error to the user.

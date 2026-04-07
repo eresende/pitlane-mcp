@@ -49,22 +49,27 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
         if embed_config.is_none() {
             ("disabled".to_string(), None, None, None)
         } else {
-            let store = EmbedStore::load(&store_path).unwrap_or_default();
-            let stored = store.vectors.len();
-            let pct = if total_symbols == 0 {
+            // Prefer the in-memory registry (live progress from the background task).
+            // Fall back to the on-disk store for the case where embedding already
+            // finished before this call (registry entry was removed on completion).
+            let (stored, total) = if let Some(p) = crate::embed::progress::get(&canonical) {
+                (p.stored, p.total)
+            } else {
+                let stored = EmbedStore::load(&store_path)
+                    .map(|s| s.vectors.len())
+                    .unwrap_or(0);
+                (stored, total_symbols)
+            };
+            let pct = if total == 0 {
                 100.0
             } else {
-                (stored as f64 / total_symbols as f64 * 100.0).min(100.0)
+                (stored as f64 / total as f64 * 100.0).min(100.0)
             };
-            let status = if stored >= total_symbols {
-                "ok"
-            } else {
-                "running"
-            };
+            let status = if stored >= total { "ok" } else { "running" };
             (
                 status.to_string(),
                 Some(stored),
-                Some(total_symbols),
+                Some(total),
                 Some((pct * 10.0).round() / 10.0), // one decimal place
             )
         };

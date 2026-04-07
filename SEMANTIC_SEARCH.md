@@ -60,6 +60,8 @@ Both `PITLANE_EMBED_URL` and `PITLANE_EMBED_MODEL` must be set to non-empty stri
 
 **For best quality:** `qwen3-embedding` (the full 4B model) produces the best vectors, but requires ~7 GB VRAM and indexing large codebases takes significantly longer. It will saturate an 8 GB GPU, leaving little headroom for other processes. On 16 GB+ cards it runs comfortably alongside other workloads. On Apple M-series (unified memory), the same VRAM budget applies but is shared with system RAM — an M2/M3 with 16 GB or more is a good fit.
 
+**Codebase size guidance:** For larger codebases, smaller models like `nomic-embed-text` are recommended — they index faster and use less memory, which matters more at scale. For small codebases, `qwen3-embedding:4b` can provide noticeably better quality results since the indexing cost is low and the richer embeddings have more impact on search precision.
+
 ```bash
 ollama pull mxbai-embed-large
 export PITLANE_EMBED_MODEL=mxbai-embed-large

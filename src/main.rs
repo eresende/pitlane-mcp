@@ -126,10 +126,21 @@ pub struct GetUsageStatsRequest {
     pub project: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WaitForEmbeddingsRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// Poll interval in milliseconds (default: 2000)
+    pub poll_interval_ms: Option<u64>,
+    /// Maximum seconds to wait before returning a timeout status (default: 300)
+    pub timeout_secs: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct PitlaneMcp {
     watcher_registry: Arc<WatcherRegistry>,
     embed_config: Option<Arc<EmbedConfig>>,
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
@@ -190,7 +201,7 @@ fn err_to_text(e: anyhow::Error) -> String {
 #[tool_router]
 impl PitlaneMcp {
     #[tool(
-        description = "Call first to parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time. Also generates vector embeddings for semantic search (mode=\"semantic\") when PITLANE_EMBED_URL and PITLANE_EMBED_MODEL are configured — embeddings run in the background so the call returns as soon as the symbol index is ready. The response includes an \"embeddings\" field: \"running\" means generation is in progress — if you need semantic search, you MUST call get_index_stats in a loop until embeddings_percent reaches 100 before using mode=\"semantic\"; \"ok\" means embeddings are ready; \"disabled\" means no embed config was found.",
+        description = "Call first to parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time. Also generates vector embeddings for semantic search (mode=\"semantic\") when PITLANE_EMBED_URL and PITLANE_EMBED_MODEL are configured — embeddings run in the background so the call returns as soon as the symbol index is ready. The response includes an \"embeddings\" field: \"running\" means generation is in progress — call wait_for_embeddings immediately to block until embeddings are ready before using mode=\"semantic\"; \"ok\" means embeddings are ready; \"disabled\" means no embed config was found.",
         meta = tool_meta("index parse cache project"),
         annotations(
             read_only_hint = false,
@@ -390,7 +401,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Return symbol counts by language and kind for an indexed project — lightweight orientation tool. Use instead of get_project_outline when you only need aggregate numbers, not the file tree. Also reports embedding progress: \"embeddings\" is \"disabled\", \"running\", or \"ok\"; when enabled, includes embeddings_stored, embeddings_total, and embeddings_percent fields. Call this in a loop (e.g. every 10s) after index_project returns \"running\" — proceed with semantic search only once embeddings_percent reaches 100.",
+        description = "Return symbol counts by language and kind for an indexed project — lightweight orientation tool. Use instead of get_project_outline when you only need aggregate numbers, not the file tree. Also reports a snapshot of embedding progress via embeddings_stored, embeddings_total, and embeddings_percent fields. NOTE: do NOT poll this in a loop to wait for embeddings — use wait_for_embeddings instead, which blocks and streams a live progress bar until generation is complete.",
         meta = tool_meta("stats symbols language kind count index"),
         annotations(
             read_only_hint = true,
@@ -424,6 +435,36 @@ impl PitlaneMcp {
             project: req.project,
         };
         match tools::get_usage_stats::get_usage_stats(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "PREFERRED way to wait for embeddings after index_project returns embeddings=\"running\". Blocks until embedding generation is complete, streaming a live ASCII progress bar (e.g. \"Embeddings: [████████░░░░░░░░░░░░]  42.0%  213/535 symbols\") via MCP notifications on every poll tick. Returns immediately if embeddings are disabled or already done. Use this instead of polling get_index_stats manually. poll_interval_ms controls refresh rate (default 2000 ms); timeout_secs caps the total wait (default 300 s). Returns status=\"ok\" when complete, status=\"timeout\" if the cap is hit.",
+        meta = tool_meta("embeddings progress wait semantic search ready"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn wait_for_embeddings(
+        &self,
+        Parameters(req): Parameters<WaitForEmbeddingsRequest>,
+        peer: Peer<RoleServer>,
+        meta: rmcp::model::Meta,
+    ) -> String {
+        let params = tools::wait_for_embeddings::WaitForEmbeddingsParams {
+            project: req.project,
+            poll_interval_ms: req.poll_interval_ms,
+            timeout_secs: req.timeout_secs,
+            progress_token: meta.get_progress_token(),
+            peer: Some(peer),
+            embed_config: self.embed_config.clone(),
+        };
+        match tools::wait_for_embeddings::wait_for_embeddings(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }

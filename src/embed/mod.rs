@@ -1,4 +1,5 @@
 pub mod client;
+pub mod progress;
 pub mod store;
 
 use std::collections::HashSet;
@@ -25,6 +26,22 @@ pub struct EmbedResult {
 ///
 /// Always includes `name` and `qualified`; appends `signature` and `doc` when present.
 /// Parts are joined with `\n`.
+/// Maximum character length of the text sent to the embedding model.
+///
+/// `nomic-embed-text` has an 8192-token context window (~4 chars/token on average).
+/// We cap at 6000 chars to stay well within that limit regardless of tokeniser
+/// differences, and to leave headroom when batching.
+/// Override with `PITLANE_EMBED_MAX_CHARS` if your model has a different limit.
+const DEFAULT_EMBED_MAX_CHARS: usize = 6000;
+
+fn embed_max_chars() -> usize {
+    std::env::var("PITLANE_EMBED_MAX_CHARS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_EMBED_MAX_CHARS)
+}
+
 pub fn symbol_text(sym: &Symbol) -> String {
     let mut parts = vec![sym.name.as_str(), sym.qualified.as_str()];
     let sig_owned;
@@ -37,7 +54,20 @@ pub fn symbol_text(sym: &Symbol) -> String {
         doc_owned = d.as_str();
         parts.push(doc_owned);
     }
-    parts.join("\n")
+    let text = parts.join("\n");
+    let max = embed_max_chars();
+    if text.len() <= max {
+        text
+    } else {
+        // Truncate on a char boundary to avoid splitting a multi-byte sequence.
+        let truncated = text
+            .char_indices()
+            .take_while(|(i, _)| *i < max)
+            .last()
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(max);
+        text[..truncated].to_string()
+    }
 }
 
 /// Configuration for the embedding endpoint, read from environment variables
@@ -80,6 +110,7 @@ pub async fn generate_embeddings(
     store_path: &Path,
     force: bool,
     progress_cb: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
+    project_path: Option<&PathBuf>,
 ) -> EmbedResult {
     let start = std::time::Instant::now();
 
@@ -104,6 +135,11 @@ pub async fn generate_embeddings(
 
     if total > 0 {
         tracing::info!(total, "embed: starting embedding generation");
+
+        // Record start timestamp in the progress registry.
+        if let Some(proj) = project_path {
+            progress::start(proj, total);
+        }
 
         let client = Arc::new(EmbedClient::new(Arc::new(EmbedConfig {
             url: config.url.clone(),
@@ -165,6 +201,11 @@ pub async fn generate_embeddings(
             }
             completed_symbols += batch_size;
 
+            // Update in-memory progress registry so wait_for_embeddings sees live numbers.
+            if let Some(proj) = project_path {
+                progress::set(proj, stored, total);
+            }
+
             // Log progress every 10 batches or on the last batch
             let is_last = chunk_idx + 1 == total_chunks;
             if chunk_idx % 10 == 0 || is_last {
@@ -194,6 +235,11 @@ pub async fn generate_embeddings(
             Some(msg)
         }
     };
+
+    // Mark progress as complete, recording the finish timestamp.
+    if let Some(proj) = project_path {
+        progress::finish(proj);
+    }
 
     let elapsed_ms = start.elapsed().as_millis() as u64;
 
@@ -848,7 +894,7 @@ mod tests {
             // Run generate_embeddings synchronously via a Tokio runtime.
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             rt.block_on(async {
-                generate_embeddings(&index, &config, &store_path, true, None).await;
+                generate_embeddings(&index, &config, &store_path, true, None, None).await;
             });
 
             // Assert exactly ceil(N / BATCH_SIZE) HTTP requests were issued.

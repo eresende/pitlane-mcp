@@ -7,4 +7,5 @@ pub mod get_symbol;
 pub mod get_usage_stats;
 pub mod index_project;
 pub mod search_symbols;
+pub mod wait_for_embeddings;
 pub mod watch_project;

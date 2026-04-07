@@ -79,14 +79,19 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
                     // kick off background embedding so the cached index gets vectors
                     // without requiring a force re-index.
                     let store_path = idx_dir.join("embeddings.bin");
-                    let embed_status = if let Some(cfg) = params.embed_config.clone() {
+                    let (embed_status, embed_started_at) = if let Some(cfg) = params.embed_config.clone() {
                         let needs_embed = !store_path.exists() || {
                             crate::embed::store::EmbedStore::load(&store_path)
                                 .map(|s| s.vectors.is_empty())
                                 .unwrap_or(true)
                         };
                         if needs_embed {
+                            let started_at = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
                             let index_for_embed = Arc::clone(&cached_index);
+                            let canonical_for_embed = canonical.clone();
                             tokio::spawn(async move {
                                 let result = crate::embed::generate_embeddings(
                                     &index_for_embed,
@@ -94,6 +99,7 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
                                     &store_path,
                                     false,
                                     None,
+                                    Some(&canonical_for_embed),
                                 )
                                 .await;
                                 if let Some(err) = result.error {
@@ -106,21 +112,32 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
                                     );
                                 }
                             });
-                            "running"
+                            ("running", Some(started_at))
                         } else {
-                            "ok"
+                            // Read timestamps from the progress registry if available.
+                            let prog = crate::embed::progress::get(&canonical);
+                            ("ok", prog.map(|p| p.started_at))
                         }
                     } else {
-                        "disabled"
+                        ("disabled", None)
                     };
 
-                    return Ok(json!({
+                    let mut response = json!({
                         "status": "cached",
                         "symbol_count": symbol_count,
                         "file_count": file_count,
                         "index_path": index_path.display().to_string(),
                         "embeddings": embed_status,
-                    }));
+                    });
+                    if let Some(ts) = embed_started_at {
+                        response["embeddings_started_at"] = json!(ts);
+                    }
+                    if let Some(prog) = crate::embed::progress::get(&canonical) {
+                        if let Some(finished) = prog.finished_at {
+                            response["embeddings_finished_at"] = json!(finished);
+                        }
+                    }
+                    return Ok(response);
                 }
             }
         }
@@ -297,11 +314,17 @@ async fn do_index_project(
     // Progress is reported via:
     //   1. notifications/progress (if the client sent a progress_token)
     //   2. notifications/message (logging) — works for all clients
-    let embed_status = if let Some(cfg) = params.embed_config.clone() {
+    let (embed_status, embed_started_at) = if let Some(cfg) = params.embed_config.clone() {
         let store_path = idx_dir.join("embeddings.bin");
         let embed_peer = params.peer.clone();
         let embed_token = params.progress_token.clone();
         let index_for_embed = Arc::clone(&cached_index);
+
+        // Record start timestamp before spawning so it's available in the response.
+        let started_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
 
         // Notify the agent immediately so it knows to wait before using semantic search.
         if let Some(ref peer) = params.peer {
@@ -364,6 +387,7 @@ async fn do_index_project(
                 &store_path,
                 force,
                 progress_cb.as_deref(),
+                Some(&canonical),
             )
             .await;
 
@@ -403,21 +427,25 @@ async fn do_index_project(
             }
         });
 
-        "running"
+        ("running", Some(started_at))
     } else {
-        "disabled"
+        ("disabled", None)
     };
 
     let elapsed = start.elapsed().as_millis() as u64;
 
-    Ok(json!({
+    let mut response = json!({
         "status": "indexed",
         "symbol_count": symbol_count,
         "file_count": file_count,
         "index_path": index_path.display().to_string(),
         "elapsed_ms": elapsed,
         "embeddings": embed_status,
-    }))
+    });
+    if let Some(ts) = embed_started_at {
+        response["embeddings_started_at"] = json!(ts);
+    }
+    Ok(response)
 }
 
 fn default_excludes() -> Vec<String> {

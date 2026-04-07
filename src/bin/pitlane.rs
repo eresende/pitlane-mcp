@@ -133,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
                     &store_path,
                     force_embed,
                     None,
+                    Some(&canonical),
                 )
                 .await;
                 let embed_status = if embed_result.error.is_some() {
