@@ -209,8 +209,7 @@ fn search_svelte_file_ast(
             script_source,
             name,
             lines,
-            block.line_start as usize - 1,
-            block.column_start as usize,
+            (block.line_start as usize - 1, block.column_start as usize),
             &mut hits,
             &mut seen,
         );
@@ -258,11 +257,11 @@ fn collect_identifier_nodes_embedded(
     source: &[u8],
     name: &str,
     lines: &[&str],
-    row_offset: usize,
-    col_offset: usize,
+    offset: (usize, usize),
     hits: &mut Vec<(usize, usize, String)>,
     seen: &mut HashSet<(usize, usize)>,
 ) {
+    let (row_offset, col_offset) = offset;
     if matches!(
         node.kind(),
         "identifier" | "type_identifier" | "field_identifier"
@@ -285,9 +284,7 @@ fn collect_identifier_nodes_embedded(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_identifier_nodes_embedded(
-            child, source, name, lines, row_offset, col_offset, hits, seen,
-        );
+        collect_identifier_nodes_embedded(child, source, name, lines, offset, hits, seen);
     }
 }
 
