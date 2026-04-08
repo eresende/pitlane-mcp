@@ -4,7 +4,9 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::{json, Value};
 
 use crate::error::ToolError;
-use crate::graph::{collect_direct_references, read_symbol_source};
+use crate::graph::{
+    collect_direct_callable_references, is_callable_kind, is_low_signal_name, read_symbol_source,
+};
 use crate::tools::index_project::load_project_index;
 
 pub struct FindCallersParams {
@@ -45,6 +47,9 @@ pub async fn find_callers(params: FindCallersParams) -> anyhow::Result<Value> {
         if candidate.id == sym.id {
             continue;
         }
+        if !is_callable_kind(&candidate.kind) || is_low_signal_name(&candidate.name) {
+            continue;
+        }
 
         let path = candidate.file.as_ref().as_path();
         if !matches_scope(path, &project_path, scope_set.as_ref()) {
@@ -59,7 +64,7 @@ pub async fn find_callers(params: FindCallersParams) -> anyhow::Result<Value> {
             continue;
         }
 
-        let direct_refs = collect_direct_references(&index, candidate, &source_text);
+        let direct_refs = collect_direct_callable_references(&index, candidate, &source_text);
         if direct_refs.iter().any(|reference| reference.id == sym.id) {
             callers.push(json!({
                 "edge_kind": "calls",
@@ -191,5 +196,30 @@ mod tests {
         let callers = result["callers"].as_array().unwrap();
         assert_eq!(callers.len(), 1);
         assert_eq!(callers[0]["from_name"].as_str().unwrap(), "another");
+    }
+
+    #[tokio::test]
+    async fn test_find_callers_filters_non_callable_and_low_signal_callers() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "fn helper() {}\nfn build() { helper(); }\nfn branch() { helper(); }\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = find_callers(FindCallersParams {
+            project: project.clone(),
+            symbol_id: symbol_id(&project, "helper"),
+            scope: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        let callers = result["callers"].as_array().unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0]["from_name"].as_str().unwrap(), "branch");
     }
 }

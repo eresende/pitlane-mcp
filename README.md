@@ -12,7 +12,8 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 
 - **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, Svelte (embedded `<script>` / `<script lang="ts">` blocks only), C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, and Bash source into structured symbols
 - **BM25 full-text search** — tantivy-backed ranked search over name, qualified name, signature, and doc fields with a custom camelCase tokenizer (`LowerInstruction` → `["lower", "instruction"]`); falls back to exact substring match if the index isn't ready
-- **Ten MCP tools** for navigation: outline, search, fetch, line-range fetch, find usages, index stats, usage stats
+- **Graph-aware navigation tools** — direct callers and callees for shallow impact checks without whole-repo back-and-forth
+- **Thirteen MCP tools** for navigation: outline, search, fetch, line-range fetch, callers, callees, usages, index stats, usage stats
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
 - **Smart exclusions** — automatically skips `.venv`, `node_modules`, `target`, `__pycache__`, `dist`, `.next`, and other dependency/build trees at any depth
@@ -194,6 +195,37 @@ Find all locations that reference a symbol by name.
 
 > **Svelte note:** reference search only covers identifiers inside embedded `<script>` / `<script lang="ts">` blocks. Template and style sections are intentionally ignored.
 
+### `find_callees`
+
+Return direct outgoing references for one symbol — useful for seeing what a function or method likely calls before reading more code.
+
+```json
+{ "project": "/your/project", "symbol_id": "src/auth.rs::Auth::login#method" }
+```
+
+Optional parameters:
+
+- `limit` — maximum callees to return (default: 100).
+- `offset` — offset into callees for pagination.
+
+This is intentionally shallow and lightweight. Results are heuristic direct references, not a full semantic call graph.
+
+### `find_callers`
+
+Return direct incoming references for one symbol — useful for quick impact checks before changing a function or method.
+
+```json
+{ "project": "/your/project", "symbol_id": "src/auth.rs::Auth::login#method" }
+```
+
+Optional parameters:
+
+- `scope` — restrict callers to a file or directory glob.
+- `limit` — maximum callers to return (default: 100).
+- `offset` — offset into callers for pagination.
+
+Like `find_callees`, this stays shallow by design and returns heuristic direct callers, not a full transitive call graph.
+
 ### `get_lines`
 
 Fetch a slice of a file by line range — useful for blocks that are not named symbols (macro invocation tables, initializer arrays, inline comment blocks, etc.).
@@ -304,7 +336,7 @@ src/api/client.ts::fetchUser#function
 src/components/Button.tsx::Button#function
 ```
 
-IDs are returned by `search_symbols` and `get_file_outline` and used as input to `get_symbol` and `find_usages`.
+IDs are returned by `search_symbols` and `get_file_outline` and used as input to `get_symbol`, `find_callees`, `find_callers`, and `find_usages`.
 
 ## Index Storage
 
@@ -331,11 +363,13 @@ Use pitlane-mcp for all code lookups when available.
 3. Before reading any file, call get_file_outline to see its structure without consuming its full content.
 4. Use search_symbols to find functions/types by name. If no exact match is found it falls back to fuzzy matching automatically.
 5. Use get_symbol to retrieve only the exact implementation you need, not the whole file.
-6. Use find_usages before refactoring any public symbol.
-7. For struct/class/interface/trait symbols, get_symbol returns signature-only by default. Pass signature_only=false to get the full body and the references list.
-8. Use get_lines to fetch a specific block by line range when it isn't a named symbol.
-9. Use get_index_stats to orient yourself in a new codebase without burning tokens on get_project_outline.
-10. Fall back to direct file reads only when editing or when full file context is genuinely required.
+6. Use find_callees to see what a symbol directly depends on before opening more files.
+7. Use find_callers before changing a symbol to get a shallow impact view.
+8. Use find_usages before refactoring any public symbol or when you need exhaustive name-based matches.
+9. For struct/class/interface/trait symbols, get_symbol returns signature-only by default. Pass signature_only=false to get the full body and the references list.
+10. Use get_lines to fetch a specific block by line range when it isn't a named symbol.
+11. Use get_index_stats to orient yourself in a new codebase without burning tokens on get_project_outline.
+12. Fall back to direct file reads only when editing or when full file context is genuinely required.
 ```
 
 ## Benchmarks

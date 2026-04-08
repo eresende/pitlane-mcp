@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::index::SymbolIndex;
-use crate::indexer::language::Symbol;
+use crate::indexer::language::{Symbol, SymbolKind};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirectReference {
@@ -77,4 +77,49 @@ pub fn collect_direct_references(
     });
     refs.dedup_by(|a, b| a.id == b.id);
     refs
+}
+
+pub fn is_callable_kind(kind: &SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Macro | SymbolKind::Class
+    )
+}
+
+pub fn is_low_signal_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "main"
+            | "run"
+            | "build"
+            | "new"
+            | "default"
+            | "fmt"
+            | "from"
+            | "into"
+            | "clone"
+            | "copy"
+            | "eq"
+            | "ne"
+            | "hash"
+            | "len"
+            | "clear"
+            | "args"
+    )
+}
+
+pub fn collect_direct_callable_references(
+    index: &SymbolIndex,
+    sym: &Symbol,
+    source_text: &str,
+) -> Vec<DirectReference> {
+    collect_direct_references(index, sym, source_text)
+        .into_iter()
+        .filter(|reference| {
+            let Some(target) = index.symbols.get(&reference.id) else {
+                return false;
+            };
+            is_callable_kind(&target.kind) && !is_low_signal_name(&target.name)
+        })
+        .collect()
 }

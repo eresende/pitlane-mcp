@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::error::ToolError;
-use crate::graph::{collect_direct_references, read_symbol_source};
+use crate::graph::{collect_direct_callable_references, read_symbol_source};
 use crate::tools::index_project::load_project_index;
 
 pub struct FindCalleesParams {
@@ -24,7 +24,7 @@ pub async fn find_callees(params: FindCalleesParams) -> anyhow::Result<Value> {
         })?;
 
     let source_text = read_symbol_source(sym, false)?;
-    let callees = collect_direct_references(&index, sym, &source_text);
+    let callees = collect_direct_callable_references(&index, sym, &source_text);
     let truncated = callees.len() > offset.saturating_add(limit);
     let page: Vec<Value> = callees
         .into_iter()
@@ -142,5 +142,29 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("offset: 2"));
+    }
+
+    #[tokio::test]
+    async fn test_find_callees_filters_low_signal_and_non_callable_symbols() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "struct Error;\nfn build() {}\nfn helper() {}\nfn root() { helper(); build(); let _ = Error; }\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = find_callees(FindCalleesParams {
+            project: project.clone(),
+            symbol_id: symbol_id(&project, "root"),
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        let callees = result["callees"].as_array().unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0]["to_name"].as_str().unwrap(), "helper");
     }
 }
