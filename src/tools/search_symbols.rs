@@ -10,7 +10,7 @@ use crate::embed::store::EmbedStore;
 use crate::embed::EmbedConfig;
 use crate::error::ToolError;
 use crate::index::format::index_dir;
-use crate::indexer::language::{Language, SymbolKind};
+use crate::indexer::language::{Language, Symbol, SymbolKind};
 use crate::tools::index_project::load_project_index;
 
 /// Build the set of character trigrams for `s` (lowercased).
@@ -46,6 +46,17 @@ pub struct SearchSymbolsParams {
     pub mode: Option<String>,
     /// Embedding config passed programmatically (not a serde field)
     pub embed_config: Option<Arc<EmbedConfig>>,
+}
+
+fn exact_sort_key(sym: &Symbol) -> (String, String, String, u32, u32, String) {
+    (
+        sym.name.to_lowercase(),
+        sym.qualified.to_lowercase(),
+        sym.file.to_string_lossy().replace('\\', "/"),
+        sym.line_start,
+        sym.line_end,
+        sym.id.clone(),
+    )
 }
 
 pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value> {
@@ -349,7 +360,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
     // ------------------------------------------------------------------
     if mode == "exact" || mode == "bm25" {
         let query_lower = params.query.to_lowercase();
-        let mut candidates = Vec::new();
+        let mut candidates: Vec<&Symbol> = Vec::new();
 
         for sym in index.symbols.values() {
             let name_lower = sym.name.to_lowercase();
@@ -374,24 +385,30 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                     continue;
                 }
             }
-            candidates.push(json!({
-                "id": sym.id,
-                "name": sym.name,
-                "qualified": sym.qualified,
-                "kind": sym.kind.to_string(),
-                "language": sym.language.to_string(),
-                "file": sym.file.to_string_lossy().replace('\\', "/"),
-                "line_start": sym.line_start,
-                "line_end": sym.line_end,
-                "signature": sym.signature,
-            }));
-            if candidates.len() > offset + limit {
-                break;
-            }
+            candidates.push(sym);
         }
 
+        candidates.sort_by_key(|sym| exact_sort_key(sym));
+
         let truncated = candidates.len() > offset + limit;
-        let page: Vec<_> = candidates.into_iter().skip(offset).take(limit).collect();
+        let page: Vec<_> = candidates
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .map(|sym| {
+                json!({
+                    "id": sym.id,
+                    "name": sym.name,
+                    "qualified": sym.qualified,
+                    "kind": sym.kind.to_string(),
+                    "language": sym.language.to_string(),
+                    "file": sym.file.to_string_lossy().replace('\\', "/"),
+                    "line_start": sym.line_start,
+                    "line_end": sym.line_end,
+                    "signature": sym.signature,
+                })
+            })
+            .collect();
         let mut resp = json!({
             "results": page,
             "count": page.len(),
@@ -488,7 +505,10 @@ mod tests {
     use crate::embed::store::EmbedStore;
     use crate::embed::EmbedConfig;
     use crate::index::format::{index_dir, save_index};
+    use crate::index::SymbolIndex;
+    use crate::indexer::language::{Language, Symbol, SymbolKind};
     use crate::indexer::{registry, Indexer};
+    use std::path::PathBuf;
     use tempfile::TempDir;
 
     /// Helper: write a simple Rust file, index it, and save the index to disk.
@@ -504,6 +524,36 @@ mod tests {
         // Invalidate cache so load_project_index reads from disk.
         crate::cache::invalidate(&canonical);
         dir.path().to_string_lossy().to_string()
+    }
+
+    fn write_index_with_symbols(dir: &TempDir, symbols: Vec<Symbol>) -> String {
+        let mut index = SymbolIndex::new();
+        for symbol in symbols {
+            index.insert(symbol);
+        }
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        crate::cache::invalidate(&canonical);
+        dir.path().to_string_lossy().to_string()
+    }
+
+    fn make_symbol(id: &str, name: &str, file: &str, line_start: u32) -> Symbol {
+        Symbol {
+            id: id.to_string(),
+            name: name.to_string(),
+            qualified: format!("crate::{name}"),
+            kind: SymbolKind::Function,
+            language: Language::Rust,
+            file: Arc::new(PathBuf::from(file)),
+            byte_start: 0,
+            byte_end: 0,
+            line_start,
+            line_end: line_start,
+            signature: Some(format!("fn {name}()")),
+            doc: None,
+        }
     }
 
     /// Requirements 5.3: semantic search with embed_config=None returns the exact error message.
@@ -678,5 +728,56 @@ mod tests {
             msg.contains("dimension mismatch"),
             "error should mention 'dimension mismatch', got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_exact_mode_pagination_is_deterministic() {
+        let dir_a = TempDir::new().unwrap();
+        let dir_b = TempDir::new().unwrap();
+
+        let symbols = vec![
+            make_symbol("gamma", "matchGamma", "gamma.rs", 30),
+            make_symbol("alpha", "matchAlpha", "alpha.rs", 10),
+            make_symbol("beta", "matchBeta", "beta.rs", 20),
+        ];
+
+        let project_a = write_index_with_symbols(&dir_a, symbols.clone());
+        let mut reversed = symbols;
+        reversed.reverse();
+        let project_b = write_index_with_symbols(&dir_b, reversed);
+
+        let result_a = search_symbols(SearchSymbolsParams {
+            project: project_a,
+            query: "match".to_string(),
+            kind: None,
+            language: None,
+            file: None,
+            limit: Some(2),
+            offset: Some(1),
+            mode: Some("exact".to_string()),
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+
+        let result_b = search_symbols(SearchSymbolsParams {
+            project: project_b,
+            query: "match".to_string(),
+            kind: None,
+            language: None,
+            file: None,
+            limit: Some(2),
+            offset: Some(1),
+            mode: Some("exact".to_string()),
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result_a, result_b);
+        assert_eq!(result_a["truncated"], json!(false));
+        assert_eq!(result_a["count"], json!(2));
+        assert_eq!(result_a["results"][0]["name"], json!("matchBeta"));
+        assert_eq!(result_a["results"][1]["name"], json!("matchGamma"));
     }
 }

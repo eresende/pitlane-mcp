@@ -39,7 +39,7 @@ _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor,
 
 - [ ] **Fix stale-cache validation for newly added files** — `is_index_up_to_date` currently only compares mtimes for files already present in `meta.file_mtimes`; adding a new supported source file can still return a cached index that is missing symbols
 - [x] **Harden watcher event handling under bursty changes** — `watch_project` now marks the project dirty when the debounce channel overflows and falls back to a full resync, so incremental indexing cannot silently diverge after dropped notify events
-- [ ] **Make exact-search pagination deterministic** — `search_symbols` exact-mode pagination currently depends on `HashMap` iteration order and early-exits before imposing a stable sort; sort results before paginating so repeated calls return stable pages
+- [x] **Make exact-search pagination deterministic** — `search_symbols` exact-mode now sorts candidates by a stable key before paginating, so repeated calls return the same pages regardless of `HashMap` iteration order or insertion history
 - [ ] **Rework `find_usages` to use the index more effectively** — it currently re-walks the filesystem and reparses files on every call; consider an indexed candidate-selection path so the tool matches the rest of the architecture on large repos
 - [x] **Fix Svelte inline `<script>` column remapping in `find_usages`** — embedded script-block results now preserve the original file column offset, so usages reported from inline `<script>` tags point to the correct columns in the `.svelte` source
 
