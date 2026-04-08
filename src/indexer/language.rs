@@ -10,6 +10,7 @@ pub enum Language {
     Python,
     JavaScript,
     TypeScript,
+    Svelte,
     C,
     Cpp,
     Go,
@@ -32,6 +33,7 @@ impl std::fmt::Display for Language {
             Language::Python => write!(f, "python"),
             Language::JavaScript => write!(f, "javascript"),
             Language::TypeScript => write!(f, "typescript"),
+            Language::Svelte => write!(f, "svelte"),
             Language::C => write!(f, "c"),
             Language::Cpp => write!(f, "cpp"),
             Language::Go => write!(f, "go"),
@@ -158,6 +160,7 @@ mod tests {
     fn test_language_display() {
         assert_eq!(Language::Rust.to_string(), "rust");
         assert_eq!(Language::Python.to_string(), "python");
+        assert_eq!(Language::Svelte.to_string(), "svelte");
         assert_eq!(Language::C.to_string(), "c");
         assert_eq!(Language::Cpp.to_string(), "cpp");
         assert_eq!(Language::Kotlin.to_string(), "kotlin");

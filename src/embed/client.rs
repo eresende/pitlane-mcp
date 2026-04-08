@@ -469,7 +469,7 @@ mod tests {
                 "mod", "macro", "const", "type_alias", "class", "interface",
             ];
             let langs = [
-                "rust", "python", "javascript", "typescript", "c", "cpp",
+                "rust", "python", "javascript", "typescript", "svelte", "c", "cpp",
                 "go", "java", "bash", "csharp", "ruby", "swift",
                 "objc", "php", "zig", "kotlin", "lua",
             ];
