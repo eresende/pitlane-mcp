@@ -6,7 +6,7 @@ Token-efficient code intelligence MCP server. Indexes a codebase once using tree
 
 ## Why
 
-AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **65×** on C# ([Newtonsoft.Json](https://github.com/JamesNK/Newtonsoft.Json)), **61×** on Ruby ([RuboCop](https://github.com/rubocop/rubocop)), **54×** on Objective-C ([SDWebImage](https://github.com/SDWebImage/SDWebImage)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **41×** on Svelte ([svelte.dev](https://github.com/sveltejs/svelte.dev)), **52×** on Swift ([SwiftLint](https://github.com/realm/SwiftLint)), **20×** on Python ([FastAPI](https://github.com/fastapi/fastapi)), **80×** on PHP ([Laravel](https://github.com/laravel/framework)), **801×** on Zig ([zls](https://github.com/zigtools/zls)), **54×** on Kotlin ([OkHttp](https://github.com/square/okhttp)), **90×** on Lua ([Roact](https://github.com/Roblox/roact)), and Bash ([bats-core](https://github.com/bats-core/bats-core))¹.
+AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **65×** on C# ([Newtonsoft.Json](https://github.com/JamesNK/Newtonsoft.Json)), **61×** on Ruby ([RuboCop](https://github.com/rubocop/rubocop)), **56×** on Kotlin ([OkHttp](https://github.com/square/okhttp)), **54×** on Objective-C ([SDWebImage](https://github.com/SDWebImage/SDWebImage)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **52×** on Swift ([SwiftLint](https://github.com/realm/SwiftLint)), **41×** on Svelte ([svelte.dev](https://github.com/sveltejs/svelte.dev)), **20×** on Python ([FastAPI](https://github.com/fastapi/fastapi)), **80×** on PHP ([Laravel](https://github.com/laravel/framework)), **801×** on Zig ([zls](https://github.com/zigtools/zls)), **90×** on Lua ([Roact](https://github.com/Roblox/roact)), and Bash ([bats-core](https://github.com/bats-core/bats-core))¹.
 
 ## Features
 
@@ -350,29 +350,29 @@ Each language is benchmarked against a pinned open-source project chosen for rea
 
 | Corpus | Language | Files | Symbols | Index time¹ | Token eff.² | `search_symbols` | `get_symbol` |
 |---|---|---|---|---|---|---|---|
-| [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) | Rust | 101 | 3,207 | 27 ms | **532×** | 48 µs | 3.2 µs |
-| [FastAPI 0.115.6](https://github.com/fastapi/fastapi) | Python | 1,290 | 4,828 | 33 ms | **20×** | 51 µs | 3.6 µs |
-| [Hono v4.7.4](https://github.com/honojs/hono) | TypeScript | 368 | 992 | 18 ms | **53×** | 21 µs | 3.6 µs |
-| [svelte.dev @ 44823b4](https://github.com/sveltejs/svelte.dev) | Svelte | 841 | 685 | 236 ms | **41×** | 26 µs | 27 µs |
-| [Redis 7.4.2](https://github.com/redis/redis) | C | 798 | 14,618 | 116 ms | **133×** | 21 µs | 10.4 µs |
-| [LevelDB 1.23](https://github.com/google/leveldb) | C++ | 132 | 1,529 | 13 ms | **418×** | 31 µs | 2.5 µs |
-| [Gin v1.10.0](https://github.com/gin-gonic/gin) | Go | 92 | 1,184 | 11 ms | **125×** | 48 µs | 3.3 µs |
-| [Guava v33.4.8](https://github.com/google/guava) | Java | 3,273 | 56,805 | 243 ms | **112×** | 79 µs | 6.4 µs |
-| [Newtonsoft.Json 13.0.3](https://github.com/JamesNK/Newtonsoft.Json) | C# | 933 | 7,284 | 84 ms | **65×** | 21 µs | 5.3 µs |
-| [bats-core v1.11.1](https://github.com/bats-core/bats-core) | Bash | 54 | 147 | 2 ms | N/A³ | 21 µs | 3.5 µs |
-| [RuboCop v1.65.0](https://github.com/rubocop/rubocop) | Ruby | 1,539 | 9,122 | 55 ms | **61×** | 31 µs | 4.4 µs |
-| [SwiftLint 0.57.0](https://github.com/realm/SwiftLint) | Swift | 667 | 3,781 | 27 ms | **52×** | 21 µs | 6.1 µs |
-| [SDWebImage 5.19.0](https://github.com/SDWebImage/SDWebImage) | Objective-C | 271 | 1,564 | 17 ms | **54×** | 20 µs | 2.9 µs |
-| [Laravel v11.9.2](https://github.com/laravel/framework) | PHP | 2,331 | 26,127 | 156 ms | **80×** | 65 µs | 17.9 µs |
-| [zls 0.13.0](https://github.com/zigtools/zls) | Zig | 67 | 2,422 | 21 ms | **801×** | 50 µs | 21.2 µs |
-| [OkHttp 5.3.2](https://github.com/square/okhttp) | Kotlin | 644 | 6,780 | 59 ms | **54×** | 47 µs | 17.7 µs |
-| [Roact v1.4.4](https://github.com/Roblox/roact) | Lua | 95 | 93 | 4 ms | **90×** | 20 µs | 19.1 µs |
+| [ripgrep 14.1.1](https://github.com/BurntSushi/ripgrep) | Rust | 101 | 3,207 | 248 ms | **532×** | 55.8 µs | 17.5 µs |
+| [FastAPI 0.115.6](https://github.com/fastapi/fastapi) | Python | 1,290 | 4,828 | 256 ms | **20×** | 54.8 µs | 17.5 µs |
+| [Hono v4.7.4](https://github.com/honojs/hono) | TypeScript | 368 | 992 | 240 ms | **53×** | 25.0 µs | 60.5 µs |
+| [svelte.dev @ 44823b4](https://github.com/sveltejs/svelte.dev) | Svelte | 841 | 685 | 240 ms | **41×** | 26.9 µs | 17.5 µs |
+| [Redis 7.4.2](https://github.com/redis/redis) | C | 818 | 14,648 | 344 ms | **133×** | 35.7 µs | 17.5 µs |
+| [LevelDB 1.23](https://github.com/google/leveldb) | C++ | 132 | 1,531 | 231 ms | **418×** | 38.5 µs | 17.5 µs |
+| [Gin v1.10.0](https://github.com/gin-gonic/gin) | Go | 92 | 1,184 | 235 ms | **125×** | 50.5 µs | 17.5 µs |
+| [Guava v33.4.8](https://github.com/google/guava) | Java | 3,275 | 56,805 | 975 ms | **112×** | 88.5 µs | 17.5 µs |
+| [Newtonsoft.Json 13.0.3](https://github.com/JamesNK/Newtonsoft.Json) | C# | 933 | 7,284 | 312 ms | **65×** | 22.2 µs | 17.5 µs |
+| [bats-core v1.11.1](https://github.com/bats-core/bats-core) | Bash | 54 | 147 | 222 ms | N/A³ | 21.3 µs | 30.7 µs |
+| [RuboCop v1.65.0](https://github.com/rubocop/rubocop) | Ruby | 1,539 | 9,122 | 290 ms | **61×** | 56.1 µs | 17.5 µs |
+| [SwiftLint 0.57.0](https://github.com/realm/SwiftLint) | Swift | 667 | 3,781 | 248 ms | **52×** | 36.6 µs | 17.5 µs |
+| [SDWebImage 5.19.0](https://github.com/SDWebImage/SDWebImage) | Objective-C | 271 | 1,564 | 237 ms | **54×** | 20.8 µs | 17.5 µs |
+| [Laravel v11.9.2](https://github.com/laravel/framework) | PHP | 2,331 | 26,127 | 612 ms | **80×** | 66.9 µs | 17.6 µs |
+| [zls 0.13.0](https://github.com/zigtools/zls) | Zig | 67 | 2,422 | 240 ms | **801×** | 51.4 µs | 17.7 µs |
+| [OkHttp 5.3.2](https://github.com/square/okhttp) | Kotlin | 636 | 6,680 | 278 ms | **56×** | 52.3 µs | 17.9 µs |
+| [Roact v1.4.4](https://github.com/Roblox/roact) | Lua | 95 | 93 | 223 ms | **90×** | 21.3 µs | 22.7 µs |
 
 ¹ Median of 5 runs. ² Token efficiency is the median ratio of full-file size to symbol size across all class/struct/interface/type-alias symbols — how many times cheaper `get_symbol` is versus reading the whole file. ³ Bash has no class/struct symbols, only functions, so the metric does not apply.
 
-> `search_symbols` latencies use the default BM25 mode (tantivy ranked full-text). Measured with Criterion over 100 samples per corpus. BM25 query time is largely independent of corpus size — 20–80 µs across all 17 repos — because tantivy's inverted index avoids a linear symbol scan. The exact substring fallback scales linearly and is 3–32× slower depending on symbol count; fuzzy (trigram) is 44–886× slower and is an explicit opt-in.
+> `search_symbols` latencies use the default BM25 mode (tantivy ranked full-text). Measured with Criterion over 100 samples per corpus. BM25 query time remains largely independent of corpus size — 21–89 µs across all 17 repos — because tantivy's inverted index avoids a linear symbol scan. The exact substring path now ranges from faster than BM25 on the tiniest corpora to 61× slower on Guava, because deterministic pagination sorts the full match set before slicing. Fuzzy (trigram) ranges from 4× to 792× slower and remains an explicit opt-in.
 >
-> LevelDB's 418× median reflects C++ class body trimming — inline method bodies are stripped, leaving only the class header. FastAPI's 20× median is lower than most because Pydantic models are large by nature (`Schema` alone is 4.8 KB). svelte.dev's 41× median reflects meaningful symbol extraction from embedded `<script>` blocks across a large Svelte-heavy monorepo while still excluding template/style sections. Guava's 243 ms index time and 56,805 symbols make it the heaviest corpus by a factor of 4×; `get_project_outline` against it takes ~20 ms vs. sub-2 ms for most others. Laravel's `get_symbol` latency of 17.9 µs reflects the benchmark target being `Enumerable` — a 36 KB interface that is nearly the entire file it lives in; interface bodies are never trimmed since their signatures are the API contract. zls's 801× median reflects Zig's tendency toward large files with many small struct/enum declarations; `src/lsp.zig` alone is 347 KB and contains hundreds of compact LSP message types.
+> LevelDB's 418× median reflects C++ class body trimming — inline method bodies are stripped, leaving only the class header. FastAPI's 20× median is lower than most because Pydantic models are large by nature (`Schema` alone is 4.8 KB). svelte.dev's 41× median reflects meaningful symbol extraction from embedded `<script>` blocks across a large Svelte-heavy monorepo while still excluding template/style sections. Guava's 975 ms index time and 56,805 symbols make it the heaviest corpus by a factor of 4×; `get_project_outline` against it takes ~13.4 ms vs. sub-1.8 ms for every corpus except Laravel. Laravel's `get_symbol` latency of 17.6 µs reflects the benchmark target being `Enumerable` — a 36 KB interface that is nearly the entire file it lives in; interface bodies are never trimmed since their signatures are the API contract. zls's 801× median reflects Zig's tendency toward large files with many small struct/enum declarations; `src/lsp.zig` alone is 347 KB and contains hundreds of compact LSP message types.
 
 ### Running the benchmarks
 
