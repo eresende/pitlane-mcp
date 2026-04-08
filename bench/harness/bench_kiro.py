@@ -30,7 +30,7 @@ import re
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +43,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--prompts", required=True, help="JSONL file with benchmark prompts.")
     p.add_argument("--agent-mcp", default="bench-with-mcp", help="kiro-cli agent name with MCP.")
     p.add_argument("--agent-no-mcp", default="bench-no-mcp", help="kiro-cli agent name without MCP.")
-    p.add_argument("--model", default="glm-5", help="Model to use for both agents.")
+    p.add_argument("--model", default="claude-haiku-4.5", help="Model to use for both agents.")
+    p.add_argument("--timeout", type=int, default=300, help="Per-run timeout in seconds (default: 300).")
     p.add_argument("--runs", type=int, default=1, help="Repeats per prompt per agent.")
     p.add_argument("--out", default="benchmark_out_kiro", help="Output directory.")
     p.add_argument("--prompt-suffix", default="", help="Suffix appended to every prompt.")
@@ -70,15 +71,35 @@ def load_prompts(path: Path) -> List[Dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# MCP toggle — temporarily disable pitlane-mcp for no-mcp runs
+# ---------------------------------------------------------------------------
+
+_MCP_JSON = Path.home() / ".kiro" / "settings" / "mcp.json"
+_MCP_SERVER = "pitlane-mcp"
+
+
+def _set_pitlane_disabled(disabled: bool) -> None:
+    """Flip the disabled flag on pitlane-mcp in the global mcp.json."""
+    if not _MCP_JSON.exists():
+        return
+    cfg = json.loads(_MCP_JSON.read_text(encoding="utf-8"))
+    servers = cfg.get("mcpServers", {})
+    if _MCP_SERVER in servers:
+        servers[_MCP_SERVER]["disabled"] = disabled
+        _MCP_JSON.write_text(json.dumps(cfg, indent=4), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
 # Output parsing
 # ---------------------------------------------------------------------------
 
-# Patterns that indicate a tool invocation line in kiro-cli stdout
+# Patterns that indicate a tool invocation line in kiro-cli stdout.
+# Anchored to actual tool call patterns to avoid matching file paths.
 _TOOL_LINE_RE = re.compile(
-    r"(using tool|✓|Reading|Searching|Executing|Running|Listing|Writing|Grep|Glob"
-    r"|index_project|search_symbols|get_symbol|get_file_outline|find_usages"
-    r"|get_lines|get_index_stats|watch_project|wait_for_embeddings|get_project_outline"
-    r"|pitlane|mcp)",
+    r"(using tool|Running tool|\bGrep\b|\bGlob\b"
+    r"|✓ Successfully"
+    r"|\breading\b|\bsearching\b|\bexecuting\b|\blisting\b|\bwriting\b)"
+    r"|^(Reading|Searching|Executing|Running|Listing|Writing)\b",
     re.IGNORECASE,
 )
 
@@ -119,10 +140,12 @@ def parse_output(stdout: str, stderr: str = "") -> Dict[str, Any]:
         elif clean.startswith(">"):
             answer_lines.append(clean.lstrip("> ").strip())
 
-    # Count distinct pitlane MCP calls specifically
+    # Count distinct pitlane MCP calls specifically — match tool invocation lines,
+    # not just any line containing the word "pitlane" (e.g. file paths).
     pitlane_calls = [l for l in tool_lines if re.search(
-        r"index_project|search_symbols|get_symbol|get_file_outline|find_usages"
-        r"|get_lines|get_index_stats|watch_project|wait_for_embeddings|get_project_outline|pitlane",
+        r"(Running tool|using tool).*(index_project|search_symbols|get_symbol|get_file_outline"
+        r"|find_usages|get_lines|get_index_stats|watch_project|wait_for_embeddings|get_project_outline)"
+        r"|from mcp server.*pitlane",
         l, re.IGNORECASE,
     )]
 
@@ -149,6 +172,7 @@ def run_once(
     run_index: int,
     model: str,
     prompt_suffix: str,
+    timeout: int = 300,
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     prompt_id = str(prompt_row["id"])
@@ -187,16 +211,42 @@ def run_once(
         }
 
     start = time.perf_counter()
-    # Run kiro-cli from the repo dir so it can read files,
-    # but agents are resolved from ~/.kiro/agents (global).
-    proc = subprocess.run(
-        cmd,
-        cwd=str(repo),
-        text=True,
-        capture_output=True,
-    )
+    # For no-mcp runs, temporarily disable pitlane in the global mcp.json
+    # so kiro-cli cannot load it regardless of agent config.
+    is_no_mcp = "no-mcp" in agent
+    if is_no_mcp:
+        _set_pitlane_disabled(True)
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(repo),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        timed_out = False
+    except subprocess.TimeoutExpired as e:
+        elapsed = round(time.perf_counter() - start, 3)
+        stdout = (e.stdout or b"").decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        stderr = (e.stderr or b"").decode("utf-8", errors="replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        (raw_dir / "stdout.txt").write_text(stdout, encoding="utf-8")
+        (raw_dir / "stderr.txt").write_text(f"TIMEOUT after {timeout}s\n{stderr}", encoding="utf-8")
+        print(f"  → TIMEOUT after {timeout}s")
+        return {
+            "prompt_id": prompt_id, "category": category,
+            "agent": agent, "run_index": run_index,
+            "status_code": -1, "latency_seconds": elapsed,
+            "reported_time_s": None, "credits_used": None,
+            "tool_call_count": None, "pitlane_call_count": None,
+            "answer_chars": 0, "answer_preview": "TIMEOUT",
+            "tool_lines": [], "pitlane_lines": [],
+            "raw_dir": str(raw_dir),
+        }
+    finally:
+        if is_no_mcp:
+            _set_pitlane_disabled(False)
+    timed_out = False  # noqa: F841 (kept for future use)
     elapsed = round(time.perf_counter() - start, 3)
-
     stdout = proc.stdout or ""
     stderr = proc.stderr or ""
     (raw_dir / "stdout.txt").write_text(stdout, encoding="utf-8")
@@ -328,6 +378,7 @@ def main() -> int:
                     run_index=run_i,
                     model=args.model,
                     prompt_suffix=args.prompt_suffix,
+                    timeout=args.timeout,
                     dry_run=args.dry_run,
                 )
                 rows.append(row)
