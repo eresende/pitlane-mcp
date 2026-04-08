@@ -1,23 +1,11 @@
-use std::collections::HashSet;
-use std::io::{Read, Seek, SeekFrom};
-
 use serde_json::{json, Value};
 
 use crate::error::ToolError;
+use crate::graph::{collect_direct_references, read_symbol_source};
 use crate::indexer::language::SymbolKind;
 use crate::tools::index_project::load_project_index;
 
 const MAX_REFERENCES: usize = 25;
-
-/// Extract unique identifier tokens from source text.
-/// Splits on anything that is not alphanumeric or `_`, filters tokens shorter
-/// than 3 chars (to skip operators, loop vars, etc.) and pure-numeric tokens.
-fn extract_identifiers(source: &str) -> HashSet<&str> {
-    source
-        .split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|s| s.len() >= 3 && !s.chars().all(|c| c.is_ascii_digit()))
-        .collect()
-}
 
 pub struct GetSymbolParams {
     pub project: String,
@@ -65,56 +53,22 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
     }
 
     let include_context = params.include_context.unwrap_or(false);
-
-    // Open the file and read the symbol bytes
-    let mut file = std::fs::File::open(&*sym.file)
-        .map_err(|e| anyhow::anyhow!("Cannot open file {:?}: {}", sym.file, e))?;
-
-    let source_text = if include_context {
-        // Read entire file to get context lines
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
-        let lines: Vec<&str> = content.lines().collect();
-
-        let context_before = 3usize;
-        let context_after = 3usize;
-        let start_line = sym.line_start.saturating_sub(1) as usize; // 0-indexed
-        let end_line = sym.line_end as usize; // exclusive
-
-        let from = start_line.saturating_sub(context_before);
-        let to = (end_line + context_after).min(lines.len());
-
-        lines[from..to].join("\n")
-    } else {
-        // Seek to byte_start and read exactly the symbol bytes
-        file.seek(SeekFrom::Start(sym.byte_start as u64))?;
-        let len = sym.byte_end - sym.byte_start;
-        let mut buf = vec![0u8; len];
-        file.read_exact(&mut buf)?;
-        String::from_utf8_lossy(&buf).to_string()
-    };
+    let source_text = read_symbol_source(sym, include_context)?;
 
     crate::stats::record_get_symbol(&params.project, false, full_source_bytes, full_source_bytes);
 
-    // Resolve cross-references: symbols whose name appears as an identifier in
-    // the source text.  Single pass over the index with O(1) set lookup each.
-    let identifiers = extract_identifiers(&source_text);
-    let mut refs: Vec<Value> = index
-        .symbols
-        .values()
-        .filter(|s| s.id != sym.id && identifiers.contains(s.name.as_str()))
-        .map(|s| {
+    let mut refs: Vec<Value> = collect_direct_references(&index, sym, &source_text)
+        .into_iter()
+        .map(|reference| {
             json!({
-                "id": s.id,
-                "name": s.name,
-                "kind": s.kind.to_string(),
-                "file": s.file.to_string_lossy().replace('\\', "/"),
-                "line_start": s.line_start,
+                "id": reference.id,
+                "name": reference.name,
+                "kind": reference.kind,
+                "file": reference.file,
+                "line_start": reference.line_start,
             })
         })
         .collect();
-    refs.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    refs.dedup_by(|a, b| a["name"] == b["name"]);
     let references_truncated = refs.len() > MAX_REFERENCES;
     refs.truncate(MAX_REFERENCES);
 
@@ -138,6 +92,7 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::extract_identifiers;
     use crate::index::format::{index_dir, save_index};
     use crate::indexer::{registry, Indexer};
     use tempfile::TempDir;

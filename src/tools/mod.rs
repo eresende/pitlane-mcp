@@ -1,3 +1,5 @@
+pub mod find_callees;
+pub mod find_callers;
 pub mod find_usages;
 pub mod get_file_outline;
 pub mod get_index_stats;

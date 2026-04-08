@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod embed;
 pub mod error;
+pub mod graph;
 pub mod index;
 pub mod indexer;
 pub mod indexing;

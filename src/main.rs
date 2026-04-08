@@ -91,6 +91,32 @@ pub struct GetProjectOutlineRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FindCalleesRequest {
+    /// Project path
+    pub project: String,
+    /// Symbol to find direct outgoing references for
+    pub symbol_id: String,
+    /// Maximum callees to return (default: 100)
+    pub limit: Option<usize>,
+    /// Offset into callees for pagination (default: 0)
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FindCallersRequest {
+    /// Project path
+    pub project: String,
+    /// Symbol to find direct incoming references for
+    pub symbol_id: String,
+    /// Restrict callers to a file or directory glob
+    pub scope: Option<String>,
+    /// Maximum callers to return (default: 100)
+    pub limit: Option<usize>,
+    /// Offset into callers for pagination (default: 0)
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FindUsagesRequest {
     /// Project path
     pub project: String,
@@ -354,6 +380,53 @@ impl PitlaneMcp {
     }
 
     #[tool(
+        description = "Return direct outgoing symbol references for one symbol. Use this to see what a function/method likely calls without reading the full file or doing a whole-repo search.",
+        meta = tool_meta("callees outgoing calls dependencies symbol"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn find_callees(&self, Parameters(req): Parameters<FindCalleesRequest>) -> String {
+        let params = tools::find_callees::FindCalleesParams {
+            project: req.project,
+            symbol_id: req.symbol_id,
+            limit: req.limit,
+            offset: req.offset,
+        };
+        match tools::find_callees::find_callees(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Return direct incoming symbol references for one symbol. Use this to see likely callers before making a local change.",
+        meta = tool_meta("callers incoming calls references impact symbol"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn find_callers(&self, Parameters(req): Parameters<FindCallersRequest>) -> String {
+        let params = tools::find_callers::FindCallersParams {
+            project: req.project,
+            symbol_id: req.symbol_id,
+            scope: req.scope,
+            limit: req.limit,
+            offset: req.offset,
+        };
+        match tools::find_callers::find_callers(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
         description = "Find all call sites for a symbol before refactoring. Returns file, line, column, and surrounding snippet for each match.",
         meta = tool_meta("usages references callers refactor"),
         annotations(
@@ -480,7 +553,7 @@ impl ServerHandler for PitlaneMcp {
                 ALWAYS call index_project first — all other tools require an up-to-date index. \
                 Discovery: search_symbols (find by name), get_file_outline (file structure), get_project_outline (repo overview). \
                 Retrieval: get_symbol (fetch one implementation by ID). \
-                Analysis: find_usages (all call sites for a symbol). \
+                Analysis: find_callees (direct outgoing references), find_callers (direct incoming references), find_usages (all call sites for a symbol). \
                 Maintenance: watch_project (keep index current as files change).",
             )
     }
