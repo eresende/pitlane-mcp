@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::{json, Value};
@@ -48,49 +48,52 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
 
     let max_collect = offset.saturating_add(limit);
     let mut usages = Vec::new();
+    let mut searched_files = HashSet::new();
 
-    // Walk all source files in the project
-    'walk: for entry in WalkDir::new(&project_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
+    let mut indexed_files: Vec<PathBuf> = index
+        .by_file
+        .keys()
+        .filter(|path| should_search_path(path, &project_path, scope_set.as_ref()))
+        .cloned()
+        .collect();
+    indexed_files.sort_by_key(|path| {
+        let rel = path.strip_prefix(&project_path).unwrap_or(path);
+        (
+            if path.as_path() == sym.file.as_ref() {
+                0
+            } else {
+                1
+            },
+            rel.to_string_lossy().replace('\\', "/"),
+        )
+    });
+
+    for path in indexed_files {
+        searched_files.insert(path.clone());
+        append_usages_for_file(&path, &project_path, &symbol_name, &mut usages);
+        if usages.len() >= max_collect {
+            break;
         }
+    }
 
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !is_supported_extension(ext) {
-            continue;
-        }
-
-        // Apply scope filter
-        if let Some(ref set) = scope_set {
-            let rel = path.strip_prefix(&project_path).unwrap_or(path);
-            if !set.is_match(rel) && !set.is_match(path) {
+    if usages.len() < max_collect {
+        for entry in WalkDir::new(&project_path)
+            .follow_links(false)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let path = entry.path();
+            if !should_search_path(path, &project_path, scope_set.as_ref()) {
                 continue;
             }
-        }
-
-        match search_file_ast(path, &symbol_name) {
-            Ok(hits) => {
-                for (line_num, col, snippet) in hits {
-                    let rel = path.strip_prefix(&project_path).unwrap_or(path);
-                    usages.push(json!({
-                        "file": rel.to_string_lossy().replace('\\', "/"),
-                        "line": line_num,
-                        "column": col,
-                        "snippet": snippet,
-                    }));
-                }
+            if searched_files.contains(path) {
+                continue;
             }
-            Err(_) => continue,
-        }
-
-        // Early exit: stop walking once we have enough usages for the requested page.
-        if usages.len() >= max_collect {
-            break 'walk;
+            append_usages_for_file(path, &project_path, &symbol_name, &mut usages);
+            if usages.len() >= max_collect {
+                break;
+            }
         }
     }
 
@@ -111,6 +114,49 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
         ));
     }
     Ok(resp)
+}
+
+fn should_search_path(path: &Path, project_path: &Path, scope_set: Option<&GlobSet>) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !is_supported_extension(ext) {
+        return false;
+    }
+
+    if let Some(set) = scope_set {
+        let rel = path.strip_prefix(project_path).unwrap_or(path);
+        if !set.is_match(rel) && !set.is_match(path) {
+            return false;
+        }
+    }
+
+    true
+}
+
+fn append_usages_for_file(
+    path: &Path,
+    project_path: &Path,
+    symbol_name: &str,
+    usages: &mut Vec<Value>,
+) {
+    let hits = match search_file_ast(path, symbol_name) {
+        Ok(hits) => hits,
+        Err(_) => return,
+    };
+
+    let rel = path.strip_prefix(project_path).unwrap_or(path);
+    let file = rel.to_string_lossy().replace('\\', "/");
+    for (line_num, col, snippet) in hits {
+        usages.push(json!({
+            "file": file,
+            "line": line_num,
+            "column": col,
+            "snippet": snippet,
+        }));
+    }
 }
 
 /// Searches `path` for AST nodes whose text equals `name`. Only true identifier
@@ -694,6 +740,53 @@ greet()
                 .iter()
                 .any(|usage| usage["file"] == "Main.server.luau"),
             "expected cross-file call hit in Main.server.luau, got: {usages:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_find_usages_falls_back_to_supported_zero_symbol_files() {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+
+        let dir = TempDir::new().unwrap();
+        write(&dir, "defs.js", "function greet() {}\n");
+        write(&dir, "calls.js", "greet();\ngreet();\n");
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let sym_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == "greet")
+            .map(|s| s.id.clone())
+            .expect("greet must be indexed");
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        let usages = response["usages"]
+            .as_array()
+            .expect("usages must be an array");
+        assert!(
+            usages.iter().any(|usage| usage["file"] == "defs.js"),
+            "expected definition hit in defs.js, got: {usages:?}"
+        );
+        assert!(
+            usages.iter().any(|usage| usage["file"] == "calls.js"),
+            "expected fallback hit in zero-symbol file calls.js, got: {usages:?}"
         );
     }
 
