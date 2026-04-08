@@ -1,6 +1,7 @@
 use notify::{recommended_watcher, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
@@ -33,6 +34,7 @@ impl ProjectWatcher {
         let indexer = Arc::new(Indexer::new(parsers));
 
         let (tx, rx) = mpsc::channel::<PathBuf>(CHANNEL_CAPACITY);
+        let overflowed = Arc::new(AtomicBool::new(false));
 
         tokio::spawn(run_debounce_loop(
             rx,
@@ -43,6 +45,7 @@ impl ProjectWatcher {
             index_path,
             meta_path,
             embed_config,
+            Arc::clone(&overflowed),
         ));
 
         let handler = move |result: notify::Result<Event>| {
@@ -53,8 +56,12 @@ impl ProjectWatcher {
                             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                             if is_supported_extension(ext) {
                                 // Non-blocking send; drop the event if the channel is full rather
-                                // than blocking the notify callback thread.
-                                let _ = tx.try_send(path);
+                                // than blocking the notify callback thread. If we do drop one,
+                                // mark the project dirty so the debounce loop does a safe full
+                                // resync instead of silently diverging.
+                                if tx.try_send(path).is_err() {
+                                    overflowed.store(true, Ordering::Release);
+                                }
                             }
                         }
                     }
@@ -83,6 +90,7 @@ async fn run_debounce_loop(
     index_path: PathBuf,
     meta_path: PathBuf,
     embed_config: Option<Arc<EmbedConfig>>,
+    overflowed: Arc<AtomicBool>,
 ) {
     let mut pending: HashSet<PathBuf> = HashSet::new();
     let mut deadline: Option<Instant> = None;
@@ -101,9 +109,17 @@ async fn run_debounce_loop(
                     }
                     // Channel closed — flush whatever is pending and exit.
                     None => {
-                        if !pending.is_empty() {
-                            reindex_batch(&pending, &root, &indexer, &index, &index_path, &meta_path, embed_config.as_ref().map(Arc::clone)).await;
-                        }
+                        flush_pending(
+                            &mut pending,
+                            &root,
+                            &indexer,
+                            &index,
+                            &index_path,
+                            &meta_path,
+                            embed_config.as_ref().map(Arc::clone),
+                            &overflowed,
+                        )
+                        .await;
                         return;
                     }
                 }
@@ -111,11 +127,136 @@ async fn run_debounce_loop(
 
             // Debounce window expired — flush the batch.
             _ = tokio::time::sleep(timeout), if deadline.is_some() => {
-                reindex_batch(&pending, &root, &indexer, &index, &index_path, &meta_path, embed_config.as_ref().map(Arc::clone)).await;
-                pending.clear();
+                flush_pending(
+                    &mut pending,
+                    &root,
+                    &indexer,
+                    &index,
+                    &index_path,
+                    &meta_path,
+                    embed_config.as_ref().map(Arc::clone),
+                    &overflowed,
+                )
+                .await;
                 deadline = None;
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn flush_pending(
+    pending: &mut HashSet<PathBuf>,
+    root: &Path,
+    indexer: &Arc<Indexer>,
+    index: &Arc<RwLock<SymbolIndex>>,
+    index_path: &Path,
+    meta_path: &Path,
+    embed_config: Option<Arc<EmbedConfig>>,
+    overflowed: &Arc<AtomicBool>,
+) {
+    if overflowed.swap(false, Ordering::AcqRel) {
+        full_resync(root, indexer, index, index_path, meta_path, embed_config).await;
+        pending.clear();
+        return;
+    }
+
+    if pending.is_empty() {
+        return;
+    }
+
+    reindex_batch(
+        pending,
+        root,
+        indexer,
+        index,
+        index_path,
+        meta_path,
+        embed_config,
+    )
+    .await;
+    pending.clear();
+}
+
+async fn full_resync(
+    root: &Path,
+    indexer: &Arc<Indexer>,
+    index: &Arc<RwLock<SymbolIndex>>,
+    index_path: &Path,
+    meta_path: &Path,
+    embed_config: Option<Arc<EmbedConfig>>,
+) {
+    let old_removed_ids = {
+        let idx = index.read().await;
+        idx.symbols.keys().cloned().collect::<Vec<_>>()
+    };
+
+    let root_buf = root.to_path_buf();
+    let indexer = Arc::clone(indexer);
+    let rebuilt = tokio::task::spawn_blocking(move || indexer.index_project(&root_buf, &[])).await;
+
+    let (rebuilt_index, _) = match rebuilt {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => {
+            eprintln!("pitlane-mcp: full watcher resync failed: {}", err);
+            return;
+        }
+        Err(err) => {
+            eprintln!("pitlane-mcp: full watcher resync task panicked: {}", err);
+            return;
+        }
+    };
+
+    let changed_files: HashSet<PathBuf> = rebuilt_index.by_file.keys().cloned().collect();
+    let mut file_mtimes = IndexMeta::new(root).file_mtimes;
+    for file_path in &changed_files {
+        if let Ok(meta) = std::fs::metadata(file_path) {
+            if let Ok(modified) = meta.modified() {
+                if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
+                    file_mtimes.insert(file_path.display().to_string(), dur.as_secs());
+                }
+            }
+        }
+    }
+
+    {
+        let mut idx = index.write().await;
+        *idx = rebuilt_index;
+
+        if let Err(e) = save_index(&idx, index_path) {
+            eprintln!("pitlane-mcp: failed to flush index to disk: {}", e);
+        }
+
+        crate::cache::invalidate(root);
+
+        if let Ok(tantivy_dir) = index_dir(root).map(|d| d.join("tantivy")) {
+            let _ = std::fs::remove_file(tantivy_dir.join(".ready"));
+        }
+        crate::index::bm25::invalidate(root);
+    }
+
+    if let Some(cfg) = &embed_config {
+        let store_path = match index_dir(root) {
+            Ok(d) => d.join("embeddings.bin"),
+            Err(e) => {
+                tracing::warn!("embed: cannot resolve store path: {e}");
+                return;
+            }
+        };
+        crate::embed::update_embeddings_for_files(
+            &*index.read().await,
+            &changed_files,
+            &old_removed_ids,
+            cfg,
+            &store_path,
+        )
+        .await;
+    }
+
+    let mut meta = IndexMeta::new(root);
+    meta.file_mtimes = file_mtimes;
+    if let Err(e) = save_meta(&meta, meta_path) {
+        eprintln!("pitlane-mcp: failed to flush meta to disk: {}", e);
     }
 }
 
@@ -207,6 +348,7 @@ async fn reindex_batch(
 mod tests {
     use super::*;
     use crate::indexer::registry;
+    use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
 
     const TEST_DEBOUNCE: Duration = Duration::from_millis(50);
@@ -223,6 +365,16 @@ mod tests {
         indexer: Arc<Indexer>,
         index: Arc<RwLock<SymbolIndex>>,
     ) -> tokio::task::JoinHandle<()> {
+        spawn_loop_with_overflow(rx, dir, indexer, index, Arc::new(AtomicBool::new(false)))
+    }
+
+    fn spawn_loop_with_overflow(
+        rx: mpsc::Receiver<PathBuf>,
+        dir: &TempDir,
+        indexer: Arc<Indexer>,
+        index: Arc<RwLock<SymbolIndex>>,
+        overflowed: Arc<AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
         let root = dir.path().to_path_buf();
         let index_path = dir.path().join("index.bin");
         let meta_path = dir.path().join("meta.json");
@@ -235,6 +387,7 @@ mod tests {
             index_path,
             meta_path,
             None,
+            overflowed,
         ))
     }
 
@@ -390,5 +543,35 @@ mod tests {
         assert_eq!(idx.symbol_count(), 1);
         let names: Vec<_> = idx.symbols.values().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"keep"));
+    }
+
+    /// If the notify queue overflows, the debounce loop falls back to a full
+    /// resync so dropped paths do not leave the index stale.
+    #[tokio::test]
+    async fn test_overflow_triggers_full_resync() {
+        let dir = TempDir::new().unwrap();
+        let a = dir.path().join("a.rs");
+        let b = dir.path().join("b.rs");
+        std::fs::write(&a, b"fn a_old() {}").unwrap();
+
+        let (index, indexer) = setup(&dir);
+        let (tx, rx) = mpsc::channel(16);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let handle = spawn_loop_with_overflow(rx, &dir, indexer, index.clone(), overflowed.clone());
+
+        std::fs::write(&a, b"fn a_new() {}").unwrap();
+        std::fs::write(&b, b"fn b_new() {}").unwrap();
+
+        tx.send(a).await.unwrap();
+        overflowed.store(true, Ordering::Release);
+
+        drop(tx);
+        handle.await.unwrap();
+
+        let idx = index.read().await;
+        let names: Vec<_> = idx.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"a_new"));
+        assert!(names.contains(&"b_new"));
+        assert!(!names.contains(&"a_old"));
     }
 }
