@@ -210,6 +210,7 @@ fn search_svelte_file_ast(
             name,
             lines,
             block.line_start as usize - 1,
+            block.column_start as usize,
             &mut hits,
             &mut seen,
         );
@@ -258,6 +259,7 @@ fn collect_identifier_nodes_embedded(
     name: &str,
     lines: &[&str],
     row_offset: usize,
+    col_offset: usize,
     hits: &mut Vec<(usize, usize, String)>,
     seen: &mut HashSet<(usize, usize)>,
 ) {
@@ -267,7 +269,11 @@ fn collect_identifier_nodes_embedded(
     ) && node.utf8_text(source).ok() == Some(name)
     {
         let row = row_offset + node.start_position().row;
-        let col = node.start_position().column;
+        let col = if node.start_position().row == 0 {
+            col_offset + node.start_position().column
+        } else {
+            node.start_position().column
+        };
         if seen.insert((row, col)) {
             let snippet = lines
                 .get(row)
@@ -279,7 +285,9 @@ fn collect_identifier_nodes_embedded(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_identifier_nodes_embedded(child, source, name, lines, row_offset, hits, seen);
+        collect_identifier_nodes_embedded(
+            child, source, name, lines, row_offset, col_offset, hits, seen,
+        );
     }
 }
 
@@ -617,6 +625,20 @@ greet()
         let hits = search_file_ast(&path, "greet").unwrap();
         let lines: Vec<usize> = hits.iter().map(|(l, _, _)| *l).collect();
         assert_eq!(lines, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_svelte_inline_script_reports_original_columns() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "Inline.svelte",
+            "<script>const greet = () => greet()</script>\n",
+        );
+        let hits = search_file_ast(&path, "greet").unwrap();
+
+        let positions: Vec<(usize, usize)> = hits.iter().map(|(l, c, _)| (*l, *c)).collect();
+        assert_eq!(positions, vec![(1, 15), (1, 29)]);
     }
 
     #[tokio::test]

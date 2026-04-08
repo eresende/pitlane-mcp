@@ -19,6 +19,7 @@ pub(crate) struct ScriptBlock {
     pub byte_start: usize,
     pub byte_end: usize,
     pub line_start: u32,
+    pub column_start: u32,
     pub language: ScriptBlockLanguage,
 }
 
@@ -135,6 +136,7 @@ fn collect_script_blocks_from_node(source: &[u8], node: Node, blocks: &mut Vec<S
                     byte_start: child.start_byte(),
                     byte_end: child.end_byte(),
                     line_start: child.start_position().row as u32 + 1,
+                    column_start: child.start_position().column as u32,
                     language: script_block_language(source, node),
                 });
                 break;
