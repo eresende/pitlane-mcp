@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Clone benchmark repositories at pinned release tags.
+# Clone benchmark repositories at pinned refs.
 # Re-running is safe — already-cloned repos are left untouched.
 #
 # Usage:
@@ -24,6 +24,25 @@ clone_if_missing() {
     echo "  $name: done ($(git -C "$dest" rev-parse HEAD))"
 }
 
+clone_at_commit_if_missing() {
+    local name="$1" url="$2" branch="$3" rev="$4"
+    local dest="$REPOS/$name"
+
+    if [ -d "$dest/.git" ]; then
+        echo "  $name: already present ($(git -C "$dest" rev-parse --short HEAD))"
+        return
+    fi
+
+    echo "  $name: cloning $url @ $rev (via $branch) ..."
+    git init -q "$dest"
+    git -C "$dest" remote add origin "$url"
+    if ! git -C "$dest" fetch --depth 1 origin "$rev" >/dev/null 2>&1; then
+        git -C "$dest" fetch --depth 1 origin "$branch"
+    fi
+    git -C "$dest" checkout -q --detach "$rev"
+    echo "  $name: done ($(git -C "$dest" rev-parse HEAD))"
+}
+
 echo "Setting up benchmark repositories in $REPOS/ ..."
 echo ""
 # Rust baseline: medium-sized, well-structured, widely known
@@ -32,6 +51,8 @@ clone_if_missing ripgrep https://github.com/BurntSushi/ripgrep.git  14.1.1
 clone_if_missing fastapi  https://github.com/fastapi/fastapi.git    0.115.6
 # TypeScript baseline: web framework, exercises all TS symbol kinds
 clone_if_missing hono     https://github.com/honojs/hono.git        v4.7.4
+# Svelte baseline: official Svelte site, substantial .svelte symbol coverage
+clone_at_commit_if_missing svelte.dev https://github.com/sveltejs/svelte.dev.git main 44823b47305562c3647c10070173f69c56e826d8
 # C baseline: heavy macro/typedef/struct usage, large file count
 clone_if_missing redis    https://github.com/redis/redis.git        7.4.2
 # C++ baseline: clean idiomatic C++ with abstract classes and namespaces

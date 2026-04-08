@@ -66,6 +66,7 @@ const KNOWN_REPOS: &[(&str, &str)] = &[
     ("ripgrep", "bench/repos/ripgrep"),
     ("fastapi", "bench/repos/fastapi"),
     ("hono", "bench/repos/hono"),
+    ("svelte.dev", "bench/repos/svelte.dev"),
     ("redis", "bench/repos/redis"),
     ("leveldb", "bench/repos/leveldb"),
     ("gin", "bench/repos/gin"),

@@ -24,6 +24,7 @@ const REPOS: &[&str] = &[
     "bench/repos/ripgrep",
     "bench/repos/fastapi",
     "bench/repos/hono",
+    "bench/repos/svelte.dev",
     "bench/repos/redis",
     "bench/repos/leveldb",
     "bench/repos/gin",
