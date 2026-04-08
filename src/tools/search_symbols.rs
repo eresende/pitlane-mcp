@@ -79,6 +79,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             "python" => Ok(Language::Python),
             "javascript" | "js" => Ok(Language::JavaScript),
             "typescript" | "ts" => Ok(Language::TypeScript),
+            "svelte" => Ok(Language::Svelte),
             "c" => Ok(Language::C),
             "cpp" | "c++" => Ok(Language::Cpp),
             "go" => Ok(Language::Go),
@@ -95,7 +96,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             other => Err(ToolError::InvalidArgument {
                 param: "language".to_string(),
                 message: format!(
-                    "Unknown language '{}'. Supported: rust, python, javascript, typescript, c, cpp, go, java, bash, csharp, ruby, swift, objc, php, zig, kotlin, lua",
+                    "Unknown language '{}'. Supported: rust, python, javascript, typescript, svelte, c, cpp, go, java, bash, csharp, ruby, swift, objc, php, zig, kotlin, lua",
                     other
                 ),
             }),

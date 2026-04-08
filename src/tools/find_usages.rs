@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use walkdir::WalkDir;
 
 use crate::error::ToolError;
+use crate::indexer::svelte::{collect_script_blocks, ScriptBlockLanguage};
 use crate::indexer::{is_supported_extension, tree_sitter_language_for_extension};
 use crate::tools::index_project::load_project_index;
 
@@ -118,11 +119,6 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
 fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize, String)>> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-    let ts_lang = match tree_sitter_language_for_extension(ext) {
-        Some(lang) => lang,
-        None => return Ok(vec![]),
-    };
-
     // Skip oversized files (same guard as the indexer)
     if path.metadata().map(|m| m.len()).unwrap_or(0) > 1024 * 1024 {
         return Ok(vec![]);
@@ -140,6 +136,15 @@ fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize,
     }
 
     let lines: Vec<&str> = source_str.lines().collect();
+
+    if ext == "svelte" {
+        return search_svelte_file_ast(&source, &lines, name);
+    }
+
+    let ts_lang = match tree_sitter_language_for_extension(ext) {
+        Some(lang) => lang,
+        None => return Ok(vec![]),
+    };
 
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&ts_lang)?;
@@ -163,6 +168,54 @@ fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize,
 
     hits.sort_unstable();
 
+    Ok(hits)
+}
+
+fn search_svelte_file_ast(
+    source: &[u8],
+    lines: &[&str],
+    name: &str,
+) -> anyhow::Result<Vec<(usize, usize, String)>> {
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_svelte_ng::LANGUAGE.into())?;
+
+    let Some(tree) = parser.parse(source, None) else {
+        return Ok(vec![]);
+    };
+
+    let mut hits = Vec::new();
+    let mut seen = HashSet::new();
+
+    for block in collect_script_blocks(source, tree.root_node()) {
+        let script_source = &source[block.byte_start..block.byte_end];
+        let script_str = std::str::from_utf8(script_source).unwrap_or("");
+        if !script_str.contains(name) {
+            continue;
+        }
+
+        let ts_lang = match block.language {
+            ScriptBlockLanguage::JavaScript => tree_sitter_javascript::LANGUAGE.into(),
+            ScriptBlockLanguage::TypeScript => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        };
+
+        let mut script_parser = tree_sitter::Parser::new();
+        script_parser.set_language(&ts_lang)?;
+        let Some(script_tree) = script_parser.parse(script_source, None) else {
+            continue;
+        };
+
+        collect_identifier_nodes_embedded(
+            script_tree.root_node(),
+            script_source,
+            name,
+            lines,
+            block.line_start as usize - 1,
+            &mut hits,
+            &mut seen,
+        );
+    }
+
+    hits.sort_unstable();
     Ok(hits)
 }
 
@@ -196,6 +249,37 @@ fn collect_identifier_nodes(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_identifier_nodes(child, source, name, lines, hits, seen);
+    }
+}
+
+fn collect_identifier_nodes_embedded(
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+    name: &str,
+    lines: &[&str],
+    row_offset: usize,
+    hits: &mut Vec<(usize, usize, String)>,
+    seen: &mut HashSet<(usize, usize)>,
+) {
+    if matches!(
+        node.kind(),
+        "identifier" | "type_identifier" | "field_identifier"
+    ) && node.utf8_text(source).ok() == Some(name)
+    {
+        let row = row_offset + node.start_position().row;
+        let col = node.start_position().column;
+        if seen.insert((row, col)) {
+            let snippet = lines
+                .get(row)
+                .map(|l| l.trim().to_string())
+                .unwrap_or_default();
+            hits.push((row + 1, col + 1, snippet));
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_identifier_nodes_embedded(child, source, name, lines, row_offset, hits, seen);
     }
 }
 
@@ -515,6 +599,24 @@ mod tests {
         let lines: Vec<usize> = hits.iter().map(|(l, _, _)| *l).collect();
         assert!(lines.contains(&1), "definition on line 1");
         assert!(lines.contains(&5), "call on line 5");
+    }
+
+    #[test]
+    fn test_svelte_finds_definition_and_call_in_script_block() {
+        let dir = TempDir::new().unwrap();
+        let path = write(
+            &dir,
+            "Component.svelte",
+            "<script>
+function greet() {}
+greet()
+</script>
+<div>{greet()}</div>
+",
+        );
+        let hits = search_file_ast(&path, "greet").unwrap();
+        let lines: Vec<usize> = hits.iter().map(|(l, _, _)| *l).collect();
+        assert_eq!(lines, vec![2, 3]);
     }
 
     #[tokio::test]

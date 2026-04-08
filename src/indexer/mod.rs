@@ -14,6 +14,7 @@ pub mod python;
 pub mod registry;
 pub mod ruby;
 pub mod rust;
+pub mod svelte;
 pub mod swift;
 pub mod typescript;
 pub mod zig;
@@ -382,6 +383,7 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "tsx"
             | "mts"
             | "cts"
+            | "svelte"
             | "c"
             | "h"
             | "cpp"
@@ -417,6 +419,7 @@ pub fn tree_sitter_language_for_extension(ext: &str) -> Option<tree_sitter::Lang
         "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
         "ts" | "mts" | "cts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "svelte" => tree_sitter_svelte_ng::LANGUAGE.into(),
         "c" | "h" => tree_sitter_c::LANGUAGE.into(),
         "cpp" | "cc" | "cxx" | "hpp" | "hxx" => tree_sitter_cpp::LANGUAGE.into(),
         "go" => tree_sitter_go::LANGUAGE.into(),
