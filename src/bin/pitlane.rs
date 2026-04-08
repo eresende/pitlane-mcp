@@ -74,6 +74,35 @@ enum Command {
         #[arg(long)]
         sig_only: bool,
     },
+    /// Show direct outgoing references for a symbol
+    Callees {
+        /// Path to the indexed project
+        project: String,
+        /// Symbol ID (from search or file outline)
+        symbol_id: String,
+        /// Maximum results (default: 100)
+        #[arg(long, default_value = "100")]
+        limit: usize,
+        /// Skip first N results
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
+    /// Show direct incoming references for a symbol
+    Callers {
+        /// Path to the indexed project
+        project: String,
+        /// Symbol ID (from search or file outline)
+        symbol_id: String,
+        /// Restrict callers to files matching a glob pattern
+        #[arg(long)]
+        scope: Option<String>,
+        /// Maximum results (default: 100)
+        #[arg(long, default_value = "100")]
+        limit: usize,
+        /// Skip first N results
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
     /// Show index statistics (file/symbol counts by language and kind)
     Stats {
         /// Path to the indexed project
@@ -210,6 +239,38 @@ async fn main() -> anyhow::Result<()> {
                 signature_only: if sig_only { Some(true) } else { None },
             };
             tools::get_symbol::get_symbol(params).await?
+        }
+
+        Command::Callees {
+            project,
+            symbol_id,
+            limit,
+            offset,
+        } => {
+            let params = tools::find_callees::FindCalleesParams {
+                project,
+                symbol_id,
+                limit: Some(limit),
+                offset: Some(offset),
+            };
+            tools::find_callees::find_callees(params).await?
+        }
+
+        Command::Callers {
+            project,
+            symbol_id,
+            scope,
+            limit,
+            offset,
+        } => {
+            let params = tools::find_callers::FindCallersParams {
+                project,
+                symbol_id,
+                scope,
+                limit: Some(limit),
+                offset: Some(offset),
+            };
+            tools::find_callers::find_callers(params).await?
         }
 
         Command::Stats { project } => {

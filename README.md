@@ -321,6 +321,24 @@ pitlane symbol /your/project src/auth.rs::Auth::login[method] --context
 pitlane symbol /your/project src/auth.rs::Auth::login[method] --sig-only
 ```
 
+### `pitlane callees`
+
+Show direct outgoing references for a symbol.
+
+```bash
+pitlane callees /your/project src/auth.rs::Auth::login[method]
+pitlane callees /your/project src/auth.rs::Auth::login[method] --limit 20 --offset 20
+```
+
+### `pitlane callers`
+
+Show direct incoming references for a symbol.
+
+```bash
+pitlane callers /your/project src/auth.rs::Auth::login[method]
+pitlane callers /your/project src/auth.rs::Auth::login[method] --scope "src/**" --limit 20
+```
+
 All commands output JSON to stdout. Logs go to stderr and can be controlled with `RUST_LOG`.
 
 ## Symbol IDs
