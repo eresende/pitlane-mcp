@@ -1,5 +1,7 @@
 # Roadmap
 
+## In Progress: `Architecture review follow-ups`
+
 ## COMPLETED!
 
 ### Optimizations
@@ -32,6 +34,13 @@ _These items optimize how MCP host clients (Claude Code, OpenCode, Kiro, Cursor,
 - [x] **Resource cap on directory walks** — add a configurable max-file-count guard in `index_project` to prevent accidental or adversarial full-filesystem walks (e.g. `index_project("/")`)
 - [x] **`find_usages` early-exit file walk** — short-circuit the AST walk once `offset + limit` usages are collected; currently walks all files even when the page is already full, which wastes work on large codebases _(Medium priority, small effort)_
 - [x] **`find_usages` scope glob for all languages** — the `scope` parameter currently works but is only exercised by Rust/Python tests; validate and test it for JS/TS/C/C++
+
+### Architecture review follow-ups
+
+- [ ] **Fix stale-cache validation for newly added files** — `is_index_up_to_date` currently only compares mtimes for files already present in `meta.file_mtimes`; adding a new supported source file can still return a cached index that is missing symbols
+- [ ] **Harden watcher event handling under bursty changes** — `watch_project` currently drops notify events when the debounce channel is full (`try_send`); add backpressure, overflow recovery, or a fallback full rescan so incremental indexing cannot silently diverge
+- [ ] **Make exact-search pagination deterministic** — `search_symbols` exact-mode pagination currently depends on `HashMap` iteration order and early-exits before imposing a stable sort; sort results before paginating so repeated calls return stable pages
+- [ ] **Rework `find_usages` to use the index more effectively** — it currently re-walks the filesystem and reparses files on every call; consider an indexed candidate-selection path so the tool matches the rest of the architecture on large repos
 
 ### Language support
 

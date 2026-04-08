@@ -4,12 +4,14 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context;
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use rmcp::model::{
     LoggingLevel, LoggingMessageNotificationParam, ProgressNotificationParam, ProgressToken,
 };
 use rmcp::service::Peer;
 use rmcp::RoleServer;
 use serde_json::{json, Value};
+use walkdir::WalkDir;
 
 use tracing::info;
 
@@ -17,7 +19,10 @@ use crate::embed::EmbedConfig;
 use crate::error::ToolError;
 use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
-use crate::indexer::{load_gitignore_patterns, registry, Indexer};
+use crate::indexer::{
+    is_declaration_file, is_excluded_dir_name, is_supported_extension, load_gitignore_patterns,
+    registry, Indexer,
+};
 
 /// Default cap on the number of eligible source files per walk.
 /// Prevents accidental full-filesystem indexing (e.g. `index_project("/")`).
@@ -62,7 +67,7 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
     // Check if we can use the up-to-date on-disk index.
     if !force && index_path.exists() && meta_path.exists() {
         if let Ok(meta) = load_meta(&meta_path) {
-            if is_index_up_to_date(&canonical, &meta) {
+            if is_index_up_to_date(&canonical, &meta, &exclude) {
                 if let Ok(index) = crate::index::format::load_index(&index_path) {
                     let symbol_count = index.symbol_count();
                     let file_count = index.file_count();
@@ -462,27 +467,98 @@ fn default_excludes() -> Vec<String> {
     ]
 }
 
-fn is_index_up_to_date(project_path: &Path, meta: &IndexMeta) -> bool {
-    // Simple check: compare stored mtimes with current mtimes
-    for (path_str, stored_mtime) in &meta.file_mtimes {
-        let path = Path::new(path_str);
-        if !path.exists() {
-            return false;
-        }
-        if let Ok(file_meta) = std::fs::metadata(path) {
-            if let Ok(modified) = file_meta.modified() {
-                if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    if dur.as_secs() != *stored_mtime {
-                        return false;
-                    }
+fn build_exclude_set(patterns: &[String]) -> anyhow::Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(Glob::new(pattern)?);
+    }
+    Ok(builder.build()?)
+}
+
+fn current_file_mtimes(
+    project_path: &Path,
+    exclude_patterns: &[String],
+) -> anyhow::Result<HashMap<String, u64>> {
+    let exclude_set = build_exclude_set(exclude_patterns)?;
+    let mut file_mtimes = HashMap::new();
+
+    for entry in WalkDir::new(project_path)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|e| {
+            let path = e.path();
+            let rel = match path.strip_prefix(project_path) {
+                Ok(r) => r,
+                Err(_) => return true,
+            };
+            if rel == Path::new("") {
+                return true;
+            }
+
+            let rel_str = rel.to_string_lossy();
+            if exclude_set.is_match(rel_str.as_ref()) {
+                return false;
+            }
+
+            if e.file_type().is_dir() {
+                if exclude_set.is_match(format!("{}/", rel_str).as_str()) {
+                    return false;
+                }
+                if rel
+                    .components()
+                    .any(|c| c.as_os_str().to_str().is_some_and(is_excluded_dir_name))
+                {
+                    return false;
                 }
             }
+            true
+        })
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
         }
+
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !is_supported_extension(ext) || is_declaration_file(path) {
+            continue;
+        }
+
+        let rel = path.strip_prefix(project_path).unwrap_or(path);
+        let rel_str = rel.to_string_lossy();
+        if exclude_set.is_match(rel_str.as_ref()) || exclude_set.is_match(path) {
+            continue;
+        }
+
+        let meta = match std::fs::metadata(path) {
+            Ok(meta) => meta,
+            Err(_) => return Ok(HashMap::new()),
+        };
+        let modified = match meta.modified() {
+            Ok(modified) => modified,
+            Err(_) => return Ok(HashMap::new()),
+        };
+        let secs = match modified.duration_since(std::time::UNIX_EPOCH) {
+            Ok(dur) => dur.as_secs(),
+            Err(_) => return Ok(HashMap::new()),
+        };
+
+        file_mtimes.insert(path.display().to_string(), secs);
     }
 
-    // Also check if there are new files that aren't in the index
-    // (simplified: just check the stored path matches)
-    meta.project_path == project_path.display().to_string()
+    Ok(file_mtimes)
+}
+
+fn is_index_up_to_date(project_path: &Path, meta: &IndexMeta, exclude_patterns: &[String]) -> bool {
+    if meta.project_path != project_path.display().to_string() {
+        return false;
+    }
+
+    match current_file_mtimes(project_path, exclude_patterns) {
+        Ok(current) => current == meta.file_mtimes,
+        Err(_) => false,
+    }
 }
 
 /// Load an index for a project path, returning a shared `Arc`.
@@ -625,6 +701,89 @@ mod tests {
             ),
             "expected FileLimitExceeded with limit={DEFAULT_MAX_FILES}, got: {tool_err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_index_project_reindexes_when_new_source_file_is_added() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn foo() {}").unwrap();
+
+        let initial = index_project(IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(initial["status"], json!("indexed"));
+        assert_eq!(initial["file_count"], json!(1));
+
+        std::fs::write(dir.path().join("extra.rs"), b"pub fn bar() {}").unwrap();
+
+        let refreshed = index_project(IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(false),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            refreshed["status"],
+            json!("indexed"),
+            "adding a new supported file must invalidate the cached index"
+        );
+        assert_eq!(refreshed["file_count"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn test_index_project_ignores_new_file_inside_default_excluded_dir() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn foo() {}").unwrap();
+
+        let initial = index_project(IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(initial["status"], json!("indexed"));
+
+        let target_dir = dir.path().join("target");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("generated.rs"), b"pub fn generated() {}").unwrap();
+
+        let cached = index_project(IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(false),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            cached["status"],
+            json!("cached"),
+            "adding files only under default excluded directories should not invalidate the index"
+        );
+        assert_eq!(cached["file_count"], json!(1));
     }
 
     // ── Task 6.3: embedding response field tests ──────────────────────────────
