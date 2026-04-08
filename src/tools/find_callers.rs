@@ -108,8 +108,16 @@ fn matches_scope(path: &Path, project_path: &Path, scope_set: Option<&GlobSet>) 
     let Some(set) = scope_set else {
         return true;
     };
-    let rel = path.strip_prefix(project_path).unwrap_or(path);
-    set.is_match(rel) || set.is_match(path)
+    // Canonicalize so that symlink-based temp dirs (e.g. /tmp -> /private/tmp on macOS)
+    // don't cause strip_prefix to fail against the already-canonicalized project_path.
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let rel = canonical
+        .strip_prefix(project_path)
+        .unwrap_or(canonical.as_path());
+    // Normalize to forward slashes so glob patterns like "nested/**" work on Windows
+    // where Path separators are backslashes.
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    set.is_match(rel_str.as_str()) || set.is_match(canonical.as_path())
 }
 
 #[cfg(test)]
