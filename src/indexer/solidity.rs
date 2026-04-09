@@ -372,7 +372,8 @@ mod tests {
 
     #[test]
     fn test_extract_interface() {
-        let source = b"interface IERC20 { function totalSupply() external view returns (uint256); }";
+        let source =
+            b"interface IERC20 { function totalSupply() external view returns (uint256); }";
         let symbols = parse_and_extract(source);
         let iface = symbols.iter().find(|s| s.name == "IERC20").unwrap();
         assert!(matches!(iface.kind, SymbolKind::Interface));
@@ -407,7 +408,8 @@ mod tests {
 
     #[test]
     fn test_extract_modifier() {
-        let source = b"contract Owned { modifier onlyOwner() { require(msg.sender == owner); _; } }";
+        let source =
+            b"contract Owned { modifier onlyOwner() { require(msg.sender == owner); _; } }";
         let symbols = parse_and_extract(source);
         let m = symbols.iter().find(|s| s.name == "onlyOwner").unwrap();
         assert!(matches!(m.kind, SymbolKind::Method));
@@ -424,7 +426,8 @@ mod tests {
 
     #[test]
     fn test_extract_error() {
-        let source = b"contract Token { error InsufficientBalance(uint available, uint required); }";
+        let source =
+            b"contract Token { error InsufficientBalance(uint available, uint required); }";
         let symbols = parse_and_extract(source);
         let err = symbols
             .iter()

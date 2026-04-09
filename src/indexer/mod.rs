@@ -14,10 +14,10 @@ pub mod python;
 pub mod registry;
 pub mod ruby;
 pub mod rust;
+pub mod solidity;
 pub mod svelte;
 pub mod swift;
 pub mod typescript;
-pub mod solidity;
 pub mod zig;
 
 use std::collections::HashMap;
