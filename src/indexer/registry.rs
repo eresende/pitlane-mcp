@@ -8,6 +8,7 @@ use crate::indexer::javascript::JavaScriptParser;
 use crate::indexer::kotlin::KotlinParser;
 use crate::indexer::language::LanguageParser;
 use crate::indexer::lua::LuaParser;
+use crate::indexer::solidity::SolidityParser;
 use crate::indexer::objc::ObjCParser;
 use crate::indexer::php::PhpParser;
 use crate::indexer::python::PythonParser;
@@ -38,5 +39,6 @@ pub fn build_default_registry() -> Vec<Box<dyn LanguageParser>> {
         Box::new(ZigParser),
         Box::new(KotlinParser),
         Box::new(LuaParser),
+        Box::new(SolidityParser),
     ]
 }

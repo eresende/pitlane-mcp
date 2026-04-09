@@ -17,6 +17,7 @@ pub mod rust;
 pub mod svelte;
 pub mod swift;
 pub mod typescript;
+pub mod solidity;
 pub mod zig;
 
 use std::collections::HashMap;
@@ -406,6 +407,7 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "kts"
             | "luau"
             | "lua"
+            | "sol"
     )
 }
 
@@ -433,6 +435,7 @@ pub fn tree_sitter_language_for_extension(ext: &str) -> Option<tree_sitter::Lang
         "zig" => tree_sitter_zig::LANGUAGE.into(),
         "kt" | "kts" => tree_sitter_kotlin_ng::LANGUAGE.into(),
         "luau" | "lua" => tree_sitter_luau::LANGUAGE.into(),
+        "sol" => tree_sitter_solidity::LANGUAGE.into(),
         _ => return None,
     })
 }

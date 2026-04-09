@@ -10,7 +10,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 
 ## Features
 
-- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, Svelte (embedded `<script>` / `<script lang="ts">` blocks only), C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, and Bash source into structured symbols
+- **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, Svelte (embedded `<script>` / `<script lang="ts">` blocks only), C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, Solidity, and Bash source into structured symbols
 - **BM25 full-text search** — tantivy-backed ranked search over name, qualified name, signature, and doc fields with a custom camelCase tokenizer (`LowerInstruction` → `["lower", "instruction"]`); falls back to exact substring match if the index isn't ready
 - **Graph-aware navigation tools** — direct callers and callees for shallow impact checks without whole-repo back-and-forth
 - **Thirteen MCP tools** for navigation: outline, search, fetch, line-range fetch, callers, callees, usages, index stats, usage stats
@@ -41,6 +41,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 | Zig | `.zig` | function, method, struct, enum, const |
 | Lua | `.luau`, `.lua` | function, method, type alias |
 | Kotlin | `.kt`, `.kts` | class, interface, enum, object, function, method, type alias |
+| Solidity | `.sol` | contract, interface, library, function, method, modifier, constructor, event, error, struct, enum |
 
 TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are automatically skipped.
 
@@ -479,7 +480,7 @@ pitlane-mcp is a fully local tool with no network calls. The following design pr
 `index_project`, `find_usages`, and `watch_project` accept any path accessible to the running process — there is no allowlist or project-root confinement. An AI agent (or a prompt-injected instruction) can call these tools with sensitive directories such as `~/.ssh`, `~/.config`, or `/etc`.
 
 Mitigating factors:
-- Only files with recognized source extensions are indexed or read (`.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.c`, `.cpp`, `.h`, `.hpp`, `.go`, `.swift`, `.m`, `.mm`, `.php`, `.zig`, `.luau`, `.lua`, etc.). Most sensitive files — SSH keys, certificates, `.env` files — have no matching extension and are silently skipped.
+- Only files with recognized source extensions are indexed or read (`.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.c`, `.cpp`, `.h`, `.hpp`, `.go`, `.swift`, `.m`, `.mm`, `.php`, `.zig`, `.luau`, `.lua`, `.sol`, etc.). Most sensitive files — SSH keys, certificates, `.env` files — have no matching extension and are silently skipped.
 - Symbolic links are never followed (`follow_links: false` in all directory walks).
 - Files larger than 1 MiB are skipped.
 
