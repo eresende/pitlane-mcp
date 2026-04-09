@@ -24,6 +24,7 @@ pub enum Language {
     Zig,
     Kotlin,
     Lua,
+    Solidity,
 }
 
 impl std::fmt::Display for Language {
@@ -47,6 +48,7 @@ impl std::fmt::Display for Language {
             Language::Zig => write!(f, "zig"),
             Language::Kotlin => write!(f, "kotlin"),
             Language::Lua => write!(f, "lua"),
+            Language::Solidity => write!(f, "solidity"),
         }
     }
 }
