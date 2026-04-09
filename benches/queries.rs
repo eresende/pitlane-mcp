@@ -38,6 +38,7 @@ const REPOS: &[&str] = &[
     "bench/repos/zls",
     "bench/repos/okhttp",
     "bench/repos/roact",
+    "bench/repos/openzeppelin-contracts",
 ];
 
 struct Setup {

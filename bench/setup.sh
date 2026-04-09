@@ -79,6 +79,8 @@ clone_if_missing zls        https://github.com/zigtools/zls.git             0.13
 clone_if_missing okhttp     https://github.com/square/okhttp.git            parent-5.3.2
 # Lua baseline: Roblox UI library, idiomatic OOP Lua with dot/colon method notation and type aliases
 clone_if_missing roact      https://github.com/Roblox/roact.git             v1.4.4
+# Solidity baseline: de-facto contract library, rich mix of contracts, interfaces, libraries, and NatSpec
+clone_if_missing openzeppelin-contracts https://github.com/OpenZeppelin/openzeppelin-contracts.git v5.6.1
 echo ""
 echo "Done. Run benchmarks with:"
 echo ""

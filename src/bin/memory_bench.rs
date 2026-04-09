@@ -80,6 +80,10 @@ const KNOWN_REPOS: &[(&str, &str)] = &[
     ("zls", "bench/repos/zls"),
     ("okhttp", "bench/repos/okhttp"),
     ("roact", "bench/repos/roact"),
+    (
+        "openzeppelin-contracts",
+        "bench/repos/openzeppelin-contracts",
+    ),
 ];
 
 fn resolve_path(arg: &str) -> String {

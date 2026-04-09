@@ -23,6 +23,10 @@ const REPOS: &[(&str, &str)] = &[
     ("zls", "bench/repos/zls"),
     ("okhttp", "bench/repos/okhttp"),
     ("roact", "bench/repos/roact"),
+    (
+        "openzeppelin-contracts",
+        "bench/repos/openzeppelin-contracts",
+    ),
 ];
 
 fn bench_index_project(c: &mut Criterion) {
