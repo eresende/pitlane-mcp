@@ -20,7 +20,7 @@ pub struct IndexProjectRequest {
     /// Re-index even if an up-to-date index exists
     pub force: Option<bool>,
     /// Maximum number of source files to index (default: 100 000). Raise for very large
-    /// mono-repos. Set to 0 to use the default.
+    /// mono-repos. Omit this field, or set it to 0, to use the default.
     pub max_files: Option<usize>,
 }
 

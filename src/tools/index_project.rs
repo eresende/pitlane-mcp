@@ -34,6 +34,7 @@ pub struct IndexProjectParams {
     pub exclude: Option<Vec<String>>,
     pub force: Option<bool>,
     /// Maximum source files to index. Defaults to `DEFAULT_MAX_FILES`.
+    /// `Some(0)` is treated the same as omitting the field, matching the MCP schema.
     /// Pass `usize::MAX` to disable.
     pub max_files: Option<usize>,
     /// If present, progress notifications are sent to this peer.
@@ -169,7 +170,10 @@ async fn do_index_project(
 
     let index_path = idx_dir.join("index.bin");
     let meta_path = idx_dir.join("meta.json");
-    let max_files = params.max_files.unwrap_or(DEFAULT_MAX_FILES);
+    let max_files = match params.max_files {
+        Some(0) | None => DEFAULT_MAX_FILES,
+        Some(limit) => limit,
+    };
     let progress_token = params.progress_token.clone();
     let peer = params.peer.clone();
 
@@ -697,6 +701,38 @@ mod tests {
             exclude: None,
             force: None,
             max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        };
+        let err = index_project(params).await.unwrap_err();
+        let tool_err = err
+            .downcast_ref::<crate::error::ToolError>()
+            .expect("error should be a ToolError");
+        assert!(
+            matches!(
+                tool_err,
+                crate::error::ToolError::FileLimitExceeded {
+                    limit: DEFAULT_MAX_FILES,
+                    ..
+                }
+            ),
+            "expected FileLimitExceeded with limit={DEFAULT_MAX_FILES}, got: {tool_err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_index_project_zero_max_files_uses_default_limit() {
+        let dir = TempDir::new().unwrap();
+        for i in 0..=DEFAULT_MAX_FILES {
+            std::fs::write(dir.path().join(format!("f{i}.rs")), b"fn f() {}").unwrap();
+        }
+
+        let params = IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: None,
+            max_files: Some(0),
             progress_token: None,
             peer: None,
             embed_config: None,
