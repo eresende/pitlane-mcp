@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::indexer::is_excluded_dir_name;
+use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 
 /// Hard cap: if the number of directories exceeds this, we collapse per-file
@@ -32,9 +33,7 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
     let max_dirs = params.max_dirs.unwrap_or(50).min(HARD_MAX_DIRS);
     let summary = params.summary.unwrap_or(false);
 
-    let project_path = Path::new(&params.project)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(&params.project).to_path_buf());
+    let project_path = resolve_project_path(&params.project)?;
 
     // Normalise the optional path filter to a forward-slash prefix for matching.
     let path_filter: Option<String> = params.path.as_ref().map(|p| {

@@ -1,7 +1,6 @@
-use std::path::Path;
-
 use serde_json::{json, Value};
 
+use crate::path_policy::{resolve_project_file, resolve_project_path};
 use crate::tools::index_project::load_project_index;
 
 pub struct GetFileOutlineParams {
@@ -11,17 +10,8 @@ pub struct GetFileOutlineParams {
 
 pub async fn get_file_outline(params: GetFileOutlineParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
-
-    let project_path = Path::new(&params.project)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(&params.project).to_path_buf());
-
-    // Try to resolve the file path relative to project root
-    let abs_file_path = if Path::new(&params.file_path).is_absolute() {
-        Path::new(&params.file_path).to_path_buf()
-    } else {
-        project_path.join(&params.file_path)
-    };
+    let project_path = resolve_project_path(&params.project)?;
+    let abs_file_path = resolve_project_file(&project_path, &params.file_path)?;
 
     // Find symbols for this file
     let file_ids = index.by_file.get(&abs_file_path);
@@ -77,4 +67,64 @@ pub async fn get_file_outline(params: GetFileOutlineParams) -> anyhow::Result<Va
         "symbols": symbols,
         "count": symbols.len(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::TempDir;
+
+    use crate::tools::index_project::{index_project, IndexProjectParams};
+
+    async fn setup_project(dir: &TempDir) -> String {
+        let project = dir.path().to_string_lossy().to_string();
+        index_project(IndexProjectParams {
+            path: project.clone(),
+            exclude: None,
+            force: None,
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+        project
+    }
+
+    #[tokio::test]
+    async fn test_get_file_outline_absolute_path_rejected() {
+        let dir = TempDir::new().unwrap();
+        let abs = dir.path().join("lib.rs");
+        std::fs::write(&abs, "pub fn hello() {}\n").unwrap();
+        let project = setup_project(&dir).await;
+
+        let err = get_file_outline(GetFileOutlineParams {
+            project,
+            file_path: abs.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap_err();
+
+        let err = err.downcast::<crate::error::ToolError>().unwrap();
+        assert!(matches!(err, crate::error::ToolError::AccessDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_get_file_outline_parent_escape_rejected() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        let project = setup_project(&dir).await;
+
+        let err = get_file_outline(GetFileOutlineParams {
+            project,
+            file_path: "../secret.rs".to_string(),
+        })
+        .await
+        .unwrap_err();
+
+        let err = err.downcast::<crate::error::ToolError>().unwrap();
+        assert!(matches!(err, crate::error::ToolError::AccessDenied { .. }));
+    }
 }

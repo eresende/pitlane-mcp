@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use crate::path_policy::resolve_project_path;
 use crate::stats::{load_stats, ProjectStats};
 
 pub struct GetUsageStatsParams {
@@ -10,6 +11,9 @@ pub async fn get_usage_stats(params: GetUsageStatsParams) -> anyhow::Result<Valu
     let stats = load_stats();
 
     if let Some(project) = params.project {
+        let project = resolve_project_path(&project)?
+            .to_string_lossy()
+            .to_string();
         let proj = stats.by_project.get(&project).cloned().unwrap_or_default();
         return Ok(json!({
             "project": project,

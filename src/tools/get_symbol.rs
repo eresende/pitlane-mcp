@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use crate::error::ToolError;
 use crate::graph::{collect_direct_references, read_symbol_source};
 use crate::indexer::language::SymbolKind;
+use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 
 const MAX_REFERENCES: usize = 25;
@@ -16,6 +17,8 @@ pub struct GetSymbolParams {
 
 pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
+    let canonical_project = resolve_project_path(&params.project)?;
+    let canonical_project = canonical_project.to_string_lossy().to_string();
 
     let sym = index
         .symbols
@@ -37,7 +40,12 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
     if use_signature_only {
         let returned_bytes = sym.signature.as_deref().unwrap_or("").len() as u64
             + sym.doc.as_deref().unwrap_or("").len() as u64;
-        crate::stats::record_get_symbol(&params.project, true, full_source_bytes, returned_bytes);
+        crate::stats::record_get_symbol(
+            &canonical_project,
+            true,
+            full_source_bytes,
+            returned_bytes,
+        );
         return Ok(json!({
             "id": sym.id,
             "name": sym.name,
@@ -55,7 +63,12 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
     let include_context = params.include_context.unwrap_or(false);
     let source_text = read_symbol_source(sym, include_context)?;
 
-    crate::stats::record_get_symbol(&params.project, false, full_source_bytes, full_source_bytes);
+    crate::stats::record_get_symbol(
+        &canonical_project,
+        false,
+        full_source_bytes,
+        full_source_bytes,
+    );
 
     let mut refs: Vec<Value> = collect_direct_references(&index, sym, &source_text)
         .into_iter()

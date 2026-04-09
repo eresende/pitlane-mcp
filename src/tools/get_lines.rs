@@ -1,6 +1,6 @@
-use std::path::Path;
-
 use serde_json::{json, Value};
+
+use crate::path_policy::{resolve_project_file, resolve_project_path};
 
 /// Maximum lines that can be fetched in a single call.
 const MAX_LINES: u32 = 500;
@@ -31,15 +31,8 @@ pub async fn get_lines(params: GetLinesParams) -> anyhow::Result<Value> {
     let effective_end = params.line_start + capped - 1;
     let truncated = requested > MAX_LINES;
 
-    let project_path = Path::new(&params.project)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(&params.project).to_path_buf());
-
-    let abs_path = if Path::new(&params.file_path).is_absolute() {
-        Path::new(&params.file_path).to_path_buf()
-    } else {
-        project_path.join(&params.file_path)
-    };
+    let project_path = resolve_project_path(&params.project)?;
+    let abs_path = resolve_project_file(&project_path, &params.file_path)?;
 
     let content = std::fs::read_to_string(&abs_path)
         .map_err(|e| anyhow::anyhow!("Cannot read {:?}: {}", abs_path, e))?;
@@ -180,15 +173,34 @@ mod tests {
         std::fs::write(&abs, "hello\nworld").unwrap();
         let project = dir.path().to_string_lossy().to_string();
 
-        let result = get_lines(GetLinesParams {
+        let err = get_lines(GetLinesParams {
             project,
             file_path: abs.to_string_lossy().to_string(),
             line_start: 1,
             line_end: 2,
         })
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(result["source"].as_str().unwrap(), "hello\nworld");
+        let err = err.downcast::<crate::error::ToolError>().unwrap();
+        assert!(matches!(err, crate::error::ToolError::AccessDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_get_lines_parent_escape_rejected() {
+        let dir = TempDir::new().unwrap();
+        let project = make_file(&dir, "lib.rs", "hello");
+
+        let err = get_lines(GetLinesParams {
+            project,
+            file_path: "../secret.rs".to_string(),
+            line_start: 1,
+            line_end: 1,
+        })
+        .await
+        .unwrap_err();
+
+        let err = err.downcast::<crate::error::ToolError>().unwrap();
+        assert!(matches!(err, crate::error::ToolError::AccessDenied { .. }));
     }
 }

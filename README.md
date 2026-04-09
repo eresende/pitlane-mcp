@@ -478,7 +478,15 @@ pitlane-mcp is a fully local tool with no network calls. The following design pr
 
 ### Filesystem access scope
 
-`index_project`, `find_usages`, and `watch_project` accept any path accessible to the running process — there is no allowlist or project-root confinement. An AI agent (or a prompt-injected instruction) can call these tools with sensitive directories such as `~/.ssh`, `~/.config`, or `/etc`.
+By default, `index_project`, `find_usages`, and `watch_project` accept any path accessible to the running process. An AI agent (or a prompt-injected instruction) can call these tools with sensitive directories such as `~/.ssh`, `~/.config`, or `/etc`.
+
+To opt into confinement, set `PITLANE_ALLOWED_ROOTS` to a platform-native path list (`:`-separated on Unix, `;`-separated on Windows). Use fully expanded absolute paths; config values are not shell-expanded. When set, pitlane-mcp rejects project paths outside those roots, and file-level tools reject absolute paths or traversal outside the indexed project root.
+
+Example:
+
+```bash
+export PITLANE_ALLOWED_ROOTS="/home/alice/src:/home/alice/work"
+```
 
 Mitigating factors:
 - Only files with recognized source extensions are indexed or read (`.rs`, `.py`, `.js`, `.ts`, `.tsx`, `.c`, `.cpp`, `.h`, `.hpp`, `.go`, `.swift`, `.m`, `.mm`, `.php`, `.zig`, `.luau`, `.lua`, `.sol`, etc.). Most sensitive files — SSH keys, certificates, `.env` files — have no matching extension and are silently skipped.

@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::{
     embed::{progress as embed_progress, store::EmbedStore, EmbedConfig},
     index::format::index_dir,
+    path_policy::resolve_project_path,
     tools::index_project::load_project_index,
 };
 
@@ -35,9 +36,7 @@ pub async fn wait_for_embeddings(params: WaitForEmbeddingsParams) -> anyhow::Res
     let index = load_project_index(&params.project)?;
     let total_symbols = index.symbol_count();
 
-    let canonical = std::path::Path::new(&params.project)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(&params.project));
+    let canonical = resolve_project_path(&params.project)?;
     let idx_dir = index_dir(&canonical)?;
     let store_path = idx_dir.join("embeddings.bin");
 

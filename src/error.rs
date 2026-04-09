@@ -24,6 +24,8 @@ pub enum ToolError {
     FileLimitExceeded { path: String, limit: usize },
     /// Indexing is running in the background for this project; the index is not ready yet.
     IndexingInProgress { project: String },
+    /// The requested path is outside the configured allowed roots or project root.
+    AccessDenied { path: String },
     /// Catch-all for unexpected I/O or internal failures.
     Internal { message: String },
 }
@@ -36,6 +38,7 @@ impl ToolError {
             ToolError::InvalidArgument { .. } => "INVALID_ARGUMENT",
             ToolError::FileLimitExceeded { .. } => "FILE_LIMIT_EXCEEDED",
             ToolError::IndexingInProgress { .. } => "INDEXING_IN_PROGRESS",
+            ToolError::AccessDenied { .. } => "ACCESS_DENIED",
             ToolError::Internal { .. } => "INTERNAL_ERROR",
         }
     }
@@ -54,6 +57,9 @@ impl ToolError {
             }
             ToolError::IndexingInProgress { .. } => {
                 "Wait for the background index_project to complete, then retry."
+            }
+            ToolError::AccessDenied { .. } => {
+                "Check PITLANE_ALLOWED_ROOTS and keep file paths inside the indexed project root."
             }
             ToolError::Internal { .. } => "Check the project path and try again.",
         }
@@ -92,6 +98,11 @@ impl std::fmt::Display for ToolError {
                 f,
                 "Project '{}' is currently being indexed in the background. Please wait for indexing to complete before querying.",
                 project
+            ),
+            ToolError::AccessDenied { path } => write!(
+                f,
+                "Access to '{}' is denied by the current path policy.",
+                path
             ),
             ToolError::Internal { message } => write!(f, "{}", message),
         }
@@ -139,6 +150,16 @@ mod tests {
         };
         assert_eq!(e.code(), "INTERNAL_ERROR");
         assert!(e.hint().contains("project path"));
+    }
+
+    #[test]
+    fn test_access_denied_code_and_hint() {
+        let e = ToolError::AccessDenied {
+            path: "/tmp/secret.rs".to_string(),
+        };
+        assert_eq!(e.code(), "ACCESS_DENIED");
+        assert!(e.hint().contains("PITLANE_ALLOWED_ROOTS"));
+        assert!(e.to_string().contains("/tmp/secret.rs"));
     }
 
     #[test]
@@ -207,6 +228,9 @@ mod tests {
             ToolError::FileLimitExceeded {
                 path: "/".to_string(),
                 limit: 100_000,
+            },
+            ToolError::AccessDenied {
+                path: "/tmp/blocked".to_string(),
             },
             ToolError::Internal {
                 message: "oops".to_string(),

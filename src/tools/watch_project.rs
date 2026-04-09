@@ -1,12 +1,13 @@
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
 use crate::embed::EmbedConfig;
+use crate::error::ToolError;
 use crate::index::format::index_dir;
+use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 use crate::watcher::ProjectWatcher;
 
@@ -39,9 +40,7 @@ impl WatcherRegistry {
         project: &str,
         embed_config: Option<Arc<EmbedConfig>>,
     ) -> anyhow::Result<Value> {
-        let canonical = Path::new(project)
-            .canonicalize()
-            .unwrap_or_else(|_| Path::new(project).to_path_buf());
+        let canonical = resolve_project_path(project)?;
         let key = canonical.display().to_string();
 
         // Check if already watching
@@ -89,9 +88,18 @@ impl WatcherRegistry {
     }
 
     pub fn stop(&self, project: &str) -> Value {
-        let canonical = Path::new(project)
-            .canonicalize()
-            .unwrap_or_else(|_| Path::new(project).to_path_buf());
+        let canonical = match resolve_project_path(project) {
+            Ok(canonical) => canonical,
+            Err(err) => match err.downcast::<ToolError>() {
+                Ok(err) => return err.to_json(),
+                Err(err) => {
+                    return ToolError::Internal {
+                        message: err.to_string(),
+                    }
+                    .to_json()
+                }
+            },
+        };
         let key = canonical.display().to_string();
 
         let mut watchers = self.watchers.lock().unwrap();
@@ -109,9 +117,18 @@ impl WatcherRegistry {
     }
 
     pub fn status(&self, project: &str) -> Value {
-        let canonical = Path::new(project)
-            .canonicalize()
-            .unwrap_or_else(|_| Path::new(project).to_path_buf());
+        let canonical = match resolve_project_path(project) {
+            Ok(canonical) => canonical,
+            Err(err) => match err.downcast::<ToolError>() {
+                Ok(err) => return err.to_json(),
+                Err(err) => {
+                    return ToolError::Internal {
+                        message: err.to_string(),
+                    }
+                    .to_json()
+                }
+            },
+        };
         let key = canonical.display().to_string();
         let watchers = self.watchers.lock().unwrap();
         let watching = watchers.contains_key(&key);

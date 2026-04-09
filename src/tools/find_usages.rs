@@ -8,6 +8,7 @@ use walkdir::WalkDir;
 use crate::error::ToolError;
 use crate::indexer::svelte::{collect_script_blocks, ScriptBlockLanguage};
 use crate::indexer::{is_supported_extension, tree_sitter_language_for_extension};
+use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 
 pub struct FindUsagesParams {
@@ -31,9 +32,7 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
         })?;
 
     let symbol_name = sym.name.clone();
-    let project_path = Path::new(&params.project)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(&params.project).to_path_buf());
+    let project_path = resolve_project_path(&params.project)?;
 
     // Build scope glob set if provided
     let scope_set: Option<GlobSet> = params.scope.as_deref().map(|scope| {

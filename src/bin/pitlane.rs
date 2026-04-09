@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use pitlane_mcp::path_policy::resolve_project_path;
 use pitlane_mcp::tools;
 
 #[derive(Parser)]
@@ -149,9 +150,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Run embeddings synchronously so the CLI waits for them to finish.
             if let Some(cfg) = embed_config {
-                let canonical = std::path::Path::new(&path)
-                    .canonicalize()
-                    .unwrap_or_else(|_| std::path::PathBuf::from(&path));
+                let canonical = resolve_project_path(&path)?;
                 let idx_dir = pitlane_mcp::index::format::index_dir(&canonical)?;
                 let store_path = idx_dir.join("embeddings.bin");
                 let index = tools::index_project::load_project_index(&path)?;

@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use crate::embed::store::EmbedStore;
 use crate::embed::EmbedConfig;
 use crate::index::format::index_dir;
+use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 
 pub struct GetIndexStatsParams {
@@ -39,9 +40,7 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
     // Embedding progress
     let total_symbols = index.symbol_count();
     let embed_config = EmbedConfig::from_env();
-    let canonical = std::path::Path::new(&params.project)
-        .canonicalize()
-        .unwrap_or_else(|_| std::path::PathBuf::from(&params.project));
+    let canonical = resolve_project_path(&params.project)?;
     let idx_dir = index_dir(&canonical)?;
     let store_path = idx_dir.join("embeddings.bin");
 

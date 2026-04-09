@@ -7,6 +7,7 @@ use crate::error::ToolError;
 use crate::graph::{
     collect_direct_callable_references, is_callable_kind, is_low_signal_name, read_symbol_source,
 };
+use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 
 pub struct FindCallersParams {
@@ -29,9 +30,7 @@ pub async fn find_callers(params: FindCallersParams) -> anyhow::Result<Value> {
             symbol_id: params.symbol_id.clone(),
         })?;
 
-    let project_path = Path::new(&params.project)
-        .canonicalize()
-        .unwrap_or_else(|_| Path::new(&params.project).to_path_buf());
+    let project_path = resolve_project_path(&params.project)?;
     let scope_set: Option<GlobSet> = params.scope.as_deref().map(|scope| {
         let mut builder = GlobSetBuilder::new();
         if let Ok(glob) = Glob::new(scope) {

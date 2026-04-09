@@ -11,6 +11,7 @@ use crate::embed::EmbedConfig;
 use crate::error::ToolError;
 use crate::index::format::index_dir;
 use crate::indexer::language::{Language, Symbol, SymbolKind};
+use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 
 /// Build the set of character trigrams for `s` (lowercased).
@@ -136,10 +137,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 )
             })?;
 
-            let project_path = Path::new(&params.project);
-            let canonical = project_path
-                .canonicalize()
-                .unwrap_or_else(|_| project_path.to_path_buf());
+            let canonical = resolve_project_path(&params.project)?;
 
             // Sub-task 2: load EmbedStore
             let store_path = index_dir(&canonical)?.join("embeddings.bin");
@@ -256,10 +254,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
     // (e.g. first call after upgrade) and the mode wasn't set explicitly.
     // ------------------------------------------------------------------
     if mode == "bm25" {
-        let project_path = Path::new(&params.project);
-        let canonical = project_path
-            .canonicalize()
-            .unwrap_or_else(|_| project_path.to_path_buf());
+        let canonical = resolve_project_path(&params.project)?;
 
         let bm25_result: anyhow::Result<Value> = (|| {
             let tantivy_dir = index_dir(&canonical)?.join("tantivy");

@@ -23,6 +23,7 @@ use crate::indexer::{
     is_declaration_file, is_excluded_dir_name, is_supported_extension, load_gitignore_patterns,
     registry, Indexer,
 };
+use crate::path_policy::resolve_project_path;
 
 /// Default cap on the number of eligible source files per walk.
 /// Prevents accidental full-filesystem indexing (e.g. `index_project("/")`).
@@ -44,10 +45,7 @@ pub struct IndexProjectParams {
 }
 
 pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Value> {
-    let path = Path::new(&params.path);
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("Cannot canonicalize path: {}", params.path))?;
+    let canonical = resolve_project_path(&params.path)?;
 
     info!(path = %canonical.display(), "index_project: start");
 
@@ -567,10 +565,7 @@ fn is_index_up_to_date(project_path: &Path, meta: &IndexMeta, exclude_patterns: 
 /// populates the cache, and returns the new Arc. Subsequent calls for the
 /// same project return the cached Arc immediately without any disk I/O.
 pub fn load_project_index(project: &str) -> anyhow::Result<Arc<SymbolIndex>> {
-    let path = Path::new(project);
-    let canonical = path
-        .canonicalize()
-        .with_context(|| format!("Cannot canonicalize path: {}", project))?;
+    let canonical = resolve_project_path(project)?;
 
     // Refuse to serve a partial index while background indexing is running.
     if crate::indexing::is_indexing(&canonical) {
@@ -606,6 +601,7 @@ mod tests {
     use crate::embed::EmbedConfig;
     use crate::index::format::{index_dir, save_index};
     use crate::indexer::{registry, Indexer};
+    use crate::path_policy::set_test_allowed_roots;
     use tempfile::TempDir;
 
     /// Helper: index a temp project to disk and return its path string.
@@ -669,6 +665,24 @@ mod tests {
         assert_eq!(tool_err.hint(), "Call index_project first.");
     }
 
+    #[test]
+    fn test_load_project_index_rejects_project_outside_allowed_roots() {
+        let allowed = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        set_test_allowed_roots(Some(allowed.path().as_os_str().to_os_string()));
+
+        let err = load_project_index(outside.path().to_string_lossy().as_ref()).unwrap_err();
+        let tool_err = err
+            .downcast_ref::<crate::error::ToolError>()
+            .expect("error should be a ToolError");
+        assert!(matches!(
+            tool_err,
+            crate::error::ToolError::AccessDenied { .. }
+        ));
+
+        set_test_allowed_roots(None);
+    }
+
     #[tokio::test]
     async fn test_index_project_default_max_files_enforced() {
         // Verify that max_files: None uses DEFAULT_MAX_FILES (not usize::MAX).
@@ -701,6 +715,36 @@ mod tests {
             ),
             "expected FileLimitExceeded with limit={DEFAULT_MAX_FILES}, got: {tool_err:?}"
         );
+    }
+
+    #[test]
+    fn test_index_project_rejects_project_outside_allowed_roots() {
+        let allowed = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        set_test_allowed_roots(Some(allowed.path().as_os_str().to_os_string()));
+
+        let err = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(index_project(IndexProjectParams {
+                path: outside.path().to_string_lossy().to_string(),
+                exclude: None,
+                force: None,
+                max_files: None,
+                progress_token: None,
+                peer: None,
+                embed_config: None,
+            }))
+            .unwrap_err();
+
+        let tool_err = err
+            .downcast_ref::<crate::error::ToolError>()
+            .expect("error should be a ToolError");
+        assert!(matches!(
+            tool_err,
+            crate::error::ToolError::AccessDenied { .. }
+        ));
+
+        set_test_allowed_roots(None);
     }
 
     #[tokio::test]
