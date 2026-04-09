@@ -281,6 +281,7 @@ Index a project (or load from cache if up to date).
 pitlane index /your/project
 pitlane index /your/project --force
 pitlane index /your/project --exclude "*.generated.ts" --exclude "vendor/**"
+pitlane index /your/project --max-files 200000
 ```
 
 ### `pitlane search`
@@ -302,6 +303,8 @@ High-level directory/symbol overview of the project.
 ```bash
 pitlane outline /your/project
 pitlane outline /your/project --depth 3
+pitlane outline /your/project --path src/auth --max-dirs 100
+pitlane outline /your/project --summary
 ```
 
 ### `pitlane file`
@@ -338,6 +341,51 @@ Show direct incoming references for a symbol.
 ```bash
 pitlane callers /your/project src/auth.rs::Auth::login[method]
 pitlane callers /your/project src/auth.rs::Auth::login[method] --scope "src/**" --limit 20
+```
+
+### `pitlane usages`
+
+Find all call sites for a symbol.
+
+```bash
+pitlane usages /your/project src/auth.rs::Auth::login[method]
+pitlane usages /your/project src/auth.rs::Auth::login[method] --scope "src/**" --limit 20
+```
+
+### `pitlane lines`
+
+Fetch a specific line range from a file.
+
+```bash
+pitlane lines /your/project src/auth.rs 40 80
+```
+
+### `pitlane wait-embeddings`
+
+Block until background embedding generation has finished.
+
+```bash
+pitlane wait-embeddings /your/project
+pitlane wait-embeddings /your/project --poll-interval-ms 1000 --timeout-secs 120
+```
+
+### `pitlane watch`
+
+Keep the project index updated until interrupted.
+
+```bash
+pitlane watch /your/project
+```
+
+Unlike the MCP server, the CLI watcher only lives for the lifetime of that `pitlane watch` process. Stop it with `Ctrl-C`.
+
+### `pitlane usage-stats`
+
+Show token-efficiency statistics for `get_symbol`.
+
+```bash
+pitlane usage-stats
+pitlane usage-stats /your/project
 ```
 
 All commands output JSON to stdout. Logs go to stderr and can be controlled with `RUST_LOG`.

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use clap::{Parser, Subcommand};
 use pitlane_mcp::path_policy::resolve_project_path;
 use pitlane_mcp::tools;
@@ -21,6 +23,9 @@ enum Command {
         /// Glob patterns to exclude (repeatable)
         #[arg(long = "exclude", value_name = "GLOB")]
         exclude: Vec<String>,
+        /// Maximum source files to index (0 uses the default limit)
+        #[arg(long)]
+        max_files: Option<usize>,
     },
     /// Search for symbols by name
     Search {
@@ -54,6 +59,15 @@ enum Command {
         /// Directory depth to show (default: 2)
         #[arg(long, default_value = "2")]
         depth: u32,
+        /// Only include files under this directory prefix
+        #[arg(long)]
+        path: Option<String>,
+        /// Maximum directory entries to return
+        #[arg(long)]
+        max_dirs: Option<usize>,
+        /// Show only directory summary counts
+        #[arg(long)]
+        summary: bool,
     },
     /// List all symbols in a file
     File {
@@ -104,10 +118,58 @@ enum Command {
         #[arg(long, default_value = "0")]
         offset: usize,
     },
+    /// Find all call sites for a symbol
+    Usages {
+        /// Path to the indexed project
+        project: String,
+        /// Symbol ID (from search or file outline)
+        symbol_id: String,
+        /// Restrict matches to files matching a glob pattern
+        #[arg(long)]
+        scope: Option<String>,
+        /// Maximum results (default: 100)
+        #[arg(long, default_value = "100")]
+        limit: usize,
+        /// Skip first N results
+        #[arg(long, default_value = "0")]
+        offset: usize,
+    },
+    /// Fetch a specific line range from a file
+    Lines {
+        /// Path to the indexed project
+        project: String,
+        /// File path (relative to project root)
+        file_path: String,
+        /// First line to return, 1-indexed inclusive
+        line_start: u32,
+        /// Last line to return, 1-indexed inclusive
+        line_end: u32,
+    },
+    /// Wait for embedding generation to finish
+    WaitEmbeddings {
+        /// Path to the indexed project
+        project: String,
+        /// Poll interval in milliseconds
+        #[arg(long)]
+        poll_interval_ms: Option<u64>,
+        /// Maximum time to wait in seconds
+        #[arg(long)]
+        timeout_secs: Option<u64>,
+    },
+    /// Keep a project index updated until interrupted
+    Watch {
+        /// Path to the indexed project
+        project: String,
+    },
     /// Show index statistics (file/symbol counts by language and kind)
     Stats {
         /// Path to the indexed project
         project: String,
+    },
+    /// Show token-efficiency statistics for get_symbol
+    UsageStats {
+        /// Path to the indexed project (omit for global totals)
+        project: Option<String>,
     },
 }
 
@@ -128,6 +190,7 @@ async fn main() -> anyhow::Result<()> {
             path,
             force,
             exclude,
+            max_files,
         } => {
             let embed_config = pitlane_mcp::embed::EmbedConfig::from_env();
 
@@ -141,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
                     Some(exclude)
                 },
                 force: if force { Some(true) } else { None },
-                max_files: None,
+                max_files,
                 progress_token: None,
                 peer: None,
                 embed_config: None,
@@ -209,13 +272,19 @@ async fn main() -> anyhow::Result<()> {
             tools::search_symbols::search_symbols(params).await?
         }
 
-        Command::Outline { project, depth } => {
+        Command::Outline {
+            project,
+            depth,
+            path,
+            max_dirs,
+            summary,
+        } => {
             let params = tools::get_project_outline::GetProjectOutlineParams {
                 project,
                 depth: Some(depth),
-                path: None,
-                max_dirs: None,
-                summary: None,
+                path,
+                max_dirs,
+                summary: if summary { Some(true) } else { None },
             };
             tools::get_project_outline::get_project_outline(params).await?
         }
@@ -272,9 +341,79 @@ async fn main() -> anyhow::Result<()> {
             tools::find_callers::find_callers(params).await?
         }
 
+        Command::Usages {
+            project,
+            symbol_id,
+            scope,
+            limit,
+            offset,
+        } => {
+            let params = tools::find_usages::FindUsagesParams {
+                project,
+                symbol_id,
+                scope,
+                limit: Some(limit),
+                offset: Some(offset),
+            };
+            tools::find_usages::find_usages(params).await?
+        }
+
+        Command::Lines {
+            project,
+            file_path,
+            line_start,
+            line_end,
+        } => {
+            let params = tools::get_lines::GetLinesParams {
+                project,
+                file_path,
+                line_start,
+                line_end,
+            };
+            tools::get_lines::get_lines(params).await?
+        }
+
+        Command::WaitEmbeddings {
+            project,
+            poll_interval_ms,
+            timeout_secs,
+        } => {
+            let embed_config = pitlane_mcp::embed::EmbedConfig::from_env().map(Arc::new);
+            let params = tools::wait_for_embeddings::WaitForEmbeddingsParams {
+                project,
+                poll_interval_ms,
+                timeout_secs,
+                progress_token: None,
+                peer: None,
+                embed_config,
+            };
+            tools::wait_for_embeddings::wait_for_embeddings(params).await?
+        }
+
+        Command::Watch { project } => {
+            let embed_config = pitlane_mcp::embed::EmbedConfig::from_env().map(Arc::new);
+            let registry = tools::watch_project::WatcherRegistry::new();
+            let params = tools::watch_project::WatchProjectParams {
+                project: project.clone(),
+                stop: None,
+                status_only: None,
+                embed_config,
+            };
+            let result = tools::watch_project::watch_project(params, &registry).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            tokio::signal::ctrl_c().await?;
+            let _ = registry.stop(&project);
+            return Ok(());
+        }
+
         Command::Stats { project } => {
             let params = tools::get_index_stats::GetIndexStatsParams { project };
             tools::get_index_stats::get_index_stats(params).await?
+        }
+
+        Command::UsageStats { project } => {
+            let params = tools::get_usage_stats::GetUsageStatsParams { project };
+            tools::get_usage_stats::get_usage_stats(params).await?
         }
     };
 
