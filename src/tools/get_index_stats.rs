@@ -99,11 +99,11 @@ mod tests {
     use super::*;
     use crate::index::format::{index_dir, save_index};
     use crate::indexer::{registry, Indexer};
-    use std::sync::Mutex;
     use tempfile::TempDir;
+    use tokio::sync::Mutex;
 
     /// Env-var mutations are process-global; serialize tests that touch them.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
     async fn setup_project(dir: &TempDir) -> String {
         let indexer = Indexer::new(registry::build_default_registry());
@@ -117,7 +117,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_index_stats_basic() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::remove_var("PITLANE_EMBED_URL");
         std::env::remove_var("PITLANE_EMBED_MODEL");
 
@@ -148,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_index_stats_embeddings_progress() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         std::env::set_var("PITLANE_EMBED_URL", "http://localhost:11434");
         std::env::set_var("PITLANE_EMBED_MODEL", "test-model");
 

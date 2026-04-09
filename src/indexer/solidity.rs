@@ -35,6 +35,14 @@ fn get_signature(source: &[u8], node: Node) -> Option<String> {
     Some(text.lines().next()?.trim_end().to_string())
 }
 
+fn fallback_receive_name(source: &[u8], node: Node) -> Option<String> {
+    let text = node_text(source, node).trim_start();
+    let keyword = text
+        .split(|c: char| c == '(' || c.is_whitespace())
+        .find(|part| !part.is_empty())?;
+    Some(keyword.to_string())
+}
+
 /// Walk backwards through preceding siblings collecting NatSpec (`///` or `/** */`)
 /// or consecutive line comments.
 fn get_doc_comment(source: &[u8], node: Node) -> Option<String> {
@@ -296,6 +304,15 @@ fn extract_from_node(
                 push_member_symbol(source, node, path, mod_name, qualified, kind, symbols);
             }
         }
+        "fallback_receive_definition" => {
+            if let Some(member_name) = fallback_receive_name(source, node) {
+                let (qualified, kind) = match contract_name {
+                    Some(cn) => (format!("{cn}::{member_name}"), SymbolKind::Method),
+                    None => (member_name.clone(), SymbolKind::Function),
+                };
+                push_member_symbol(source, node, path, member_name, qualified, kind, symbols);
+            }
+        }
         "event_definition" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let ev_name = node_text(source, name_node).to_string();
@@ -414,6 +431,24 @@ mod tests {
         let m = symbols.iter().find(|s| s.name == "onlyOwner").unwrap();
         assert!(matches!(m.kind, SymbolKind::Method));
         assert_eq!(m.qualified, "Owned::onlyOwner");
+    }
+
+    #[test]
+    fn test_extract_fallback() {
+        let source = b"contract Router { fallback() external payable { } }";
+        let symbols = parse_and_extract(source);
+        let fallback = symbols.iter().find(|s| s.name == "fallback").unwrap();
+        assert!(matches!(fallback.kind, SymbolKind::Method));
+        assert_eq!(fallback.qualified, "Router::fallback");
+    }
+
+    #[test]
+    fn test_extract_receive() {
+        let source = b"contract Vault { receive() external payable { } }";
+        let symbols = parse_and_extract(source);
+        let receive = symbols.iter().find(|s| s.name == "receive").unwrap();
+        assert!(matches!(receive.kind, SymbolKind::Method));
+        assert_eq!(receive.qualified, "Vault::receive");
     }
 
     #[test]
