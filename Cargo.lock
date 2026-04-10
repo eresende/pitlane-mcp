@@ -2020,6 +2020,7 @@ dependencies = [
  "notify",
  "proptest",
  "rayon",
+ "regex",
  "reqwest",
  "rmcp",
  "serde",

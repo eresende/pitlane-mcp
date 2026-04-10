@@ -1,3 +1,4 @@
+pub mod ensure_project_ready;
 pub mod find_callees;
 pub mod find_callers;
 pub mod find_usages;
@@ -8,6 +9,9 @@ pub mod get_project_outline;
 pub mod get_symbol;
 pub mod get_usage_stats;
 pub mod index_project;
+pub mod search_content;
+pub mod search_files;
 pub mod search_symbols;
+pub mod trace_execution_path;
 pub mod wait_for_embeddings;
 pub mod watch_project;

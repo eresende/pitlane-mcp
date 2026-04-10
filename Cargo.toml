@@ -100,6 +100,7 @@ tantivy = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 futures = "0.3"
 tree-sitter-solidity = "1.2"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

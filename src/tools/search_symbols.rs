@@ -60,6 +60,62 @@ fn exact_sort_key(sym: &Symbol) -> (String, String, String, u32, u32, String) {
     )
 }
 
+fn looks_broad_query(query: &str) -> bool {
+    let trimmed = query.trim().to_lowercase();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let common = [
+        "search", "regex", "print", "printer", "walk", "matcher", "matching", "grep", "output",
+        "scanner", "scanning",
+    ];
+    let tokens: Vec<&str> = trimmed
+        .split(|c: char| !c.is_alphanumeric() && c != '_' && c != ':')
+        .filter(|s| !s.is_empty())
+        .collect();
+    if tokens.is_empty() {
+        return false;
+    }
+    if tokens.len() == 1 {
+        return common.contains(&tokens[0]);
+    }
+    tokens.len() <= 3 && tokens.iter().all(|token| common.contains(token))
+}
+
+fn attach_guidance(
+    response: &mut Value,
+    mode: &str,
+    query: &str,
+    result_count: usize,
+    truncated: bool,
+) {
+    let mut guidance = json!({
+        "next_step": if result_count > 0 {
+            "Call get_symbol on the top 1-3 results before launching more discovery searches."
+        } else {
+            "If no strong symbol matches appear, try one rephrased semantic query or use search_content for a text snippet."
+        },
+        "avoid": "Avoid running several broad discovery searches in parallel before inspecting the current results."
+    });
+
+    if mode == "semantic" && result_count > 0 {
+        guidance["semantic_note"] = json!(
+            "Semantic results are intended as discovery candidates. Inspect returned symbol IDs with get_symbol before searching again."
+        );
+    }
+    if looks_broad_query(query) {
+        guidance["query_hint"] = json!(
+            "This query is broad. Prefer a specific intent phrase for semantic search or use search_content when you know a text snippet."
+        );
+    }
+    if truncated {
+        guidance["pagination_note"] = json!(
+            "Do not fetch more pages until you inspect the current top results with get_symbol."
+        );
+    }
+    response["guidance"] = guidance;
+}
+
 pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
     let limit = params.limit.unwrap_or(20);
@@ -234,6 +290,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                     offset + limit
                 ));
             }
+            attach_guidance(&mut resp, mode, &params.query, page.len(), truncated);
             return Ok(resp);
         }
         other => {
@@ -337,6 +394,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                     offset + limit
                 ));
             }
+            attach_guidance(&mut resp, mode, &params.query, results.len(), truncated);
             Ok(resp)
         })();
 
@@ -417,6 +475,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 offset + limit
             ));
         }
+        attach_guidance(&mut resp, mode, &params.query, page.len(), truncated);
         return Ok(resp);
     }
 
@@ -485,14 +544,16 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
         .map(|(_, v)| v)
         .collect();
 
-    Ok(json!({
+    let mut resp = json!({
         "results": page,
         "count": page.len(),
         "query": params.query,
         "truncated": false,
         "fuzzy": true,
         "fuzzy_note": "Results are fuzzy-matched by trigram similarity and ranked by score.",
-    }))
+    });
+    attach_guidance(&mut resp, mode, &params.query, page.len(), false);
+    Ok(resp)
 }
 
 #[cfg(test)]
@@ -775,5 +836,36 @@ mod tests {
         assert_eq!(result_a["count"], json!(2));
         assert_eq!(result_a["results"][0]["name"], json!("matchBeta"));
         assert_eq!(result_a["results"][1]["name"], json!("matchGamma"));
+        assert_eq!(
+            result_a["guidance"]["next_step"],
+            json!(
+                "Call get_symbol on the top 1-3 results before launching more discovery searches."
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn test_broad_query_emits_query_hint() {
+        let dir = TempDir::new().unwrap();
+        let project = setup_indexed_project(&dir);
+
+        let result = search_symbols(SearchSymbolsParams {
+            project,
+            query: "search".to_string(),
+            kind: None,
+            language: None,
+            file: None,
+            limit: Some(5),
+            offset: Some(0),
+            mode: Some("exact".to_string()),
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result["guidance"]["query_hint"],
+            json!("This query is broad. Prefer a specific intent phrase for semantic search or use search_content when you know a text snippet.")
+        );
     }
 }

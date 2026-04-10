@@ -13,7 +13,7 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 - **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, Svelte (embedded `<script>` / `<script lang="ts">` blocks only), C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, Solidity, and Bash source into structured symbols
 - **BM25 full-text search** — tantivy-backed ranked search over name, qualified name, signature, and doc fields with a custom camelCase tokenizer (`LowerInstruction` → `["lower", "instruction"]`); falls back to exact substring match if the index isn't ready
 - **Graph-aware navigation tools** — direct callers and callees for shallow impact checks without whole-repo back-and-forth
-- **Thirteen MCP tools** for navigation: outline, search, fetch, line-range fetch, callers, callees, usages, index stats, usage stats
+- **Seventeen MCP tools** spanning startup, discovery, retrieval, and impact analysis
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
 - **Smart exclusions** — automatically skips `.venv`, `node_modules`, `target`, `__pycache__`, `dist`, `.next`, and other dependency/build trees at any depth
@@ -119,6 +119,56 @@ Add to your MCP settings (`.kiro/settings/mcp.json` or `.vscode/mcp.json`):
 
 ## Tools
 
+### Tool Hierarchy
+
+Use the tools by intent, not by implementation detail:
+
+- **Startup**
+  - `ensure_project_ready` — preferred one-call startup; indexes the repo and waits for embeddings only when needed
+  - `index_project` + `wait_for_embeddings` — lower-level primitives when you need explicit control
+- **Discovery**
+  - `search_symbols` — find symbols by name or intent
+  - `search_content` — find literal text, regex fragments, import paths, log strings, or macros when you do not know the symbol boundary
+  - `search_files` — find repository files by file name, path fragment, or glob pattern
+  - `trace_execution_path` — answer behavior/path questions with a compact set of files, symbols, and edges
+- **Retrieval**
+  - `get_symbol` — fetch one implementation by symbol ID
+  - `get_file_outline` — inspect a file's symbol structure before choosing what to read
+  - `get_lines` — fetch a specific non-symbol block by line range
+- **Orientation**
+  - `get_index_stats` — cheap aggregate repo overview
+  - `get_project_outline` — directory/file tree overview when structure matters
+- **Graph / Impact**
+  - `find_callees` — direct outgoing references
+  - `find_callers` — direct incoming references
+  - `find_usages` — all call sites / name-based usages
+- **Maintenance**
+  - `watch_project` — keep the index current while a repo is changing
+  - `get_usage_stats` — inspect token-efficiency stats for `get_symbol`
+
+Recommended flow:
+
+1. Call `ensure_project_ready`.
+2. Choose one discovery tool:
+   - `search_symbols` for names or intent
+   - `search_content` for text snippets
+   - `search_files` for file-name or path discovery
+   - `trace_execution_path` for behavior and execution-path questions
+3. Switch to `get_symbol` once you have the right symbol.
+4. Use `find_callees`, `find_callers`, or `find_usages` only when you need graph or impact information.
+
+Avoid shell `grep`, globbing, or broad file reads when the MCP tools can answer the question directly.
+
+### `ensure_project_ready`
+
+Preferred one-call startup for MCP clients and harnesses.
+
+```json
+{ "path": "/your/project" }
+```
+
+This ensures the index exists and waits for embeddings only if they are still running. In the common case it replaces a manual `index_project` + `wait_for_embeddings` sequence.
+
 ### `index_project`
 
 Parse and index all supported source files under a path.
@@ -135,6 +185,8 @@ Optional parameters:
 - `force: true` — rebuild the index even if the on-disk copy is up to date.
 - `max_files` — cap on the number of source files indexed (default: 100 000). Raise this for very large mono-repos. If the walk finds more eligible files than the cap, `index_project` returns a `FILE_LIMIT_EXCEEDED` error instead of indexing.
 
+If the response reports `"embeddings": "running"`, call `wait_for_embeddings` before using semantic search. For normal startup, prefer `ensure_project_ready`.
+
 ### `search_symbols`
 
 Search by name, kind, language, or file pattern.
@@ -144,6 +196,44 @@ Search by name, kind, language, or file pattern.
 ```
 
 Defaults to BM25 ranked full-text search (via tantivy) over name, qualified name, signature, and doc fields — results are ordered by relevance. Pass `"mode": "exact"` for substring matching or `"mode": "fuzzy"` for trigram similarity. If the BM25 index isn't ready yet (e.g. first call after an upgrade), it falls back to exact automatically.
+
+Use `"mode": "semantic"` for behavior or intent queries when embeddings are enabled and you do not know the exact symbol name.
+
+### `search_content`
+
+Search literal text or regex patterns across supported source files.
+
+```json
+{ "project": "/your/project", "query": "RegexMatcherBuilder::new", "file": "crates/**/*.rs" }
+```
+
+Use this when you know text in the code but do not know the symbol boundary yet. Supports optional regex mode, case sensitivity, file/language filters, and surrounding context lines. Prefer this over shell `grep`.
+
+### `search_files`
+
+Search repository paths by file name, path fragment, fuzzy similarity, or glob.
+
+```json
+{ "project": "/your/project", "query": "ImmutableListTest", "mode": "substring" }
+```
+
+Useful when you know or expect a file name, test file, path suffix, or directory pattern but do not yet know the exact symbol or file contents. Prefer this over shell globbing or `find`.
+
+Optional parameters:
+
+- `mode` — `substring` (default), `exact`, `fuzzy`, or `glob`
+- `language` — restrict matches by file extension family
+- `file` — restrict the search to a subtree or path set via glob
+
+### `trace_execution_path`
+
+Trace a likely execution path for a behavior-level question in one step.
+
+```json
+{ "project": "/your/project", "query": "main regex search execution path" }
+```
+
+Use this for questions like "where is X implemented?", "how does Y flow?", or "what is the main execution path?" The response returns a compact set of important files, symbols, edges, and a ready-to-explain path summary so agents do not need to assemble the whole graph manually.
 
 ### `get_symbol`
 
@@ -268,6 +358,16 @@ Start incremental background re-indexing on file changes.
 ```
 
 Pass `status_only: true` to check whether a watcher is already running without starting or stopping it — returns `"status": "watching"` or `"status": "not_watching"`.
+
+### `wait_for_embeddings`
+
+Block until background embedding generation is complete.
+
+```json
+{ "project": "/your/project" }
+```
+
+Use this only after a direct `index_project` call reports `"embeddings": "running"`. For normal startup, prefer `ensure_project_ready`.
 
 ## CLI
 
@@ -425,18 +525,19 @@ Add a `CLAUDE.md` at your project root to guide the agent:
 
 Use pitlane-mcp for all code lookups when available.
 
-1. Call index_project at the start of each session to load the index.
-2. Call watch_project right after indexing to keep the index up to date as files change.
-3. Before reading any file, call get_file_outline to see its structure without consuming its full content.
-4. Use search_symbols to find functions/types by name. If no exact match is found it falls back to fuzzy matching automatically.
-5. Use get_symbol to retrieve only the exact implementation you need, not the whole file.
-6. Use find_callees to see what a symbol directly depends on before opening more files.
-7. Use find_callers before changing a symbol to get a shallow impact view.
-8. Use find_usages before refactoring any public symbol or when you need exhaustive name-based matches.
-9. For struct/class/interface/trait symbols, get_symbol returns signature-only by default. Pass signature_only=false to get the full body and the references list.
-10. Use get_lines to fetch a specific block by line range when it isn't a named symbol.
-11. Use get_index_stats to orient yourself in a new codebase without burning tokens on get_project_outline.
-12. Fall back to direct file reads only when editing or when full file context is genuinely required.
+1. Prefer ensure_project_ready at the start of each session. If you use index_project directly and it reports embeddings="running", call wait_for_embeddings immediately.
+2. Call watch_project only when you expect the repo to change during the session.
+3. Use search_symbols for symbol names or intent.
+4. Use search_content when you know a text snippet but not the symbol boundary.
+5. Use search_files when you know a file name, test file, path suffix, or directory pattern.
+6. Use trace_execution_path for behavior or execution-path questions like "where is X implemented?".
+7. Use get_symbol to retrieve the exact implementation you need instead of reading whole files.
+8. Use get_file_outline when you know the file but not the symbol, or need file structure before choosing symbols.
+9. Use find_callees, find_callers, and find_usages for graph or impact analysis.
+10. For struct/class/interface/trait symbols, get_symbol returns signature-only by default. Pass signature_only=false to get the full body and references.
+11. Use get_lines only for non-symbol code blocks.
+12. Use get_index_stats to orient yourself before reaching for get_project_outline.
+13. Fall back to direct file reads only when editing or when full-file context is genuinely required.
 ```
 
 ## Benchmarks

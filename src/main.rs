@@ -12,6 +12,22 @@ use serde::{Deserialize, Serialize};
 use pitlane_mcp::tools::watch_project::WatcherRegistry;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct EnsureProjectReadyRequest {
+    /// Absolute or relative path to the project root
+    pub path: String,
+    /// Glob patterns to exclude (default: target/, .git/, __pycache__/)
+    pub exclude: Option<Vec<String>>,
+    /// Re-index even if an up-to-date index exists
+    pub force: Option<bool>,
+    /// Maximum number of source files to index (default: 100 000). Omit this field, or set it to 0, to use the default.
+    pub max_files: Option<usize>,
+    /// Poll interval in milliseconds if embeddings need waiting (default: 2000)
+    pub poll_interval_ms: Option<u64>,
+    /// Maximum seconds to wait for embeddings if needed (default: 300)
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IndexProjectRequest {
     /// Absolute or relative path to the project root
     pub path: String,
@@ -28,7 +44,8 @@ pub struct IndexProjectRequest {
 pub struct SearchSymbolsRequest {
     /// Project path previously indexed
     pub project: String,
-    /// Substring or prefix match against symbol name or qualified name
+    /// Symbol name or intent description. For behavior/path questions, prefer an intent phrase
+    /// and mode="semantic". For known names, use mode="exact" or mode="bm25".
     pub query: String,
     /// Filter by SymbolKind (e.g. "method", "trait")
     pub kind: Option<String>,
@@ -42,6 +59,64 @@ pub struct SearchSymbolsRequest {
     pub offset: Option<usize>,
     /// Search mode: "bm25" (default, BM25 ranked full-text over name/qualified/signature/doc), "exact" (substring on name/qualified), "fuzzy" (trigram similarity ranking), "semantic" (vector similarity search — requires PITLANE_EMBED_URL and PITLANE_EMBED_MODEL to be set and index_project to have been run with embeddings enabled)
     pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SearchContentRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// Literal text or regex pattern to search for inside source files
+    pub query: String,
+    /// Treat query as a regular expression (default: false)
+    pub regex: Option<bool>,
+    /// Case-sensitive match (default: false)
+    pub case_sensitive: Option<bool>,
+    /// Filter by language ("rust", "python", "javascript", "typescript", "svelte", "c", "cpp", "go", "java", "bash", "csharp", "ruby", "swift", "objc", "php", "zig", "kotlin", "lua", "solidity")
+    pub language: Option<String>,
+    /// Glob pattern to restrict search to specific files
+    pub file: Option<String>,
+    /// Maximum matches to return (default: 20)
+    pub limit: Option<usize>,
+    /// Offset into matches for pagination (default: 0)
+    pub offset: Option<usize>,
+    /// Include up to this many lines before each match (default: 0, max: 5)
+    pub before_context: Option<usize>,
+    /// Include up to this many lines after each match (default: 0, max: 5)
+    pub after_context: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SearchFilesRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// File name, path fragment, or glob pattern to search for
+    pub query: String,
+    /// Search mode: "substring" (default, case-insensitive path/name substring), "exact" (exact file name or exact relative path), "fuzzy" (trigram similarity on file name/path), or "glob" (glob pattern over relative paths)
+    pub mode: Option<String>,
+    /// Filter by language extension ("rust", "python", "javascript", "typescript", "svelte", "c", "cpp", "go", "java", "bash", "csharp", "ruby", "swift", "objc", "php", "zig", "kotlin", "lua", "solidity")
+    pub language: Option<String>,
+    /// Glob pattern to restrict the search to a subtree or path set
+    pub file: Option<String>,
+    /// Maximum matches to return (default: 20)
+    pub limit: Option<usize>,
+    /// Offset into matches for pagination (default: 0)
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TraceExecutionPathRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// Behavior or execution-path intent to trace, e.g. "main regex search execution path"
+    pub query: String,
+    /// Filter by language ("rust", "python", "javascript", "typescript", "svelte", "c", "cpp", "go", "java", "bash", "csharp", "ruby", "swift", "objc", "php", "zig", "kotlin", "lua", "solidity")
+    pub language: Option<String>,
+    /// Glob pattern to restrict tracing to specific files
+    pub file: Option<String>,
+    /// Maximum important symbols/files to return (default: 6)
+    pub max_symbols: Option<usize>,
+    /// Maximum call-graph expansion depth from the discovered seeds (default: 2)
+    pub max_depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -227,7 +302,7 @@ fn err_to_text(e: anyhow::Error) -> String {
 #[tool_router]
 impl PitlaneMcp {
     #[tool(
-        description = "Call first to parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time. Also generates vector embeddings for semantic search (mode=\"semantic\") when PITLANE_EMBED_URL and PITLANE_EMBED_MODEL are configured — embeddings run in the background so the call returns as soon as the symbol index is ready. The response includes an \"embeddings\" field: \"running\" means generation is in progress — call wait_for_embeddings immediately to block until embeddings are ready before using mode=\"semantic\"; \"ok\" means embeddings are ready; \"disabled\" means no embed config was found.",
+        description = "Parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time. Also generates vector embeddings for semantic search (mode=\"semantic\") when PITLANE_EMBED_URL and PITLANE_EMBED_MODEL are configured — embeddings run in the background so the call returns as soon as the symbol index is ready. The response includes an \"embeddings\" field: \"running\" means generation is in progress — call wait_for_embeddings immediately to block until embeddings are ready before using mode=\"semantic\"; \"ok\" means embeddings are ready; \"disabled\" means no embed config was found. For normal startup, prefer ensure_project_ready instead of manually chaining index_project and wait_for_embeddings.",
         meta = tool_meta("index parse cache project"),
         annotations(
             read_only_hint = false,
@@ -258,7 +333,40 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Search indexed symbols by name or concept. Mode selection: use mode=\"semantic\" when you know what a symbol does but not its name (describe intent, e.g. \"retry logic for failed HTTP requests\"); use mode=\"bm25\" (default) when you know the name or a distinctive keyword. Filter by kind, language, or file glob to narrow results. Returns matching symbols with IDs, kinds, and locations.",
+        description = "Preferred one-call startup tool. Ensures a project's index is ready and, when embeddings are configured, waits only if embeddings are still running. Use this instead of manually chaining index_project and wait_for_embeddings for normal startup.",
+        meta = tool_meta("ready startup initialize index embeddings semantic setup"),
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn ensure_project_ready(
+        &self,
+        Parameters(req): Parameters<EnsureProjectReadyRequest>,
+        peer: Peer<RoleServer>,
+        meta: rmcp::model::Meta,
+    ) -> String {
+        let params = tools::ensure_project_ready::EnsureProjectReadyParams {
+            path: req.path,
+            exclude: req.exclude,
+            force: req.force,
+            max_files: req.max_files,
+            poll_interval_ms: req.poll_interval_ms,
+            timeout_secs: req.timeout_secs,
+            progress_token: meta.get_progress_token(),
+            peer: Some(peer),
+            embed_config: self.embed_config.clone(),
+        };
+        match tools::ensure_project_ready::ensure_project_ready(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Search indexed symbols by name or concept. Use mode=\"semantic\" first for behavior, architecture, or execution-path questions when you do not know the exact symbol name; phrase the query as intent, e.g. \"build regex matcher from CLI flags\". Use mode=\"exact\" or mode=\"bm25\" when you know the symbol name or a distinctive substring. Prefer this tool for symbol discovery, then call get_symbol on the best candidate. Responses include guidance about the next best inspection step so you can stop broad searching sooner. If you know a text snippet but not the symbol boundary, use search_content instead.",
         meta = tool_meta("search find symbol function method class type semantic"),
         annotations(
             read_only_hint = true,
@@ -286,7 +394,91 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Fetch the source of one symbol by its stable ID — more token-efficient than reading the whole file. Full-source responses include a references field listing symbols directly used by this symbol (calls, type references); no separate find_usages call needed to understand dependencies. Structs/classes/interfaces/traits default to signature-only (no body); pass signature_only=false to get full source and references.",
+        description = "Search file contents across the project's supported source files. Use this when you know a text snippet, macro name, type name, import path, log string, or regex fragment but do not yet know the symbol boundary. Supports literal or regex matching, file/language filters, and optional context lines. Prefer this over shell grep for code lookup. Responses include guidance for when to pivot back to get_symbol or search_symbols instead of repeating nearby text searches.",
+        meta = tool_meta("content text grep regex snippet string file search"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn search_content(&self, Parameters(req): Parameters<SearchContentRequest>) -> String {
+        let params = tools::search_content::SearchContentParams {
+            project: req.project,
+            query: req.query,
+            regex: req.regex,
+            case_sensitive: req.case_sensitive,
+            language: req.language,
+            file: req.file,
+            limit: req.limit,
+            offset: req.offset,
+            before_context: req.before_context,
+            after_context: req.after_context,
+        };
+        match tools::search_content::search_content(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Search repository file paths by name, path fragment, fuzzy similarity, or glob. Use this when you know or expect a file name, test file, path suffix, or directory pattern but do not yet know the exact symbol or file contents. Prefer this over shell globbing or find for repo-local file discovery, then pivot to get_file_outline, search_content, or get_symbol once you have the path.",
+        meta = tool_meta("files path filename glob tests search discover"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn search_files(&self, Parameters(req): Parameters<SearchFilesRequest>) -> String {
+        let params = tools::search_files::SearchFilesParams {
+            project: req.project,
+            query: req.query,
+            mode: req.mode,
+            language: req.language,
+            file: req.file,
+            limit: req.limit,
+            offset: req.offset,
+        };
+        match tools::search_files::search_files(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Trace a likely execution path for a behavior-level question in one step. Use this for requests like \"where is the main regex search path?\" or \"how does request handling flow?\" It performs symbol discovery, follows nearby callers/callees, and returns a compact set of important files, symbols, and edges spanning entry, orchestration, execution, and output layers. Prefer this over manually chaining many search_symbols/get_symbol calls for path questions.",
+        meta = tool_meta("trace execution path architecture pipeline call graph flow"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn trace_execution_path(
+        &self,
+        Parameters(req): Parameters<TraceExecutionPathRequest>,
+    ) -> String {
+        let params = tools::trace_execution_path::TraceExecutionPathParams {
+            project: req.project,
+            query: req.query,
+            language: req.language,
+            file: req.file,
+            max_symbols: req.max_symbols,
+            max_depth: req.max_depth,
+            embed_config: self.embed_config.clone(),
+        };
+        match tools::trace_execution_path::trace_execution_path(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Fetch the source of one symbol by its stable ID — more token-efficient than reading the whole file. Use search_symbols to discover the symbol first, then use get_symbol to inspect just that implementation. Full-source responses include a references field listing symbols directly used by this symbol (calls, type references), which is usually enough to trace the next step without more broad searching. Structs/classes/interfaces/traits default to signature-only (no body); pass signature_only=false to get full source and references.",
         meta = tool_meta("symbol implementation source code definition"),
         annotations(
             read_only_hint = true,
@@ -514,7 +706,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "PREFERRED way to wait for embeddings after index_project returns embeddings=\"running\". Blocks until embedding generation is complete, streaming a live ASCII progress bar (e.g. \"Embeddings: [████████░░░░░░░░░░░░]  42.0%  213/535 symbols\") via MCP notifications on every poll tick. Returns immediately if embeddings are disabled or already done. Use this instead of polling get_index_stats manually. poll_interval_ms controls refresh rate (default 2000 ms); timeout_secs caps the total wait (default 300 s). Returns status=\"ok\" when complete, status=\"timeout\" if the cap is hit.",
+        description = "Wait for embeddings after index_project returns embeddings=\"running\". Blocks until embedding generation is complete, streaming a live ASCII progress bar (e.g. \"Embeddings: [████████░░░░░░░░░░░░]  42.0%  213/535 symbols\") via MCP notifications on every poll tick. Returns immediately if embeddings are disabled or already done. Use this instead of polling get_index_stats manually. For the common one-call startup path, prefer ensure_project_ready. poll_interval_ms controls refresh rate (default 2000 ms); timeout_secs caps the total wait (default 300 s). Returns status=\"ok\" when complete, status=\"timeout\" if the cap is hit.",
         meta = tool_meta("embeddings progress wait semantic search ready"),
         annotations(
             read_only_hint = true,
@@ -550,10 +742,11 @@ impl ServerHandler for PitlaneMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_logging().build())
             .with_instructions(
                 "pitlane-mcp: AST-based code intelligence. \
-                ALWAYS call index_project first — all other tools require an up-to-date index. \
-                Discovery: search_symbols (find by name), get_file_outline (file structure), get_project_outline (repo overview). \
+                Prefer ensure_project_ready first — it ensures indexing is done and waits for embeddings only when needed. If unavailable in your client flow, call index_project first. \
+                Discovery: search_symbols (find symbols by name or intent), search_content (find literal text or regex snippets in source files), search_files (find repository files by name/path/glob), trace_execution_path (summarize a likely call/execution path for a behavior question), get_file_outline (file structure), get_project_outline (repo overview). \
                 Retrieval: get_symbol (fetch one implementation by ID). \
                 Analysis: find_callees (direct outgoing references), find_callers (direct incoming references), find_usages (all call sites for a symbol). \
+                Suggested flow: ensure_project_ready, then search_symbols for symbol discovery, search_content when you know text but not the symbol, search_files when you know a file name or path pattern, trace_execution_path for behavior/path questions, then get_symbol to inspect the exact implementation. \
                 Maintenance: watch_project (keep index current as files change).",
             )
     }
