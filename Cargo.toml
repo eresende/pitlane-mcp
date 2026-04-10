@@ -1,6 +1,6 @@
 [package]
 name = "pitlane-mcp"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2021"
 description = "Token-efficient code intelligence MCP server — indexes a codebase with tree-sitter and lets AI agents fetch exactly the symbols they need"
 license = "MIT OR Apache-2.0"
@@ -97,7 +97,10 @@ tree-sitter-kotlin-ng = "1.1.0"
 tree-sitter-luau = "1.2.0"
 tree-sitter-svelte-ng = "1.0.2"
 tantivy = "0.22"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
 futures = "0.3"
 tree-sitter-solidity = "1.2"
 regex = "1"
