@@ -21,6 +21,9 @@
 # proptest cache directory
 proptest-regressions/
 
+# hypothesis example database
+.hypothesis/
+
 # Python cache files
 __pycache__/
 *.py[cod]
