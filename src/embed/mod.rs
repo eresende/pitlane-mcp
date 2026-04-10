@@ -845,11 +845,12 @@ mod tests {
             use httpmock::prelude::*;
             use tempfile::tempdir;
 
-            // Build a fixed OpenAI-format response body with BATCH_SIZE embeddings.
-            // parse_response uses data.get(i) for i in 0..batch_len, so having
-            // BATCH_SIZE items covers every possible batch size up to 64.
+            let batch_size = client::effective_batch_size();
+
+            // Build a fixed OpenAI-format response body with enough embeddings
+            // for the current effective batch size.
             let embedding: Vec<f32> = vec![1.0_f32, 0.0_f32, 0.0_f32];
-            let data_items: Vec<serde_json::Value> = (0..client::BATCH_SIZE)
+            let data_items: Vec<serde_json::Value> = (0..batch_size)
                 .map(|_| serde_json::json!({ "embedding": embedding }))
                 .collect();
             let response_body = serde_json::json!({ "data": data_items }).to_string();
@@ -897,8 +898,8 @@ mod tests {
                 generate_embeddings(&index, &config, &store_path, true, None, None).await;
             });
 
-            // Assert exactly ceil(N / BATCH_SIZE) HTTP requests were issued.
-            let expected_batches = n.div_ceil(client::BATCH_SIZE);
+            // Assert exactly ceil(N / effective batch size) HTTP requests were issued.
+            let expected_batches = n.div_ceil(batch_size);
             let actual_hits = mock.hits();
             prop_assert_eq!(
                 actual_hits,

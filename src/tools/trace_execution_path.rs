@@ -281,7 +281,7 @@ fn upsert_node(
 }
 
 fn classify_symbol(sym: &Symbol) -> &'static str {
-    let file = sym.file.to_string_lossy().to_lowercase();
+    let file = sym.file.to_string_lossy().replace('\\', "/").to_lowercase();
     let name = sym.name.to_lowercase();
     let qualified = sym.qualified.to_lowercase();
 
@@ -322,13 +322,13 @@ fn classify_symbol(sym: &Symbol) -> &'static str {
 
 fn is_entry_symbol(sym: &Symbol) -> bool {
     let name = sym.name.to_lowercase();
-    let file = sym.file.to_string_lossy().to_lowercase();
+    let file = sym.file.to_string_lossy().replace('\\', "/").to_lowercase();
     file.contains("/main.")
         || matches!(name.as_str(), "main" | "run" | "search" | "search_parallel")
 }
 
 fn is_noise_symbol(sym: &Symbol) -> bool {
-    let file = sym.file.to_string_lossy().to_lowercase();
+    let file = sym.file.to_string_lossy().replace('\\', "/").to_lowercase();
     file.contains("/tests/")
         || file.ends_with("_test.rs")
         || file.ends_with("tests.rs")
@@ -344,7 +344,7 @@ fn adjusted_score(sym: &Symbol, base: i32) -> i32 {
     if is_noise_symbol(sym) {
         score -= 40;
     }
-    let file = sym.file.to_string_lossy().to_lowercase();
+    let file = sym.file.to_string_lossy().replace('\\', "/").to_lowercase();
     if file.contains("/main.")
         || file.contains("/search.")
         || file.contains("/searcher/")
