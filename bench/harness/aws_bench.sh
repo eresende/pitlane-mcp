@@ -170,7 +170,7 @@ tar -xzf /tmp/pitlane-mcp.tar.gz -C /usr/local/bin/
 chmod +x /usr/local/bin/pitlane-mcp
 
 echo "=== Cloning pitlane-mcp repo ==="
-git clone https://github.com/eresende/pitlane-mcp.git /home/ubuntu/pitlane-mcp
+git clone --branch model-benchmarks https://github.com/eresende/pitlane-mcp.git /home/ubuntu/pitlane-mcp
 chown -R ubuntu:ubuntu /home/ubuntu/pitlane-mcp
 
 echo "=== Setting up Python environment ==="
