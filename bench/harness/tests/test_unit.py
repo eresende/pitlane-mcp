@@ -19,7 +19,8 @@ import pytest
 from bench.harness.bench_runner import _build_parser
 from bench.harness.framework.claim_report import ClaimReport
 from bench.harness.framework.executors import BaselineExecutor
-from bench.harness.framework.mcp_executor import PITLANE_TOOL_NAMES
+from bench.harness.framework.mcp_executor import MCPExecutor, PITLANE_TOOL_NAMES
+from bench.harness.framework.models import ToolDef
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +195,40 @@ class TestToolDefinitionLists:
             assert tool.name, "Tool name must be non-empty"
             assert tool.description, "Tool description must be non-empty"
             assert isinstance(tool.parameters, dict), "Tool parameters must be a dict"
+
+    def test_mcp_executor_injects_required_project_argument(self):
+        """MCPExecutor should backfill a required project arg from startup state."""
+        executor = MCPExecutor()
+        executor._repo_path = "/tmp/repo"
+        executor._tool_defs = [
+            ToolDef(
+                name="trace_execution_path",
+                description="",
+                parameters={
+                    "type": "object",
+                    "properties": {"project": {"type": "string"}},
+                    "required": ["project"],
+                },
+            )
+        ]
+
+        normalized = executor._normalize_arguments("trace_execution_path", {"query": "x"})
+
+        assert normalized["project"] == "/tmp/repo"
+        assert normalized["query"] == "x"
+
+    def test_mcp_executor_wraps_tool_errors(self):
+        """MCPExecutor should surface tool-call failures as tool output, not abort."""
+        executor = MCPExecutor()
+        executor._process = object()
+
+        with patch.object(executor, "_check_process_alive"), patch.object(
+            executor, "_call_tool", side_effect=RuntimeError("boom")
+        ):
+            result = executor.execute("search_symbols", {"query": "needle"})
+
+        assert result.content == "Error: boom"
+        assert result.byte_size == len(result.content.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------

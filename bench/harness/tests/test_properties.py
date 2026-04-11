@@ -57,9 +57,13 @@ _benchmark_config_strategy = st.builds(
     repo_path=_safe_text,
     repo_commit=st.one_of(st.none(), _safe_text),
     repo_clean=st.one_of(st.none(), st.booleans()),
+    harness_commit=st.one_of(st.none(), _safe_text),
+    harness_clean=st.one_of(st.none(), st.booleans()),
     pitlane_version=st.one_of(st.none(), _safe_text),
     ollama_version=st.one_of(st.none(), _safe_text),
     prompt_set_path=_safe_text,
+    prompt_set_sha256=st.from_regex(r"[0-9a-f]{64}", fullmatch=True),
+    prompt_count=st.integers(min_value=0, max_value=1000),
     runs_per_prompt=st.integers(min_value=1, max_value=100),
     max_iterations=st.integers(min_value=1, max_value=200),
     timeout_seconds=st.floats(min_value=1.0, max_value=3600.0, allow_nan=False, allow_infinity=False),
@@ -198,9 +202,13 @@ def test_config_serialization_round_trip(config: BenchmarkConfig) -> None:
     assert restored.repo_path == config.repo_path
     assert restored.repo_commit == config.repo_commit
     assert restored.repo_clean == config.repo_clean
+    assert restored.harness_commit == config.harness_commit
+    assert restored.harness_clean == config.harness_clean
     assert restored.pitlane_version == config.pitlane_version
     assert restored.ollama_version == config.ollama_version
     assert restored.prompt_set_path == config.prompt_set_path
+    assert restored.prompt_set_sha256 == config.prompt_set_sha256
+    assert restored.prompt_count == config.prompt_count
     assert restored.runs_per_prompt == config.runs_per_prompt
     assert restored.max_iterations == config.max_iterations
     assert restored.timeout_seconds == config.timeout_seconds
@@ -1283,21 +1291,30 @@ def test_claim_summary_aggregation(
     entries: list[tuple[RunResult, QualityRecord | None]],
 ) -> None:
     """For any set of run results mapped to a claim, the claim summary should
-    have prompts_tested equal to the count of entries, avg_quality_score equal
-    to the mean of individual quality scores, and verdict consistent with the data.
+    count unique MCP prompts with scored answers, avg_quality_score equal
+    to the mean per-prompt MCP quality, and verdict consistent with the data.
     """
     report = ClaimReport()
     summary = report._build_summary(claim, entries)
 
-    # prompts_tested == number of entries
-    assert summary.prompts_tested == len(entries), (
-        f"Expected prompts_tested={len(entries)}, got {summary.prompts_tested}"
+    scored_mcp: dict[str, list[float]] = {}
+    for result, quality in entries:
+        if result.mode == "mcp" and quality is not None:
+            scored_mcp.setdefault(result.prompt_id, []).append(quality.quality_score)
+
+    expected_prompts_tested = len(scored_mcp)
+    assert summary.prompts_tested == expected_prompts_tested, (
+        f"Expected prompts_tested={expected_prompts_tested}, got {summary.prompts_tested}"
     )
 
-    # avg_quality_score == mean of quality scores (or 0.0 if none)
-    quality_scores = [q.quality_score for _, q in entries if q is not None]
-    if quality_scores:
-        expected_avg_quality = sum(quality_scores) / len(quality_scores)
+    # avg_quality_score == mean of per-prompt MCP quality (or 0.0 if none)
+    per_prompt_scores = [
+        sum(scores) / len(scores)
+        for scores in scored_mcp.values()
+        if scores
+    ]
+    if per_prompt_scores:
+        expected_avg_quality = sum(per_prompt_scores) / len(per_prompt_scores)
         assert abs(summary.avg_quality_score - expected_avg_quality) < 1e-9, (
             f"avg_quality_score mismatch: expected {expected_avg_quality}, "
             f"got {summary.avg_quality_score}"
@@ -1309,7 +1326,7 @@ def test_claim_summary_aggregation(
         )
 
     # Verdict consistency
-    n = len(entries)
+    n = expected_prompts_tested
     avg_q = summary.avg_quality_score
     if n == 0:
         assert summary.verdict == "insufficient_data", (

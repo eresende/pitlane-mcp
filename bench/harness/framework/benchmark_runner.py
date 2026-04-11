@@ -7,6 +7,7 @@ collects metrics, writes outputs, and generates a ClaimReport.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import logging
 import subprocess
 import sys
@@ -144,6 +145,14 @@ def _detect_git_commit(repo_path: str) -> str | None:
     return _run_cmd("git", "-C", repo_path, "rev-parse", "HEAD")
 
 
+def _detect_git_clean(repo_path: str) -> bool | None:
+    """Return True when repo_path has no tracked or untracked changes, else None on failure."""
+    status = _run_cmd("git", "-C", repo_path, "status", "--porcelain")
+    if status is None:
+        return None
+    return status == ""
+
+
 def _detect_pitlane_version() -> str | None:
     """Return pitlane-mcp version string, or None."""
     out = _run_cmd("pitlane-mcp", "--version")
@@ -154,6 +163,15 @@ def _detect_ollama_version() -> str | None:
     """Return ollama version string, or None."""
     out = _run_cmd("ollama", "--version")
     return out
+
+
+def _sha256_file(path: str) -> str:
+    """Return the SHA-256 digest of a file."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(8192):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _uses_semantic_mode(result: RunResult) -> bool:
@@ -229,8 +247,13 @@ class BenchmarkRunner:
         cpu_model = _detect_cpu()
         ram_gb = _detect_ram_gb()
         repo_commit = _detect_git_commit(self.repo_path)
+        repo_clean = _detect_git_clean(self.repo_path)
+        harness_root = str(Path(__file__).resolve().parents[3])
+        harness_commit = _detect_git_commit(harness_root)
+        harness_clean = _detect_git_clean(harness_root)
         pitlane_version = _detect_pitlane_version()
         ollama_version = _detect_ollama_version()
+        prompt_set_sha256 = _sha256_file(self.prompt_set_path)
 
         # Determine provider from backend metadata
         try:
@@ -239,16 +262,24 @@ class BenchmarkRunner:
         except Exception:  # noqa: BLE001
             model_provider = "unknown"
 
+        # Load prompts
+        prompts = load_prompts(self.prompt_set_path)
+        log.info("Loaded %d prompts from %s", len(prompts), self.prompt_set_path)
+
         config = BenchmarkConfig(
             model_name=self.model_name,
             model_provider=model_provider,
             backend_type=getattr(backend, "_base_url", None) and "ollama" or "openrouter",
             repo_path=self.repo_path,
             repo_commit=repo_commit,
-            repo_clean=None,
+            repo_clean=repo_clean,
+            harness_commit=harness_commit,
+            harness_clean=harness_clean,
             pitlane_version=pitlane_version,
             ollama_version=ollama_version,
             prompt_set_path=self.prompt_set_path,
+            prompt_set_sha256=prompt_set_sha256,
+            prompt_count=len(prompts),
             runs_per_prompt=self.runs_per_prompt,
             max_iterations=self.max_iterations,
             timeout_seconds=self.timeout_seconds,
@@ -261,10 +292,6 @@ class BenchmarkRunner:
             timestamp=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
         writer.write_config(config)
-
-        # Load prompts
-        prompts = load_prompts(self.prompt_set_path)
-        log.info("Loaded %d prompts from %s", len(prompts), self.prompt_set_path)
 
         # Determine which modes to run
         if self.mode == "both":

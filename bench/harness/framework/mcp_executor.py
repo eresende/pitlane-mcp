@@ -67,10 +67,13 @@ class MCPExecutor:
         """Execute a pitlane-mcp tool call via JSON-RPC tools/call."""
         self._check_process_alive()
         start = time.perf_counter()
-        response = self._call_tool(tool_name, arguments)
+        normalized_arguments = self._normalize_arguments(tool_name, arguments)
+        try:
+            response = self._call_tool(tool_name, normalized_arguments)
+            content = self._extract_content(response)
+        except Exception as exc:
+            content = f"Error: {exc}"
         elapsed_ms = (time.perf_counter() - start) * 1000
-
-        content = self._extract_content(response)
         byte_size = len(content.encode("utf-8"))
         self._total_bytes += byte_size
         return ToolResult(content=content, byte_size=byte_size, latency_ms=elapsed_ms)
@@ -272,6 +275,22 @@ class MCPExecutor:
             if isinstance(item, dict) and item.get("type") == "text":
                 parts.append(item.get("text", ""))
         return "\n".join(parts) if parts else json.dumps(result)
+
+    def _normalize_arguments(self, tool_name: str, arguments: dict) -> dict[str, Any]:
+        """Fill in known required arguments the harness already has."""
+        normalized = dict(arguments)
+        tool_def = next((tool for tool in self._tool_defs if tool.name == tool_name), None)
+        schema = tool_def.parameters if tool_def is not None else {}
+        properties = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        if (
+            self._repo_path
+            and "project" in properties
+            and "project" in required
+            and not normalized.get("project")
+        ):
+            normalized["project"] = self._repo_path
+        return normalized
 
     def _ensure_project_ready(self, repo_path: str) -> None:
         """Call ensure_project_ready and check for embedding availability."""

@@ -141,9 +141,13 @@ class BenchmarkConfig:
     repo_path: str
     repo_commit: str | None
     repo_clean: bool | None
+    harness_commit: str | None
+    harness_clean: bool | None
     pitlane_version: str | None
     ollama_version: str | None
     prompt_set_path: str
+    prompt_set_sha256: str
+    prompt_count: int
     runs_per_prompt: int
     max_iterations: int
     timeout_seconds: float

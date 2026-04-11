@@ -99,25 +99,35 @@ class ClaimReport:
         claim: str,
         entries: list[tuple[RunResult, QualityRecord | None]],
     ) -> ClaimSummary:
-        prompts_tested = len(entries)
-
-        # avg_quality_score
-        quality_scores = [
-            q.quality_score for _, q in entries if q is not None
-        ]
-        avg_quality = (
-            sum(quality_scores) / len(quality_scores) if quality_scores else 0.0
-        )
-
-        # avg_efficiency_ratio: baseline_bytes / mcp_bytes per prompt_id
-        # We pair mcp and baseline runs by prompt_id
+        # Claim support is measured from MCP runs only; baseline is used for
+        # relative efficiency and latency comparisons.
+        mcp_quality_by_prompt: dict[str, list[float]] = defaultdict(list)
         mcp_bytes: dict[str, list[int]] = defaultdict(list)
         baseline_bytes: dict[str, list[int]] = defaultdict(list)
-        for result, _ in entries:
+        mcp_latency: dict[str, list[float]] = defaultdict(list)
+        baseline_latency: dict[str, list[float]] = defaultdict(list)
+
+        for result, quality in entries:
             if result.mode == "mcp":
+                if quality is not None:
+                    mcp_quality_by_prompt[result.prompt_id].append(quality.quality_score)
                 mcp_bytes[result.prompt_id].append(result.total_context_bytes)
+                mcp_latency[result.prompt_id].append(result.wall_clock_seconds)
             elif result.mode == "baseline":
                 baseline_bytes[result.prompt_id].append(result.total_context_bytes)
+                baseline_latency[result.prompt_id].append(result.wall_clock_seconds)
+
+        prompts_tested = len(mcp_quality_by_prompt)
+        per_prompt_quality = [
+            sum(scores) / len(scores)
+            for scores in mcp_quality_by_prompt.values()
+            if scores
+        ]
+        avg_quality = (
+            sum(per_prompt_quality) / len(per_prompt_quality)
+            if per_prompt_quality
+            else 0.0
+        )
 
         ratios: list[float] = []
         for pid in set(mcp_bytes) & set(baseline_bytes):
@@ -129,15 +139,6 @@ class ClaimReport:
         avg_efficiency: float | None = (
             sum(ratios) / len(ratios) if ratios else None
         )
-
-        # avg_latency_delta: baseline_wall - mcp_wall per prompt_id
-        mcp_latency: dict[str, list[float]] = defaultdict(list)
-        baseline_latency: dict[str, list[float]] = defaultdict(list)
-        for result, _ in entries:
-            if result.mode == "mcp":
-                mcp_latency[result.prompt_id].append(result.wall_clock_seconds)
-            elif result.mode == "baseline":
-                baseline_latency[result.prompt_id].append(result.wall_clock_seconds)
 
         deltas: list[float] = []
         for pid in set(mcp_latency) & set(baseline_latency):
