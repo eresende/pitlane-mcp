@@ -56,21 +56,45 @@ def _run_cmd(*args: str) -> str | None:
 
 
 def _detect_gpu() -> tuple[str | None, float | None]:
-    """Return (gpu_name, vram_gb) via nvidia-smi, or (None, None)."""
+    """Return (gpu_name, vram_gb) via nvidia-smi or rocm-smi, or (None, None)."""
+    # Try NVIDIA first
     name = _run_cmd("nvidia-smi", "--query-gpu=name", "--format=csv,noheader")
     if name:
         name = name.splitlines()[0].strip()
-    vram_gb: float | None = None
-    raw_vram = _run_cmd(
-        "nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"
-    )
-    if raw_vram:
-        try:
-            vram_gb = float(raw_vram.splitlines()[0].strip()) / 1024.0
-        except ValueError:
-            pass
-    if name:
+        vram_gb: float | None = None
+        raw_vram = _run_cmd(
+            "nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"
+        )
+        if raw_vram:
+            try:
+                vram_gb = float(raw_vram.splitlines()[0].strip()) / 1024.0
+            except ValueError:
+                pass
         return name, vram_gb
+
+    # Try AMD ROCm
+    rocm_out = _run_cmd("rocm-smi", "--showproductname", "--csv")
+    if rocm_out:
+        lines = rocm_out.splitlines()
+        # Header: device,Card Series,Card Model,Card Vendor,...
+        # Data:   card0,AMD Radeon RX 6800 XT,...
+        for line in lines[1:]:  # skip header
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 2 and parts[1] and parts[1] != "N/A":
+                gpu_name = parts[1]  # Card Series column
+                vram_gb = None
+                vram_out = _run_cmd("rocm-smi", "--showmeminfo", "vram", "--csv")
+                if vram_out:
+                    vram_lines = vram_out.splitlines()
+                    for vline in vram_lines[1:]:  # skip header
+                        parts = [p.strip() for p in vline.split(",")]
+                        if parts[0].startswith("card0") and len(parts) >= 2:
+                            try:
+                                vram_gb = round(float(parts[1]) / (1024 ** 3), 1)
+                            except ValueError:
+                                pass
+                            break
+                return gpu_name, vram_gb
 
     # Fallback: check /proc/driver/nvidia/gpus
     nvidia_dir = Path("/proc/driver/nvidia/gpus")
@@ -303,6 +327,7 @@ class BenchmarkRunner:
                             prompt_id=prompt_row.id,
                             mode=run_mode,
                             run_index=run_idx,
+                            repo_path=self.repo_path,
                         )
                         elapsed = time.perf_counter() - t0
                         log.info("  ✓ %s run %d done  status=%s  tool_calls=%d  ctx_bytes=%d  %.1fs",

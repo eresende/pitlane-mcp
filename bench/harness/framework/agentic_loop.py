@@ -44,6 +44,7 @@ class AgenticLoop:
         prompt_id: str = "",
         mode: str = "baseline",
         run_index: int = 0,
+        repo_path: str = "",
     ) -> RunResult:
         """Run the agentic loop and return a RunResult.
 
@@ -58,6 +59,8 @@ class AgenticLoop:
             prompt_id: Identifier for the prompt (for RunResult).
             mode: "mcp" or "baseline" (for RunResult).
             run_index: Run index within a benchmark set (for RunResult).
+            repo_path: Path to the repository being analyzed (injected into
+                system prompt for MCP mode so model knows the project value).
 
         Returns:
             RunResult with full conversation, tool call log, final answer,
@@ -66,8 +69,15 @@ class AgenticLoop:
         wall_start = time.perf_counter()
         _bytes_before = executor.total_response_bytes()
 
+        system_prompt = _SYSTEM_PROMPT
+        if repo_path and mode == "mcp":
+            system_prompt += (
+                f"\n\nThe repository is indexed at project path: {repo_path!r}. "
+                "Always use this exact string as the value for the 'project' parameter in all tool calls."
+            )
+
         conversation: list[Message] = [
-            Message(role="system", content=_SYSTEM_PROMPT),
+            Message(role="system", content=system_prompt),
             Message(role="user", content=prompt),
         ]
         tool_call_records: list[ToolCallRecord] = []
