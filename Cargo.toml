@@ -109,4 +109,4 @@ regex = "1"
 tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
-httpmock = "0.7"
+httpmock = "0.8"
