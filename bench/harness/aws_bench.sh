@@ -27,6 +27,15 @@
 
 set -euo pipefail
 
+# Clean up security group on unexpected exit
+SG_ID=""
+_cleanup() {
+    if [[ -n "$SG_ID" ]]; then
+        aws ec2 delete-security-group --group-id "$SG_ID" --region "$REGION" 2>/dev/null || true
+    fi
+}
+trap _cleanup ERR
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -39,6 +48,7 @@ PROMPTS_FILE="prompts.ripgrep.jsonl"
 OUT_DIR="/home/ubuntu/results"
 USE_SPOT=false
 NO_TERMINATE=false
+WAIT_FOR_QUOTA=false
 
 # Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04) — eu-west-1
 # Refreshed: 2026-04-10
@@ -63,8 +73,9 @@ while [[ $# -gt 0 ]]; do
         --repo)          BENCH_REPO="$2";    shift 2 ;;
         --prompts)       PROMPTS_FILE="$2";  shift 2 ;;
         --out)           OUT_DIR="$2";       shift 2 ;;
-        --spot)          USE_SPOT=true;      shift ;;
-        --no-terminate)  NO_TERMINATE=true;  shift ;;
+        --spot)          USE_SPOT=true;        shift ;;
+        --no-terminate)  NO_TERMINATE=true;    shift ;;
+        --wait-for-quota) WAIT_FOR_QUOTA=true; shift ;;
         --help)
             sed -n '3,30p' "$0"
             exit 0
@@ -83,6 +94,33 @@ fi
 # Helpers
 # ---------------------------------------------------------------------------
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
+
+# ---------------------------------------------------------------------------
+# Optional: wait for quota to propagate before attempting launch
+# ---------------------------------------------------------------------------
+if $WAIT_FOR_QUOTA; then
+    log "Waiting for G/VT vCPU quota to propagate in EC2 (checking every 2 minutes)..."
+    while true; do
+        ERR=$(aws ec2 run-instances \
+            --image-id "$AMI_ID" \
+            --instance-type "$INSTANCE_TYPE" \
+            --key-name "$KEY_NAME" \
+            --region "$REGION" \
+            --dry-run \
+            --count 1 2>&1 || true)
+        if echo "$ERR" | grep -q "DryRunOperation"; then
+            log "EC2 quota confirmed — proceeding."
+            break
+        elif echo "$ERR" | grep -q "VcpuLimitExceeded"; then
+            log "  EC2 still enforcing old limit, retrying in 2 minutes..."
+            sleep 120
+        else
+            log "  Unexpected response: $ERR"
+            log "  Retrying in 2 minutes..."
+            sleep 120
+        fi
+    done
+fi
 
 # ---------------------------------------------------------------------------
 # Security group — allow SSH only
@@ -110,17 +148,21 @@ USER_DATA=$(cat <<USERDATA
 set -euo pipefail
 exec > /var/log/bench-init.log 2>&1
 
+# user-data runs as root without a login shell — set HOME explicitly
+export HOME=/root
+
 echo "=== Installing dependencies ==="
 apt-get update -q
 apt-get install -y -q git python3-pip python3-venv curl
 
 echo "=== Installing Ollama ==="
 curl -fsSL https://ollama.com/install.sh | sh
-systemctl start ollama
-sleep 5
+# systemd is not available in user-data — start ollama directly as a background daemon
+OLLAMA_HOST=127.0.0.1:11434 HOME=/root ollama serve &>/var/log/ollama.log &
+sleep 8  # wait for the API to be ready
 
 echo "=== Pulling model: ${MODEL} ==="
-ollama pull ${MODEL}
+HOME=/root ollama pull ${MODEL}
 
 echo "=== Installing pitlane-mcp ==="
 curl -fsSL "${PITLANE_TARBALL_URL}" -o /tmp/pitlane-mcp.tar.gz
@@ -141,7 +183,7 @@ bash bench/setup.sh 2>&1 | tail -5
 
 echo "=== Running benchmark ==="
 mkdir -p "${OUT_DIR}"
-.venv/bin/python -m bench.harness.bench_runner \
+PYTHONPATH=/home/ubuntu/pitlane-mcp .venv/bin/python -m bench.harness.bench_runner \
     --repo bench/repos/${BENCH_REPO} \
     --prompts bench/harness/${PROMPTS_FILE} \
     --model ${MODEL} \
@@ -195,13 +237,13 @@ PUBLIC_IP=$(aws ec2 describe-instances \
 log "Instance running at $PUBLIC_IP"
 log ""
 log "SSH access:"
-log "  ssh -i ~/.ssh/${KEY_NAME}.pem ubuntu@${PUBLIC_IP}"
+log "  ssh ubuntu@${PUBLIC_IP}"
 log ""
 log "Watch progress:"
-log "  ssh -i ~/.ssh/${KEY_NAME}.pem ubuntu@${PUBLIC_IP} 'tail -f /var/log/bench-run.log'"
+log "  ssh ubuntu@${PUBLIC_IP} 'tail -f /var/log/bench-run.log'"
 log ""
 log "Check if complete:"
-log "  ssh -i ~/.ssh/${KEY_NAME}.pem ubuntu@${PUBLIC_IP} 'ls /tmp/bench-complete 2>/dev/null && echo DONE || echo RUNNING'"
+log "  ssh ubuntu@${PUBLIC_IP} 'ls /tmp/bench-complete 2>/dev/null && echo DONE || echo RUNNING'"
 
 # ---------------------------------------------------------------------------
 # Wait for benchmark to complete (poll via SSH)
@@ -211,11 +253,11 @@ log "Waiting for benchmark to complete (this will take 30-90 minutes) ..."
 log "Press Ctrl+C to stop waiting — the instance will keep running."
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes"
-SSH_KEY="$HOME/.ssh/${KEY_NAME}.pem"
+SSH_KEY=""
 
 # Wait for SSH to become available
 for i in $(seq 1 30); do
-    if ssh $SSH_OPTS -i "$SSH_KEY" "ubuntu@${PUBLIC_IP}" 'echo ok' &>/dev/null; then
+    if ssh $SSH_OPTS "ubuntu@${PUBLIC_IP}" 'echo ok' &>/dev/null; then
         break
     fi
     sleep 10
@@ -223,12 +265,12 @@ done
 
 # Poll for completion
 while true; do
-    if ssh $SSH_OPTS -i "$SSH_KEY" "ubuntu@${PUBLIC_IP}" 'test -f /tmp/bench-complete' 2>/dev/null; then
+    if ssh $SSH_OPTS "ubuntu@${PUBLIC_IP}" 'test -f /tmp/bench-complete' 2>/dev/null; then
         log "Benchmark complete."
         break
     fi
     # Show last log line
-    LAST=$(ssh $SSH_OPTS -i "$SSH_KEY" "ubuntu@${PUBLIC_IP}" \
+    LAST=$(ssh $SSH_OPTS "ubuntu@${PUBLIC_IP}" \
         'tail -1 /var/log/bench-run.log 2>/dev/null || echo "initializing..."' 2>/dev/null || echo "waiting for SSH...")
     log "  $LAST"
     sleep 30
@@ -240,7 +282,7 @@ done
 LOCAL_OUT="result/aws-$(date '+%Y%m%d-%H%M%S')"
 mkdir -p "$LOCAL_OUT"
 log "Downloading results to $LOCAL_OUT ..."
-scp $SSH_OPTS -i "$SSH_KEY" -r "ubuntu@${PUBLIC_IP}:${OUT_DIR}/" "$LOCAL_OUT/"
+scp $SSH_OPTS -r "ubuntu@${PUBLIC_IP}:${OUT_DIR}/" "$LOCAL_OUT/"
 log "Results saved to $LOCAL_OUT"
 
 # ---------------------------------------------------------------------------

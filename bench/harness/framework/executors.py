@@ -172,7 +172,18 @@ class BaselineExecutor:
         """Regex search across files, returning matching lines."""
         pattern = arguments["pattern"]
         search_path = arguments.get("path", "")
-        base = self._repo_path / search_path if search_path else self._repo_path  # type: ignore[operator]
+        if search_path:
+            # Resolve and jail to repo root — prevent escaping to / or arbitrary paths
+            candidate = (self._repo_path / search_path).resolve()  # type: ignore[operator]
+            repo_resolved = self._repo_path.resolve()  # type: ignore[union-attr]
+            try:
+                candidate.relative_to(repo_resolved)
+                base = candidate
+            except ValueError:
+                # Path escapes repo root — fall back to repo root
+                base = repo_resolved
+        else:
+            base = self._repo_path  # type: ignore[assignment]
 
         compiled = re.compile(pattern)
         matches: list[str] = []
@@ -198,10 +209,19 @@ class BaselineExecutor:
         return "\n".join(matches) if matches else "No matches found."
 
     def _list_directory(self, arguments: dict) -> str:
-        """List directory contents with optional glob."""
+        """List directory contents with optional glob, jailed to repo root."""
         rel_path = arguments.get("path", "")
         glob_pattern = arguments.get("glob", "*")
-        base = self._repo_path / rel_path if rel_path else self._repo_path  # type: ignore[operator]
+        if rel_path:
+            candidate = (self._repo_path / rel_path).resolve()  # type: ignore[operator]
+            repo_resolved = self._repo_path.resolve()  # type: ignore[union-attr]
+            try:
+                candidate.relative_to(repo_resolved)
+                base = candidate
+            except ValueError:
+                base = repo_resolved
+        else:
+            base = self._repo_path  # type: ignore[assignment]
 
         entries = sorted(base.glob(glob_pattern))
         lines = [str(e.relative_to(self._repo_path)) for e in entries]  # type: ignore[arg-type]
