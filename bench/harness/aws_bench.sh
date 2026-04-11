@@ -19,6 +19,9 @@
 #   --out DIR              Output directory on the instance (default: /home/ubuntu/results)
 #   --spot                 Use spot instance (cheaper, may be interrupted)
 #   --no-terminate         Don't terminate instance after run (for debugging)
+#   --wait-for-quota       Poll until EC2 quota is live before launching
+#   --runs N               Runs per prompt (default: 3)
+#   --max-iterations N     Max agentic loop iterations per run (default: 25)
 #   --help                 Show this help
 #
 # Example:
@@ -49,6 +52,8 @@ OUT_DIR="/home/ubuntu/results"
 USE_SPOT=false
 NO_TERMINATE=false
 WAIT_FOR_QUOTA=false
+RUNS=3
+MAX_ITERATIONS=25
 
 # Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04) — eu-west-1
 # Refreshed: 2026-04-10
@@ -76,6 +81,8 @@ while [[ $# -gt 0 ]]; do
         --spot)          USE_SPOT=true;        shift ;;
         --no-terminate)  NO_TERMINATE=true;    shift ;;
         --wait-for-quota) WAIT_FOR_QUOTA=true; shift ;;
+        --runs)          RUNS="$2";            shift 2 ;;
+        --max-iterations) MAX_ITERATIONS="$2"; shift 2 ;;
         --help)
             sed -n '3,30p' "$0"
             exit 0
@@ -188,6 +195,8 @@ PYTHONPATH=/home/ubuntu/pitlane-mcp .venv/bin/python -m bench.harness.bench_runn
     --prompts bench/harness/${PROMPTS_FILE} \
     --model ${MODEL} \
     --out ${OUT_DIR} \
+    --runs ${RUNS} \
+    --max-iterations ${MAX_ITERATIONS} \
     2>&1 | tee /var/log/bench-run.log
 
 echo "=== Done ==="
