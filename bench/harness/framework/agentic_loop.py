@@ -7,6 +7,7 @@ or wall-clock timeout.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING
 
@@ -20,6 +21,8 @@ from bench.harness.framework.models import (
 if TYPE_CHECKING:
     from bench.harness.framework.backends import ModelBackend
     from bench.harness.framework.executors import ToolExecutor
+
+log = logging.getLogger("bench")
 
 _SYSTEM_PROMPT = (
     "You are a helpful code analysis assistant. Use the available tools to "
@@ -61,6 +64,7 @@ class AgenticLoop:
             and termination reason.
         """
         wall_start = time.perf_counter()
+        _bytes_before = executor.total_response_bytes()
 
         conversation: list[Message] = [
             Message(role="system", content=_SYSTEM_PROMPT),
@@ -81,10 +85,15 @@ class AgenticLoop:
                 # Check wall-clock timeout before each backend call
                 elapsed = time.perf_counter() - wall_start
                 if elapsed >= timeout_seconds:
+                    log.warning("    [iter %d] timeout before LLM call (%.1fs)", iteration, elapsed)
                     status = "timeout"
                     break
 
+                log.debug("    [iter %d] calling LLM...", iteration)
+                t_llm = time.perf_counter()
                 response = backend.chat(conversation, tools)
+                log.debug("    [iter %d] LLM responded in %.1fs  tokens=%d",
+                          iteration, time.perf_counter() - t_llm, response.usage.total_tokens)
 
                 # Accumulate token usage
                 accumulated_usage = TokenUsage(
@@ -103,13 +112,19 @@ class AgenticLoop:
                 if not assistant_msg.tool_calls:
                     final_answer = assistant_msg.content
                     status = "completed"
+                    log.debug("    [iter %d] final answer received", iteration)
                     break
 
                 # Execute all tool calls (possibly parallel) in this response
                 for tc in assistant_msg.tool_calls:
+                    log.info("    [iter %d] tool: %s  args=%s",
+                             iteration, tc.name,
+                             str(tc.arguments)[:120])
                     tc_start = time.perf_counter()
                     result = executor.execute(tc.name, tc.arguments)
                     tc_latency_ms = (time.perf_counter() - tc_start) * 1000.0
+                    log.debug("    [iter %d] tool %s → %d bytes in %.0fms",
+                              iteration, tc.name, result.byte_size, tc_latency_ms)
 
                     tool_call_records.append(
                         ToolCallRecord(
@@ -132,15 +147,17 @@ class AgenticLoop:
                 # Check timeout after executing tools
                 elapsed = time.perf_counter() - wall_start
                 if elapsed >= timeout_seconds:
+                    log.warning("    [iter %d] timeout after tool calls (%.1fs)", iteration, elapsed)
                     status = "timeout"
                     break
 
         except Exception as exc:  # noqa: BLE001
+            log.error("    agentic loop error: %s", exc)
             status = "error"
             error = str(exc)
 
         wall_clock_seconds = time.perf_counter() - wall_start
-        total_context_bytes = executor.total_response_bytes()
+        total_context_bytes = executor.total_response_bytes() - _bytes_before
 
         return RunResult(
             prompt_id=prompt_id,

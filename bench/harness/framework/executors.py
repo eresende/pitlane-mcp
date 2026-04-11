@@ -162,7 +162,11 @@ class BaselineExecutor:
         """Read a file relative to the repo root."""
         rel_path = arguments["path"]
         full_path = self._repo_path / rel_path  # type: ignore[operator]
-        return full_path.read_text(encoding="utf-8")
+        content = full_path.read_text(encoding="utf-8")
+        _MAX_CHARS = 40_000  # ~10k tokens, fits in 8k context with room for conversation
+        if len(content) > _MAX_CHARS:
+            return content[:_MAX_CHARS] + f"\n[truncated: file is {len(content)} chars]"
+        return content
 
     def _grep_search(self, arguments: dict) -> str:
         """Regex search across files, returning matching lines."""
@@ -172,11 +176,15 @@ class BaselineExecutor:
 
         compiled = re.compile(pattern)
         matches: list[str] = []
+        _MAX_FILE_BYTES = 512 * 1024  # skip files larger than 512 KB
+        _MAX_MATCHES = 200  # cap results to keep context window manageable
 
         for root, _dirs, files in os.walk(base):
             for fname in sorted(files):
                 fpath = Path(root) / fname
                 try:
+                    if fpath.stat().st_size > _MAX_FILE_BYTES:
+                        continue
                     text = fpath.read_text(encoding="utf-8", errors="replace")
                 except (OSError, UnicodeDecodeError):
                     continue
@@ -184,6 +192,8 @@ class BaselineExecutor:
                     if compiled.search(line):
                         rel = fpath.relative_to(self._repo_path)  # type: ignore[arg-type]
                         matches.append(f"{rel}:{line_no}:{line}")
+                        if len(matches) >= _MAX_MATCHES:
+                            return "\n".join(matches) + f"\n[truncated: more than {_MAX_MATCHES} matches]"
 
         return "\n".join(matches) if matches else "No matches found."
 

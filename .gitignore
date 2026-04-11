@@ -6,6 +6,9 @@
 /bench/harness/.venv/
 /bench/harness/out_*/
 
+# Benchmark run results
+/result/
+
 # Claude Code local settings
 .claude/
 

@@ -15,8 +15,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import logging
 import shutil
 import sys
+
+# Configure logging to stderr with timestamps
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-7s  %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stderr,
+)
 
 
 def _check_pitlane_on_path() -> None:

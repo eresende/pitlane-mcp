@@ -7,10 +7,17 @@ collects metrics, writes outputs, and generates a ClaimReport.
 from __future__ import annotations
 
 import datetime
+import logging
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+# ---------------------------------------------------------------------------
+# Module-level logger — callers can configure via logging.basicConfig()
+# ---------------------------------------------------------------------------
+log = logging.getLogger("bench")
 
 from bench.harness.framework.agentic_loop import AgenticLoop
 from bench.harness.framework.claim_report import ClaimReport
@@ -185,6 +192,14 @@ class BenchmarkRunner:
         """
         writer = OutputWriter(self.output_dir)
 
+        log.info("=== Benchmark run starting ===")
+        log.info("repo:    %s", self.repo_path)
+        log.info("prompts: %s", self.prompt_set_path)
+        log.info("model:   %s", self.model_name)
+        log.info("out:     %s", self.output_dir)
+        log.info("mode:    %s  runs/prompt: %d  max_iter: %d  timeout: %.0fs",
+                 self.mode, self.runs_per_prompt, self.max_iterations, self.timeout_seconds)
+
         # Detect hardware / version info
         gpu_name, gpu_vram_gb = _detect_gpu()
         cpu_model = _detect_cpu()
@@ -225,6 +240,7 @@ class BenchmarkRunner:
 
         # Load prompts
         prompts = load_prompts(self.prompt_set_path)
+        log.info("Loaded %d prompts from %s", len(prompts), self.prompt_set_path)
 
         # Determine which modes to run
         if self.mode == "both":
@@ -237,14 +253,20 @@ class BenchmarkRunner:
         # Startup executors
         if "mcp" in modes:
             try:
+                log.info("Starting MCP executor (pitlane-mcp)...")
                 mcp_executor.startup(self.repo_path)
+                log.info("MCP executor ready.")
             except Exception as exc:  # noqa: BLE001
+                log.warning("MCP executor startup failed: %s", exc)
                 print(f"[WARN] MCP executor startup failed: {exc}", file=sys.stderr)
 
         if "baseline" in modes:
             try:
+                log.info("Starting baseline executor...")
                 baseline_executor.startup(self.repo_path)
+                log.info("Baseline executor ready.")
             except Exception as exc:  # noqa: BLE001
+                log.warning("Baseline executor startup failed: %s", exc)
                 print(f"[WARN] Baseline executor startup failed: {exc}", file=sys.stderr)
 
         loop = AgenticLoop()
@@ -256,13 +278,18 @@ class BenchmarkRunner:
         # Per-prompt summary data: prompt_id → {mode → [quality_score]}
         summary: dict[str, dict[str, list[float]]] = {}
 
-        for prompt_row in prompts:
+        total_prompts = len(prompts)
+        for prompt_idx, prompt_row in enumerate(prompts, start=1):
             summary[prompt_row.id] = {"mcp": [], "baseline": []}
+            log.info("[%d/%d] prompt: %s  (category: %s)",
+                     prompt_idx, total_prompts, prompt_row.id, prompt_row.category)
 
             for run_mode in modes:
                 executor = mcp_executor if run_mode == "mcp" else baseline_executor
 
                 for run_idx in range(self.runs_per_prompt):
+                    log.info("  → %s run %d/%d ...", run_mode, run_idx + 1, self.runs_per_prompt)
+                    t0 = time.perf_counter()
                     result: RunResult
                     quality: QualityRecord | None = None
 
@@ -277,10 +304,16 @@ class BenchmarkRunner:
                             mode=run_mode,
                             run_index=run_idx,
                         )
+                        elapsed = time.perf_counter() - t0
+                        log.info("  ✓ %s run %d done  status=%s  tool_calls=%d  ctx_bytes=%d  %.1fs",
+                                 run_mode, run_idx + 1, result.status,
+                                 len(result.tool_calls), result.total_context_bytes, elapsed)
                     except Exception as exc:  # noqa: BLE001
+                        elapsed = time.perf_counter() - t0
+                        log.error("  ✗ %s run %d FAILED after %.1fs: %s",
+                                  run_mode, run_idx + 1, elapsed, exc)
                         # Record failure but continue
                         from bench.harness.framework.models import (
-                            Message,
                             TokenUsage,
                         )
                         result = RunResult(
@@ -293,7 +326,7 @@ class BenchmarkRunner:
                             tool_calls=[],
                             token_usage=TokenUsage(0, 0, 0),
                             total_context_bytes=0,
-                            wall_clock_seconds=0.0,
+                            wall_clock_seconds=elapsed,
                             error=str(exc),
                         )
 
@@ -317,16 +350,22 @@ class BenchmarkRunner:
 
         # Shutdown executors
         if "mcp" in modes:
+            log.info("Shutting down MCP executor...")
             try:
                 mcp_executor.shutdown()
+                log.info("MCP executor shut down.")
             except Exception:  # noqa: BLE001
                 pass
 
         if "baseline" in modes:
+            log.info("Shutting down baseline executor...")
             try:
                 baseline_executor.shutdown()
+                log.info("Baseline executor shut down.")
             except Exception:  # noqa: BLE001
                 pass
+
+        log.info("Writing CSV summary and claim report...")
 
         # Write CSV summary
         writer.write_csv_summary(all_results, all_qualities)
@@ -335,6 +374,7 @@ class BenchmarkRunner:
         report = ClaimReport()
         report_md = report.generate(all_results, all_qualities, prompts, config)
         writer.write_claim_report(report_md)
+        log.info("Done. Results written to %s", self.output_dir)
 
         # Print per-prompt comparison summary to stdout
         self._print_summary(summary, modes)
