@@ -294,7 +294,10 @@ if $NO_TERMINATE; then
 else
     log "Terminating instance $INSTANCE_ID ..."
     aws ec2 terminate-instances --instance-ids "$INSTANCE_ID" --region "$REGION" > /dev/null
-    aws ec2 delete-security-group --group-id "$SG_ID" --region "$REGION" > /dev/null
+    log "Waiting for instance to terminate before cleaning up security group..."
+    aws ec2 wait instance-terminated --instance-ids "$INSTANCE_ID" --region "$REGION"
+    aws ec2 delete-security-group --group-id "$SG_ID" --region "$REGION" > /dev/null || \
+        log "Note: security group $SG_ID can be deleted manually once the instance is gone."
     log "Instance terminated."
 fi
 
