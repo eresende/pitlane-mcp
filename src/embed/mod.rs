@@ -499,7 +499,7 @@ mod tests {
         // Let the background task finish so the store is written.
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        let hits_after_first = mock.hits();
+        let hits_after_first = mock.calls();
         assert!(
             hits_after_first > 0,
             "first call should issue HTTP requests"
@@ -519,7 +519,7 @@ mod tests {
 
         // The second call may return "cached" (index up-to-date) or "indexed" with embeddings skipped.
         // Either way, zero new HTTP requests should have been issued.
-        let hits_after_second = mock.hits();
+        let hits_after_second = mock.calls();
         assert_eq!(
             hits_after_second, hits_after_first,
             "second call (no force) should issue zero HTTP requests; \
@@ -900,7 +900,7 @@ mod tests {
 
             // Assert exactly ceil(N / effective batch size) HTTP requests were issued.
             let expected_batches = n.div_ceil(batch_size);
-            let actual_hits = mock.hits();
+            let actual_hits = mock.calls();
             prop_assert_eq!(
                 actual_hits,
                 expected_batches,

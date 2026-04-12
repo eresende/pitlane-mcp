@@ -344,7 +344,7 @@ pub fn search(
     }
 
     let query = BooleanQuery::new(clauses);
-    let top_docs = searcher.search(&query, &TopDocs::with_limit(fetch))?;
+    let top_docs = searcher.search(&query, &TopDocs::with_limit(fetch).order_by_score())?;
 
     let mut ids = Vec::with_capacity(top_docs.len());
     for (_score, doc_address) in top_docs {
