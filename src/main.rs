@@ -333,7 +333,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Preferred one-call startup tool. Ensures a project's index is ready and, when embeddings are configured, waits only if embeddings are still running. Use this instead of manually chaining index_project and wait_for_embeddings for normal startup.",
+        description = "Preferred one-call startup tool. Ensures a project's index is ready and reports embedding status without blocking on wait_for_embeddings. Use this instead of manually chaining index_project and wait_for_embeddings for normal startup, especially in clients that do not handle long-running startup waits well.",
         meta = tool_meta("ready startup initialize index embeddings semantic setup"),
         annotations(
             read_only_hint = false,
@@ -742,11 +742,11 @@ impl ServerHandler for PitlaneMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_logging().build())
             .with_instructions(
                 "pitlane-mcp: AST-based code intelligence. \
-                Prefer ensure_project_ready first — it ensures indexing is done and waits for embeddings only when needed. If unavailable in your client flow, call index_project first. \
+                Prefer ensure_project_ready first — it ensures indexing is done and reports embedding status without waiting. If unavailable in your client flow, call index_project first. \
                 Discovery: search_symbols (find symbols by name or intent), search_content (find literal text or regex snippets in source files), search_files (find repository files by name/path/glob), trace_execution_path (summarize a likely call/execution path for a behavior question), get_file_outline (file structure), get_project_outline (repo overview). \
                 Retrieval: get_symbol (fetch one implementation by ID). \
                 Analysis: find_callees (direct outgoing references), find_callers (direct incoming references), find_usages (all call sites for a symbol). \
-                Suggested flow: ensure_project_ready, then search_symbols for symbol discovery, search_content when you know text but not the symbol, search_files when you know a file name or path pattern, trace_execution_path for behavior/path questions, then get_symbol to inspect the exact implementation. \
+                Suggested flow: ensure_project_ready, then search_symbols for symbol discovery, search_content when you know text but not the symbol, search_files when you know a file name or path pattern, trace_execution_path for behavior/path questions, then get_symbol to inspect the exact implementation. Call wait_for_embeddings separately only when semantic search must be ready before continuing. \
                 Maintenance: watch_project (keep index current as files change).",
             )
     }

@@ -5,7 +5,6 @@ use serde_json::{json, Value};
 
 use crate::embed::EmbedConfig;
 use crate::tools::index_project::{index_project, IndexProjectParams};
-use crate::tools::wait_for_embeddings::{wait_for_embeddings, WaitForEmbeddingsParams};
 
 pub struct EnsureProjectReadyParams {
     pub path: String,
@@ -32,44 +31,28 @@ pub async fn ensure_project_ready(params: EnsureProjectReadyParams) -> anyhow::R
     .await?;
 
     let embeddings_status = indexed["embeddings"].as_str().unwrap_or("disabled");
-    let wait_result = if embeddings_status == "running" {
-        Some(
-            wait_for_embeddings(WaitForEmbeddingsParams {
-                project: params.path.clone(),
-                poll_interval_ms: params.poll_interval_ms,
-                timeout_secs: params.timeout_secs,
-                progress_token: params.progress_token,
-                peer: params.peer,
-                embed_config: params.embed_config,
-            })
-            .await?,
-        )
-    } else {
-        None
-    };
-
-    let embeddings_ready = match wait_result
-        .as_ref()
-        .and_then(|value| value["status"].as_str())
-        .unwrap_or(embeddings_status)
-    {
-        "ok" | "disabled" => true,
-        "timeout" => false,
-        _ => embeddings_status != "running",
-    };
 
     Ok(json!({
-        "status": if embeddings_ready { "ready" } else { "partial" },
+        "status": "ready",
         "index": indexed,
-        "waited_for_embeddings": wait_result.is_some(),
-        "embeddings": wait_result,
-        "guidance": {
-            "next_step": if embeddings_ready {
-                "Project is ready. Proceed directly to trace_execution_path, search_symbols, or search_content without extra startup calls."
+        "waited_for_embeddings": false,
+        "embeddings": {
+            "status": embeddings_status,
+            "message": if embeddings_status == "running" {
+                "Index is ready. Embeddings are still running in the background; call wait_for_embeddings only if your client wants to block for semantic search readiness."
+            } else if embeddings_status == "disabled" {
+                "Embeddings are disabled. Non-semantic tools are ready immediately."
             } else {
-                "Index is ready but embeddings are still incomplete. You can use non-semantic tools now or wait longer for semantic search."
+                "Embeddings are ready for semantic search."
+            }
+        },
+        "guidance": {
+            "next_step": if embeddings_status == "running" {
+                "Project is indexed and ready for non-semantic tools. Use trace_execution_path, search_content, search_files, or non-semantic search_symbols now, or call wait_for_embeddings later if semantic search is required."
+            } else {
+                "Project is ready. Proceed directly to trace_execution_path, search_symbols, or search_content without extra startup calls."
             },
-            "avoid": "Avoid calling wait_for_embeddings separately when ensure_project_ready already handled startup."
+            "avoid": "Avoid blocking startup on wait_for_embeddings unless your client explicitly needs semantic search to be ready."
         }
     }))
 }
@@ -101,6 +84,7 @@ mod tests {
         assert_eq!(result["status"], json!("ready"));
         assert_eq!(result["index"]["embeddings"], json!("disabled"));
         assert_eq!(result["waited_for_embeddings"], json!(false));
+        assert_eq!(result["embeddings"]["status"], json!("disabled"));
         assert_eq!(
             result["guidance"]["next_step"],
             json!("Project is ready. Proceed directly to trace_execution_path, search_symbols, or search_content without extra startup calls.")
