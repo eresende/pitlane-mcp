@@ -21,9 +21,9 @@ pub struct EnsureProjectReadyRequest {
     pub force: Option<bool>,
     /// Maximum number of source files to index (default: 100 000). Omit this field, or set it to 0, to use the default.
     pub max_files: Option<usize>,
-    /// Poll interval in milliseconds if embeddings need waiting (default: 2000)
+    /// Accepted for compatibility but currently ignored; ensure_project_ready no longer waits for embeddings.
     pub poll_interval_ms: Option<u64>,
-    /// Maximum seconds to wait for embeddings if needed (default: 300)
+    /// Accepted for compatibility but currently ignored; ensure_project_ready no longer waits for embeddings.
     pub timeout_secs: Option<u64>,
 }
 
