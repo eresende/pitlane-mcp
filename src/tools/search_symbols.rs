@@ -116,6 +116,13 @@ fn attach_guidance(
     response["guidance"] = guidance;
 }
 
+fn semantic_query_timeout_ms() -> u64 {
+    std::env::var("PITLANE_SEMANTIC_QUERY_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(10_000)
+}
+
 pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
     let limit = params.limit.unwrap_or(20);
@@ -208,7 +215,25 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
 
             // Sub-task 4: embed the query
             let client = EmbedClient::new(Arc::clone(embed_cfg));
-            let query_vec = client.embed_query(&params.query).await?;
+            let timeout_ms = semantic_query_timeout_ms();
+            let query_vec = match tokio::time::timeout(
+                std::time::Duration::from_millis(timeout_ms),
+                client.embed_query(&params.query),
+            )
+            .await
+            {
+                Ok(Ok(vec)) => vec,
+                Ok(Err(err)) => {
+                    return Err(anyhow::anyhow!(
+                        "Semantic search query embedding failed: {err}. Try mode=\"bm25\" or mode=\"exact\", or increase PITLANE_SEMANTIC_QUERY_TIMEOUT_MS if your embedding backend is slow."
+                    ));
+                }
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "Semantic search query embedding timed out after {timeout_ms}ms. Try mode=\"bm25\" or mode=\"exact\", or increase PITLANE_SEMANTIC_QUERY_TIMEOUT_MS if your embedding backend is slow."
+                    ));
+                }
+            };
 
             // Sub-task 5: verify dimension consistency
             if store.dimension() != Some(query_vec.len()) {
