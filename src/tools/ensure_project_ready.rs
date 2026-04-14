@@ -89,5 +89,9 @@ mod tests {
             result["guidance"]["next_step"],
             json!("Project is ready. Proceed directly to trace_execution_path, search_symbols, or search_content without extra startup calls.")
         );
+        assert_eq!(
+            result["guidance"]["avoid"],
+            json!("Avoid blocking startup on wait_for_embeddings unless your client explicitly needs semantic search to be ready.")
+        );
     }
 }
