@@ -173,6 +173,12 @@ enum Command {
     },
 }
 
+fn embeddings_count_in_store(path: &std::path::Path) -> usize {
+    pitlane_mcp::embed::store::EmbedStore::load(path)
+        .map(|store| store.vectors.len())
+        .unwrap_or(0)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -232,10 +238,15 @@ async fn main() -> anyhow::Result<()> {
                 } else {
                     "ok"
                 };
+                let total_embeddings_stored = embeddings_count_in_store(&store_path);
                 if let Some(obj) = result.as_object_mut() {
                     obj.insert("embeddings".into(), serde_json::json!(embed_status));
                     obj.insert(
                         "embeddings_stored".into(),
+                        serde_json::json!(total_embeddings_stored),
+                    );
+                    obj.insert(
+                        "embeddings_newly_stored".into(),
                         serde_json::json!(embed_result.stored),
                     );
                     if let Some(err) = embed_result.error {
@@ -419,4 +430,20 @@ async fn main() -> anyhow::Result<()> {
 
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embeddings_count_in_store_returns_saved_vector_count() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut store = pitlane_mcp::embed::store::EmbedStore::new();
+        store.update("sym:a".to_string(), vec![1.0, 2.0]);
+        store.update("sym:b".to_string(), vec![3.0, 4.0]);
+        store.save(tmp.path()).unwrap();
+
+        assert_eq!(embeddings_count_in_store(tmp.path()), 2);
+    }
 }
