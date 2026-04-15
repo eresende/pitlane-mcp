@@ -7,6 +7,7 @@ use crate::embed::EmbedConfig;
 use crate::index::format::index_dir;
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
+use crate::tools::steering::{attach_steering, build_steering};
 
 pub struct GetIndexStatsParams {
     pub project: String,
@@ -90,7 +91,18 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
         result.insert("embeddings_percent".into(), json!(pct));
     }
 
-    Ok(Value::Object(result))
+    let steering = build_steering(
+        0.58,
+        "This tool provides repo-scale orientation and index health rather than a specific code unit."
+            .to_string(),
+        "get_project_outline",
+        json!({ "project": params.project }),
+        vec![],
+    );
+    let mut value = Value::Object(result);
+    attach_steering(&mut value, steering);
+
+    Ok(value)
 }
 
 #[cfg(test)]

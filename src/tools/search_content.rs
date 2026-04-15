@@ -10,8 +10,9 @@ use crate::error::ToolError;
 use crate::indexer::{is_declaration_file, is_supported_extension, load_gitignore_patterns};
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
+use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
-const DEFAULT_LIMIT: usize = 20;
+const DEFAULT_LIMIT: usize = 8;
 const MAX_CONTEXT_LINES: usize = 5;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
@@ -143,6 +144,7 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
         }
     }
 
+    let steering_matches: Vec<Value> = matches.clone();
     let mut response = json!({
         "matches": matches,
         "count": matches.len(),
@@ -165,6 +167,28 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
         },
         "avoid": "Avoid shell grep when search_content can search the indexed source files directly."
     });
+    let steering = if matches.is_empty() {
+        build_steering(
+            0.2,
+            "No direct text match was found, so this is a weak content search result.".to_string(),
+            "search_content",
+            json!({ "query": params.query, "regex": regex }),
+            take_fallback_candidates(&steering_matches),
+        )
+    } else {
+        let top = &steering_matches[0];
+        build_steering(
+            0.86,
+            "The matched line provides direct evidence for the requested text snippet.".to_string(),
+            "get_file_outline",
+            json!({
+                "file": top["file"],
+                "line": top["line"],
+            }),
+            take_fallback_candidates(&steering_matches),
+        )
+    };
+    attach_steering(&mut response, steering);
     Ok(response)
 }
 

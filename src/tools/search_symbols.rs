@@ -13,6 +13,9 @@ use crate::index::format::index_dir;
 use crate::indexer::language::{Language, Symbol, SymbolKind};
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
+use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
+
+const DEFAULT_LIMIT: usize = 8;
 
 /// Build the set of character trigrams for `s` (lowercased).
 fn trigrams(s: &str) -> HashSet<[char; 3]> {
@@ -116,6 +119,86 @@ fn attach_guidance(
     response["guidance"] = guidance;
 }
 
+fn attach_search_steering(
+    response: &mut Value,
+    mode: &str,
+    query: &str,
+    results: &[Value],
+    truncated: bool,
+) {
+    let (confidence, why_this_matched, recommended_next_tool, recommended_target) = if results
+        .is_empty()
+    {
+        (
+            0.18,
+            "No strong symbol match was found, so this is a weak discovery result.".to_string(),
+            if looks_broad_query(query) {
+                "search_content"
+            } else {
+                "search_symbols"
+            },
+            json!({ "query": query }),
+        )
+    } else {
+        let top = &results[0];
+        let target = json!({
+            "symbol_id": top["id"],
+            "name": top["name"],
+            "kind": top["kind"],
+            "file": top["file"],
+        });
+        match mode {
+            "exact" => (
+                0.98,
+                "Exact symbol-name or qualified-name match.".to_string(),
+                "get_symbol",
+                target,
+            ),
+            "bm25" => (
+                0.87,
+                "BM25 ranked the symbol by strong lexical overlap across indexed fields."
+                    .to_string(),
+                "get_symbol",
+                target,
+            ),
+            "fuzzy" => (
+                0.73,
+                "Trigram similarity matched a nearby symbol name or path.".to_string(),
+                "get_symbol",
+                target,
+            ),
+            "semantic" => (
+                0.66,
+                "Semantic similarity matched the query intent to a candidate symbol.".to_string(),
+                "get_symbol",
+                target,
+            ),
+            _ => (
+                0.8,
+                "Search returned a plausible symbol candidate.".to_string(),
+                "get_symbol",
+                target,
+            ),
+        }
+    };
+
+    let mut why = why_this_matched;
+    if truncated {
+        why.push_str(" Results were truncated; inspect the top candidate before paging further.");
+    }
+
+    attach_steering(
+        response,
+        build_steering(
+            confidence,
+            why,
+            recommended_next_tool,
+            recommended_target,
+            take_fallback_candidates(results),
+        ),
+    );
+}
+
 fn semantic_query_timeout_ms() -> u64 {
     std::env::var("PITLANE_SEMANTIC_QUERY_TIMEOUT_MS")
         .ok()
@@ -125,7 +208,7 @@ fn semantic_query_timeout_ms() -> u64 {
 
 pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
-    let limit = params.limit.unwrap_or(20);
+    let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
     let offset = params.offset.unwrap_or(0);
 
     let explicit_mode = params.mode.as_deref();
@@ -303,6 +386,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 .collect();
 
             let truncated = offset + page.len() < total;
+            let steering_results = page.clone();
             let mut resp = json!({
                 "results": page,
                 "count": page.len(),
@@ -316,6 +400,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 ));
             }
             attach_guidance(&mut resp, mode, &params.query, page.len(), truncated);
+            attach_search_steering(&mut resp, mode, &params.query, &steering_results, truncated);
             return Ok(resp);
         }
         other => {
@@ -413,6 +498,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 "query": params.query,
                 "truncated": truncated,
             });
+            let steering_results = results.clone();
             if truncated {
                 resp["next_page_message"] = json!(format!(
                     "More results available. Call again with offset: {}",
@@ -420,6 +506,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 ));
             }
             attach_guidance(&mut resp, mode, &params.query, results.len(), truncated);
+            attach_search_steering(&mut resp, mode, &params.query, &steering_results, truncated);
             Ok(resp)
         })();
 
@@ -488,6 +575,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 })
             })
             .collect();
+        let steering_results = page.clone();
         let mut resp = json!({
             "results": page,
             "count": page.len(),
@@ -501,6 +589,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             ));
         }
         attach_guidance(&mut resp, mode, &params.query, page.len(), truncated);
+        attach_search_steering(&mut resp, mode, &params.query, &steering_results, truncated);
         return Ok(resp);
     }
 
@@ -568,6 +657,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
         .take(limit)
         .map(|(_, v)| v)
         .collect();
+    let steering_results = page.clone();
 
     let mut resp = json!({
         "results": page,
@@ -578,6 +668,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
         "fuzzy_note": "Results are fuzzy-matched by trigram similarity and ranked by score.",
     });
     attach_guidance(&mut resp, mode, &params.query, page.len(), false);
+    attach_search_steering(&mut resp, mode, &params.query, &steering_results, false);
     Ok(resp)
 }
 

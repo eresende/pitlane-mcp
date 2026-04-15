@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use crate::error::ToolError;
 use crate::graph::{collect_direct_callable_references, read_symbol_source};
 use crate::tools::index_project::load_project_index;
+use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
 pub struct FindCalleesParams {
     pub project: String,
@@ -13,7 +14,7 @@ pub struct FindCalleesParams {
 
 pub async fn find_callees(params: FindCalleesParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
-    let limit = params.limit.unwrap_or(100);
+    let limit = params.limit.unwrap_or(8);
     let offset = params.offset.unwrap_or(0);
 
     let sym = index
@@ -40,6 +41,8 @@ pub async fn find_callees(params: FindCalleesParams) -> anyhow::Result<Value> {
                 "file": callee.file,
                 "line_start": callee.line_start,
                 "reason": "identifier appears in source and resolves to an indexed symbol",
+                "evidence": callee.evidence,
+                "confidence": callee.confidence,
             })
         })
         .collect();
@@ -57,6 +60,30 @@ pub async fn find_callees(params: FindCalleesParams) -> anyhow::Result<Value> {
             offset + limit
         ));
     }
+    let steering = if page.is_empty() {
+        build_steering(
+            0.32,
+            "No direct callees were recovered from the symbol body, so this is a weak graph expansion result."
+                .to_string(),
+            "search_symbols",
+            json!({ "symbol_id": params.symbol_id, "symbol_name": sym.name }),
+            take_fallback_candidates(&page),
+        )
+    } else {
+        build_steering(
+            0.89,
+            "The symbol body contains direct callable references that resolve to indexed callees."
+                .to_string(),
+            "get_symbol",
+            json!({
+                "symbol_id": page[0]["to_id"],
+                "name": page[0]["to_name"],
+                "file": page[0]["file"],
+            }),
+            take_fallback_candidates(&page),
+        )
+    };
+    attach_steering(&mut response, steering);
     Ok(response)
 }
 

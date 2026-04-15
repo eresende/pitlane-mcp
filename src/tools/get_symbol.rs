@@ -5,6 +5,7 @@ use crate::graph::{collect_direct_references, read_symbol_source};
 use crate::indexer::language::SymbolKind;
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
+use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
 const MAX_REFERENCES: usize = 25;
 
@@ -40,13 +41,7 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
     if use_signature_only {
         let returned_bytes = sym.signature.as_deref().unwrap_or("").len() as u64
             + sym.doc.as_deref().unwrap_or("").len() as u64;
-        crate::stats::record_get_symbol(
-            &canonical_project,
-            true,
-            full_source_bytes,
-            returned_bytes,
-        );
-        return Ok(json!({
+        let mut response = json!({
             "id": sym.id,
             "name": sym.name,
             "qualified": sym.qualified,
@@ -57,7 +52,29 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             "line_end": sym.line_end,
             "signature": sym.signature,
             "doc": sym.doc,
-        }));
+        });
+        attach_steering(
+            &mut response,
+            build_steering(
+                0.84,
+                "The symbol shape and documentation were returned without reading the full body."
+                    .to_string(),
+                "find_usages",
+                json!({
+                    "symbol_id": sym.id,
+                    "name": sym.name,
+                    "file": sym.file.to_string_lossy().replace('\\', "/"),
+                }),
+                Vec::new(),
+            ),
+        );
+        crate::stats::record_get_symbol(
+            &canonical_project,
+            true,
+            full_source_bytes,
+            returned_bytes,
+        );
+        return Ok(response);
     }
 
     let include_context = params.include_context.unwrap_or(false);
@@ -79,13 +96,16 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
                 "kind": reference.kind,
                 "file": reference.file,
                 "line_start": reference.line_start,
+                "evidence": reference.evidence,
+                "confidence": reference.confidence,
             })
         })
         .collect();
     let references_truncated = refs.len() > MAX_REFERENCES;
     refs.truncate(MAX_REFERENCES);
-
-    Ok(json!({
+    let steering_refs = refs.clone();
+    let has_references = !steering_refs.is_empty();
+    let mut response = json!({
         "id": sym.id,
         "name": sym.name,
         "qualified": sym.qualified,
@@ -99,7 +119,30 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         "doc": sym.doc,
         "references": refs,
         "references_truncated": references_truncated,
-    }))
+    });
+    attach_steering(
+        &mut response,
+        build_steering(
+            if references_truncated {
+                0.86
+            } else if has_references {
+                0.9
+            } else {
+                0.72
+            },
+            "The symbol body was read and direct identifier references were extracted for local expansion."
+                .to_string(),
+            "find_usages",
+            json!({
+                "symbol_id": sym.id,
+                "name": sym.name,
+                "file": sym.file.to_string_lossy().replace('\\', "/"),
+            }),
+            take_fallback_candidates(&steering_refs),
+        ),
+    );
+
+    Ok(response)
 }
 
 #[cfg(test)]

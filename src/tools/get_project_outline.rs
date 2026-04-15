@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 use crate::indexer::is_excluded_dir_name;
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
+use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
 /// Hard cap: if the number of directories exceeds this, we collapse per-file
 /// items into directory-level aggregates to keep the response manageable.
@@ -84,6 +85,7 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
             )
             .collect();
 
+        let steering_dirs = dirs_json.clone();
         let mut result = json!({
             "project": params.project,
             "total_files": index.file_count(),
@@ -104,6 +106,29 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
                 "Output truncated. Use 'path' to scope to a subtree, or increase 'max_dirs'."
             );
         }
+        let steering = if steering_dirs.is_empty() {
+            build_steering(
+                0.3,
+                "The project outline established the repo topology but did not isolate a specific subtree."
+                    .to_string(),
+                "search_files",
+                json!({ "project": params.project, "path": params.path }),
+                take_fallback_candidates(&steering_dirs),
+            )
+        } else {
+            build_steering(
+                if truncated { 0.68 } else { 0.78 },
+                "The directory outline identifies the most relevant subtree for follow-up navigation."
+                    .to_string(),
+                "search_files",
+                json!({
+                    "project": params.project,
+                    "path": steering_dirs[0]["dir"],
+                }),
+                take_fallback_candidates(&steering_dirs),
+            )
+        };
+        attach_steering(&mut result, steering);
 
         return Ok(result);
     }
@@ -187,6 +212,7 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
         }
     }
 
+    let steering_dirs = dirs_json.clone();
     let mut result = json!({
         "project": params.project,
         "total_files": index.file_count(),
@@ -212,6 +238,33 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
             "Per-file items omitted (too many directories). Use 'path' to scope to a subtree for full detail."
         );
     }
+    let steering = if steering_dirs.is_empty() {
+        build_steering(
+            0.3,
+            "The project outline established the repo topology but did not isolate a specific subtree."
+                .to_string(),
+            "search_files",
+            json!({ "project": params.project, "path": params.path }),
+            take_fallback_candidates(&steering_dirs),
+        )
+    } else {
+        build_steering(
+            if collapse_items || truncated {
+                0.7
+            } else {
+                0.82
+            },
+            "The directory outline identifies the most relevant subtree for follow-up navigation."
+                .to_string(),
+            "search_files",
+            json!({
+                    "project": params.project,
+                "path": steering_dirs[0]["dir"],
+            }),
+            take_fallback_candidates(&steering_dirs),
+        )
+    };
+    attach_steering(&mut result, steering);
 
     Ok(result)
 }

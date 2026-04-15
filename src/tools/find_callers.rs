@@ -9,6 +9,7 @@ use crate::graph::{
 };
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
+use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
 pub struct FindCallersParams {
     pub project: String,
@@ -20,7 +21,7 @@ pub struct FindCallersParams {
 
 pub async fn find_callers(params: FindCallersParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
-    let limit = params.limit.unwrap_or(100);
+    let limit = params.limit.unwrap_or(8);
     let offset = params.offset.unwrap_or(0);
 
     let sym = index
@@ -59,12 +60,8 @@ pub async fn find_callers(params: FindCallersParams) -> anyhow::Result<Value> {
             Ok(source) => source,
             Err(_) => continue,
         };
-        if !source_text.contains(sym.name.as_str()) {
-            continue;
-        }
-
         let direct_refs = collect_direct_callable_references(&index, candidate, &source_text);
-        if direct_refs.iter().any(|reference| reference.id == sym.id) {
+        if let Some(reference) = direct_refs.iter().find(|reference| reference.id == sym.id) {
             callers.push(json!({
                 "edge_kind": "calls",
                 "from_id": candidate.id,
@@ -73,14 +70,19 @@ pub async fn find_callers(params: FindCallersParams) -> anyhow::Result<Value> {
                 "file": candidate.file.to_string_lossy().replace('\\', "/"),
                 "line_start": candidate.line_start,
                 "reason": "indexed symbol source references the target symbol",
+                "evidence": reference.evidence,
+                "confidence": reference.confidence,
             }));
         }
     }
 
     callers.sort_by(|a, b| {
-        a["from_name"]
-            .as_str()
-            .cmp(&b["from_name"].as_str())
+        b["confidence"]
+            .as_f64()
+            .unwrap_or(0.0)
+            .partial_cmp(&a["confidence"].as_f64().unwrap_or(0.0))
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a["from_name"].as_str().cmp(&b["from_name"].as_str()))
             .then_with(|| a["file"].as_str().cmp(&b["file"].as_str()))
             .then_with(|| a["line_start"].as_u64().cmp(&b["line_start"].as_u64()))
     });
@@ -100,6 +102,30 @@ pub async fn find_callers(params: FindCallersParams) -> anyhow::Result<Value> {
             offset + limit
         ));
     }
+    let steering = if page.is_empty() {
+        build_steering(
+            0.32,
+            "No direct callers were recovered from the indexed symbol bodies, so this is a weak reverse-graph expansion result."
+                .to_string(),
+            "search_symbols",
+            json!({ "symbol_id": params.symbol_id, "symbol_name": sym.name }),
+            take_fallback_candidates(&page),
+        )
+    } else {
+        build_steering(
+            0.89,
+            "The target symbol appears in indexed caller bodies and resolves to direct callers."
+                .to_string(),
+            "get_symbol",
+            json!({
+                "symbol_id": page[0]["from_id"],
+                "name": page[0]["from_name"],
+                "file": page[0]["file"],
+            }),
+            take_fallback_candidates(&page),
+        )
+    };
+    attach_steering(&mut response, steering);
     Ok(response)
 }
 

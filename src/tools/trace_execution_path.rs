@@ -9,6 +9,7 @@ use crate::index::SymbolIndex;
 use crate::indexer::language::Symbol;
 use crate::tools::index_project::load_project_index;
 use crate::tools::search_symbols::{search_symbols, SearchSymbolsParams};
+use crate::tools::steering::{attach_steering, build_steering};
 
 const DEFAULT_MAX_SYMBOLS: usize = 6;
 const DEFAULT_MAX_DEPTH: usize = 2;
@@ -17,6 +18,8 @@ const DEFAULT_SEED_COUNT: usize = 3;
 pub struct TraceExecutionPathParams {
     pub project: String,
     pub query: String,
+    pub source: Option<String>,
+    pub sink: Option<String>,
     pub language: Option<String>,
     pub file: Option<String>,
     pub max_symbols: Option<usize>,
@@ -30,6 +33,8 @@ struct TraceNode {
     score: i32,
     category: &'static str,
     why: String,
+    distance: usize,
+    evidence_hits: usize,
 }
 
 #[derive(Clone)]
@@ -37,6 +42,8 @@ struct TraceEdge {
     from_id: String,
     to_id: String,
     relation: &'static str,
+    evidence: String,
+    confidence: f32,
 }
 
 pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::Result<Value> {
@@ -60,6 +67,8 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
             seed,
             adjusted_score(seed, 100),
             classify_symbol(seed),
+            0,
+            1.0,
             "discovered as a strong seed for the requested behavior".to_string(),
         );
         trace_callers(&index, seed, &mut nodes, &mut edges, &mut seen_edges, 0);
@@ -75,27 +84,78 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
 
     let important = select_important_symbols(&index, &nodes, max_symbols);
     let important_ids: HashSet<&str> = important.iter().map(|item| item.id.as_str()).collect();
-    let important_edges: Vec<Value> = edges
+    let important_edge_records: Vec<TraceEdge> = edges
         .into_iter()
         .filter(|edge| {
             important_ids.contains(edge.from_id.as_str())
                 && important_ids.contains(edge.to_id.as_str())
         })
+        .collect();
+    let important_edges: Vec<Value> = important_edge_records
+        .iter()
         .map(|edge| {
             json!({
                 "from_id": edge.from_id,
                 "to_id": edge.to_id,
                 "relation": edge.relation,
+                "evidence": edge.evidence,
+                "confidence": edge.confidence,
             })
         })
         .collect();
+    let shortest_path = build_shortest_path(&important, &important_edge_records);
+    let path_narrative = build_path_narrative(&important, Some(shortest_path.as_slice()));
 
-    Ok(json!({
+    let fallback_candidates: Vec<Value> = important
+        .iter()
+        .take(3)
+        .map(|item| {
+            json!({
+                "id": item.id,
+                "name": item.name,
+                "kind": item.kind,
+                "file": item.file,
+                "category": item.category,
+                "confidence": item.confidence,
+                "why": item.why,
+            })
+        })
+        .collect();
+    let steering = if let Some(top) = important.first() {
+        build_steering(
+            if important_edges.is_empty() {
+                0.72
+            } else {
+                0.91
+            },
+            "The traced symbols and edges provide a grounded execution path for the requested behavior."
+                .to_string(),
+            "get_symbol",
+            json!({
+                "symbol_id": top.id,
+                "name": top.name,
+                "file": top.file,
+            }),
+            fallback_candidates,
+        )
+    } else {
+        build_steering(
+            0.24,
+            "The path tracer did not recover a strong execution chain, so this is a weak discovery result."
+                .to_string(),
+            "search_symbols",
+            json!({ "query": params.query }),
+            fallback_candidates,
+        )
+    };
+
+    let mut response = json!({
         "query": params.query,
         "discovery_mode": discovery_mode,
         "seed_symbol_ids": seed_ids,
         "summary": build_summary(&important, &important_edges),
-        "path_narrative": build_path_narrative(&important),
+        "path_narrative": path_narrative,
+        "shortest_path": shortest_path,
         "important_symbols": important.into_iter().map(|item| item.into_json()).collect::<Vec<_>>(),
         "edges": important_edges,
         "guidance": {
@@ -103,48 +163,76 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
             "avoid": "Avoid repeating search_symbols/search_content for adjacent concepts until you have used the traced symbols and edges in your answer.",
             "answer_now_hint": "Prefer answering from the returned important_symbols, edges, and summary before doing more discovery."
         }
-    }))
+    });
+    attach_steering(&mut response, steering);
+
+    Ok(response)
 }
 
 async fn discover_seed_ids(
     params: &TraceExecutionPathParams,
 ) -> anyhow::Result<(&'static str, Vec<String>)> {
-    let semantic = search_symbols(SearchSymbolsParams {
-        project: params.project.clone(),
-        query: params.query.clone(),
-        kind: Some("function".to_string()),
-        language: params.language.clone(),
-        file: params.file.clone(),
-        limit: Some(DEFAULT_SEED_COUNT),
-        offset: Some(0),
-        mode: Some("semantic".to_string()),
-        embed_config: params.embed_config.clone(),
-    })
-    .await;
+    let mut ids = Vec::new();
+    let mut discovered_modes = Vec::new();
 
-    let mut ids = semantic
-        .as_ref()
-        .ok()
-        .map(extract_symbol_ids)
-        .unwrap_or_default();
-    if !ids.is_empty() {
-        return Ok(("semantic", ids));
+    for query in [
+        Some(params.query.as_str()),
+        params.source.as_deref(),
+        params.sink.as_deref(),
+    ] {
+        let Some(query) = query.filter(|q| !q.trim().is_empty()) else {
+            continue;
+        };
+        let semantic = search_symbols(SearchSymbolsParams {
+            project: params.project.clone(),
+            query: query.to_string(),
+            kind: Some("function".to_string()),
+            language: params.language.clone(),
+            file: params.file.clone(),
+            limit: Some(DEFAULT_SEED_COUNT),
+            offset: Some(0),
+            mode: Some("semantic".to_string()),
+            embed_config: params.embed_config.clone(),
+        })
+        .await;
+
+        if let Ok(response) = semantic {
+            let candidate_ids = extract_symbol_ids(&response);
+            if !candidate_ids.is_empty() {
+                discovered_modes.push("semantic");
+                ids.extend(candidate_ids);
+                continue;
+            }
+        }
+
+        let bm25 = search_symbols(SearchSymbolsParams {
+            project: params.project.clone(),
+            query: query.to_string(),
+            kind: Some("function".to_string()),
+            language: params.language.clone(),
+            file: params.file.clone(),
+            limit: Some(DEFAULT_SEED_COUNT),
+            offset: Some(0),
+            mode: Some("bm25".to_string()),
+            embed_config: params.embed_config.clone(),
+        })
+        .await?;
+        let candidate_ids = extract_symbol_ids(&bm25);
+        if !candidate_ids.is_empty() {
+            discovered_modes.push("bm25");
+            ids.extend(candidate_ids);
+        }
     }
 
-    let bm25 = search_symbols(SearchSymbolsParams {
-        project: params.project.clone(),
-        query: params.query.clone(),
-        kind: Some("function".to_string()),
-        language: params.language.clone(),
-        file: params.file.clone(),
-        limit: Some(DEFAULT_SEED_COUNT),
-        offset: Some(0),
-        mode: Some("bm25".to_string()),
-        embed_config: params.embed_config.clone(),
-    })
-    .await?;
-    ids = extract_symbol_ids(&bm25);
-    Ok(("bm25", ids))
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        Ok(("bm25", ids))
+    } else if discovered_modes.contains(&"semantic") {
+        Ok(("semantic", ids))
+    } else {
+        Ok(("bm25", ids))
+    }
 }
 
 fn extract_symbol_ids(response: &Value) -> Vec<String> {
@@ -178,19 +266,32 @@ fn trace_callers(
             Ok(source) => source,
             Err(_) => continue,
         };
-        if !source_text.contains(seed.name.as_str()) {
-            continue;
-        }
         let refs = collect_direct_callable_references(index, candidate, &source_text);
-        if refs.iter().any(|reference| reference.id == seed.id) {
+        if let Some(reference) = refs.iter().find(|reference| reference.id == seed.id) {
             upsert_node(
                 nodes,
                 candidate,
-                adjusted_score(candidate, 90 - depth as i32 * 10),
+                adjusted_score(
+                    candidate,
+                    90 - depth as i32 * 10 + (reference.confidence * 10.0) as i32,
+                ),
                 classify_symbol(candidate),
-                format!("direct caller of {}", seed.qualified),
+                depth + 1,
+                reference.confidence,
+                format!(
+                    "direct caller of {}: {}",
+                    seed.qualified, reference.evidence
+                ),
             );
-            push_edge(seen_edges, edges, &candidate.id, &seed.id, "calls");
+            push_edge(
+                seen_edges,
+                edges,
+                &candidate.id,
+                &seed.id,
+                "calls",
+                reference.evidence.clone(),
+                reference.confidence,
+            );
         }
     }
 }
@@ -227,11 +328,27 @@ fn trace_callees(
             upsert_node(
                 nodes,
                 target,
-                adjusted_score(target, 80 - depth as i32 * 10),
+                adjusted_score(
+                    target,
+                    80 - depth as i32 * 10 + (reference.confidence * 10.0) as i32,
+                ),
                 classify_symbol(target),
-                format!("direct callee of {}", current.qualified),
+                depth + 1,
+                reference.confidence,
+                format!(
+                    "direct callee of {}: {}",
+                    current.qualified, reference.evidence
+                ),
             );
-            push_edge(seen_edges, edges, &current.id, &target.id, "calls");
+            push_edge(
+                seen_edges,
+                edges,
+                &current.id,
+                &target.id,
+                "calls",
+                reference.evidence.clone(),
+                reference.confidence,
+            );
             if seen.insert(target.id.clone()) {
                 queue.push_back((target.id.clone(), depth + 1));
             }
@@ -245,6 +362,8 @@ fn push_edge(
     from_id: &str,
     to_id: &str,
     relation: &'static str,
+    evidence: String,
+    confidence: f32,
 ) {
     let key = (from_id.to_string(), to_id.to_string(), relation);
     if seen_edges.insert(key.clone()) {
@@ -252,6 +371,8 @@ fn push_edge(
             from_id: key.0,
             to_id: key.1,
             relation,
+            evidence,
+            confidence,
         });
     }
 }
@@ -261,6 +382,8 @@ fn upsert_node(
     sym: &Symbol,
     score: i32,
     category: &'static str,
+    distance: usize,
+    evidence_confidence: f32,
     why: String,
 ) {
     nodes
@@ -271,12 +394,17 @@ fn upsert_node(
                 node.category = category;
                 node.why = why.clone();
             }
+            node.distance = node.distance.min(distance);
+            node.evidence_hits += 1;
+            node.score = node.score.max(score + (evidence_confidence * 10.0) as i32);
         })
         .or_insert_with(|| TraceNode {
             symbol_id: sym.id.clone(),
-            score,
+            score: score + (evidence_confidence * 10.0) as i32,
             category,
             why,
+            distance,
+            evidence_hits: 1,
         });
 }
 
@@ -472,8 +600,12 @@ fn select_important_symbols(
                 line_end: sym.line_end,
                 signature: sym.signature.clone(),
                 category: node.category,
-                why: node.why.clone(),
-                score: node.score,
+                why: if node.evidence_hits > 1 {
+                    format!("{} ({} evidence hits)", node.why, node.evidence_hits)
+                } else {
+                    node.why.clone()
+                },
+                score: node.score - (node.distance as i32 * 4),
                 confidence: confidence_label(node.score),
                 noise_reason: noise_reason(sym),
                 snippet: build_snippet(sym),
@@ -486,6 +618,7 @@ fn select_important_symbols(
     items.sort_by(|a, b| {
         b.score
             .cmp(&a.score)
+            .then_with(|| a.category.cmp(b.category))
             .then_with(|| a.file.cmp(&b.file))
             .then_with(|| a.line_start.cmp(&b.line_start))
     });
@@ -538,7 +671,22 @@ fn build_snippet(sym: &Symbol) -> Option<String> {
     }
 }
 
-fn build_path_narrative(symbols: &[ImportantSymbol]) -> String {
+fn build_path_narrative(symbols: &[ImportantSymbol], shortest_path: Option<&[Value]>) -> String {
+    if let Some(path) = shortest_path {
+        if !path.is_empty() {
+            let mut parts = Vec::new();
+            for step in path {
+                let name = step["name"].as_str().unwrap_or("unknown");
+                if let Some(relation) = step["relation"].as_str() {
+                    parts.push(format!("{} {}", relation, name));
+                } else {
+                    parts.push(name.to_string());
+                }
+            }
+            return parts.join(" -> ");
+        }
+    }
+
     let category_order = ["entry", "orchestration", "scanning", "matching", "output"];
     let mut parts = Vec::new();
     for category in category_order {
@@ -554,6 +702,104 @@ fn build_path_narrative(symbols: &[ImportantSymbol]) -> String {
     } else {
         parts.join(" -> ")
     }
+}
+
+fn build_shortest_path(symbols: &[ImportantSymbol], edges: &[TraceEdge]) -> Vec<Value> {
+    let symbol_by_id: HashMap<&str, &ImportantSymbol> = symbols
+        .iter()
+        .map(|symbol| (symbol.id.as_str(), symbol))
+        .collect();
+    let start = symbols
+        .iter()
+        .find(|symbol| symbol.hot_path && symbol.category == "entry")
+        .or_else(|| symbols.first());
+    let goal = symbols
+        .iter()
+        .rev()
+        .find(|symbol| symbol.hot_path && symbol.category == "output")
+        .or_else(|| symbols.last());
+    let (Some(start), Some(goal)) = (start, goal) else {
+        return Vec::new();
+    };
+    if start.id == goal.id {
+        return vec![json!({
+            "symbol_id": start.id,
+            "name": start.name,
+            "qualified": start.qualified,
+            "category": start.category,
+        })];
+    }
+
+    let mut adjacency: HashMap<&str, Vec<&TraceEdge>> = HashMap::new();
+    for edge in edges {
+        adjacency
+            .entry(edge.from_id.as_str())
+            .or_default()
+            .push(edge);
+    }
+
+    let mut queue = VecDeque::from([start.id.as_str()]);
+    let mut visited: HashSet<&str> = HashSet::from([start.id.as_str()]);
+    let mut parent: HashMap<&str, (&str, &TraceEdge)> = HashMap::new();
+
+    while let Some(current) = queue.pop_front() {
+        if current == goal.id.as_str() {
+            break;
+        }
+        let Some(outgoing) = adjacency.get(current) else {
+            continue;
+        };
+        for edge in outgoing {
+            let next = edge.to_id.as_str();
+            if visited.insert(next) {
+                parent.insert(next, (current, edge));
+                queue.push_back(next);
+            }
+        }
+    }
+
+    if !visited.contains(goal.id.as_str()) {
+        return Vec::new();
+    }
+
+    let mut path = Vec::new();
+    let mut cursor = goal.id.as_str();
+    loop {
+        let current = symbol_by_id.get(cursor).copied();
+        if let Some(symbol) = current {
+            let mut step = json!({
+                "symbol_id": symbol.id,
+                "name": symbol.name,
+                "qualified": symbol.qualified,
+                "category": symbol.category,
+            });
+            if let Some(&(prev, edge)) = parent.get(cursor) {
+                step["relation"] = json!(edge.relation);
+                step["evidence"] = json!(edge.evidence);
+                step["confidence"] = json!(edge.confidence);
+                cursor = prev;
+            } else {
+                path.push(step);
+                break;
+            }
+            path.push(step);
+        } else {
+            break;
+        }
+        if cursor == start.id.as_str() {
+            if let Some(symbol) = symbol_by_id.get(cursor) {
+                path.push(json!({
+                    "symbol_id": symbol.id,
+                    "name": symbol.name,
+                    "qualified": symbol.qualified,
+                    "category": symbol.category,
+                }));
+            }
+            break;
+        }
+    }
+    path.reverse();
+    path
 }
 
 #[cfg(test)]
@@ -682,6 +928,8 @@ mod tests {
         let result = trace_execution_path(TraceExecutionPathParams {
             project: dir.path().to_string_lossy().to_string(),
             query: "search".to_string(),
+            source: None,
+            sink: None,
             language: Some("rust".to_string()),
             file: None,
             max_symbols: Some(6),
@@ -710,10 +958,13 @@ mod tests {
             result["summary"]["entry"]["signature"],
             json!("fn search()")
         );
-        assert_eq!(
-            result["path_narrative"],
-            json!("search (entry) -> search_path (orchestration) -> walk_builder (scanning) -> regex_match (matching) -> printer (output)")
-        );
+        assert_eq!(result["path_narrative"], json!("search -> calls printer"));
+        assert!(result["shortest_path"].as_array().unwrap().len() >= 2);
+        assert!(result["edges"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|edge| { edge["evidence"].is_string() && edge["confidence"].as_f64().is_some() }));
         assert_eq!(important[0]["hot_path"], json!(true));
         assert_eq!(important[0]["verified_by_source"], json!(true));
         assert!(important.iter().any(|item| item["snippet"]
@@ -792,6 +1043,8 @@ mod tests {
         let result = trace_execution_path(TraceExecutionPathParams {
             project: dir.path().to_string_lossy().to_string(),
             query: "search".to_string(),
+            source: None,
+            sink: None,
             language: Some("rust".to_string()),
             file: None,
             max_symbols: Some(6),

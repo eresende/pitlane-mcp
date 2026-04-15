@@ -109,6 +109,10 @@ pub struct TraceExecutionPathRequest {
     pub project: String,
     /// Behavior or execution-path intent to trace, e.g. "main regex search execution path"
     pub query: String,
+    /// Optional source hint for source-to-sink tracing.
+    pub source: Option<String>,
+    /// Optional sink hint for source-to-sink tracing.
+    pub sink: Option<String>,
     /// Filter by language ("rust", "python", "javascript", "typescript", "svelte", "c", "cpp", "go", "java", "bash", "csharp", "ruby", "swift", "objc", "php", "zig", "kotlin", "lua", "solidity")
     pub language: Option<String>,
     /// Glob pattern to restrict tracing to specific files
@@ -117,6 +121,120 @@ pub struct TraceExecutionPathRequest {
     pub max_symbols: Option<usize>,
     /// Maximum call-graph expansion depth from the discovered seeds (default: 2)
     pub max_depth: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LocateCodeRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// Code lookup intent or code-path fragment. The server routes this to the most likely discovery primitive.
+    pub query: String,
+    /// Optional routing hint such as "symbol", "file", "content", or "project".
+    pub intent: Option<String>,
+    /// Filter by SymbolKind when looking for a symbol candidate.
+    pub kind: Option<String>,
+    /// Filter by language ("rust", "python", "javascript", "typescript", "svelte", "c", "cpp", "go", "java", "bash", "csharp", "ruby", "swift", "objc", "php", "zig", "kotlin", "lua", "solidity")
+    pub language: Option<String>,
+    /// Restrict lookup to a subtree or file glob when relevant.
+    pub scope: Option<String>,
+    /// Maximum results to return (default: 5)
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReadCodeUnitRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// Stable symbol ID from locate_code/search_symbols.
+    pub symbol_id: Option<String>,
+    /// Path to a file when reading file-level structure or line slices.
+    pub file_path: Option<String>,
+    /// First line to return, 1-indexed inclusive.
+    pub line_start: Option<u32>,
+    /// Last line to return, 1-indexed inclusive.
+    pub line_end: Option<u32>,
+    /// Also include nearby lines when reading a symbol body.
+    pub include_context: Option<bool>,
+    /// Return only the signature and docstring for symbol reads.
+    pub signature_only: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct TracePathRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// Flow or execution-path intent to trace.
+    pub query: String,
+    /// Optional source symbol or source hint.
+    pub source: Option<String>,
+    /// Optional sink symbol or sink hint.
+    pub sink: Option<String>,
+    /// Filter by language ("rust", "python", "javascript", "typescript", "svelte", "c", "cpp", "go", "java", "bash", "csharp", "ruby", "swift", "objc", "php", "zig", "kotlin", "lua", "solidity")
+    pub language: Option<String>,
+    /// Glob pattern to restrict tracing to specific files
+    pub file: Option<String>,
+    /// Maximum important symbols/files to return (default: 6)
+    pub max_symbols: Option<usize>,
+    /// Maximum call-graph expansion depth from the discovered seeds (default: 2)
+    pub max_depth: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AnalyzeImpactRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// Symbol, file, or concept describing the change target.
+    pub query: Option<String>,
+    /// Stable symbol ID to analyze directly.
+    pub symbol_id: Option<String>,
+    /// File path to analyze when the change target is file-centric.
+    pub file_path: Option<String>,
+    /// Restrict caller/usage traversal to a subtree or file glob.
+    pub scope: Option<String>,
+    /// Maximum traversal depth (default: 2)
+    pub depth: Option<usize>,
+    /// Maximum impacted symbols/files to return (default: 8)
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NavigateCodeRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// High-level navigation intent or question.
+    pub query: String,
+    /// Optional routing hint such as "locate", "read", "trace", or "impact".
+    pub intent: Option<String>,
+    /// Stable symbol ID when already known.
+    pub symbol_id: Option<String>,
+    /// File path when already known.
+    pub file_path: Option<String>,
+    /// First line when reading a slice.
+    pub line_start: Option<u32>,
+    /// Last line when reading a slice.
+    pub line_end: Option<u32>,
+    /// Also include nearby lines when reading a symbol body.
+    pub include_context: Option<bool>,
+    /// Return only the signature and docstring for symbol reads.
+    pub signature_only: Option<bool>,
+    /// Optional source symbol or source hint for trace requests.
+    pub source: Option<String>,
+    /// Optional sink symbol or sink hint for trace requests.
+    pub sink: Option<String>,
+    /// Optional kind filter used when locating code.
+    pub kind: Option<String>,
+    /// Optional language filter used when locating code or tracing.
+    pub language: Option<String>,
+    /// Optional subtree or glob scope.
+    pub scope: Option<String>,
+    /// Maximum results to return for locate/impact operations.
+    pub limit: Option<usize>,
+    /// Maximum symbols to retain for trace operations.
+    pub max_symbols: Option<usize>,
+    /// Maximum depth for trace operations.
+    pub max_depth: Option<usize>,
+    /// Maximum depth for impact analysis.
+    pub depth: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -449,6 +567,148 @@ impl PitlaneMcp {
     }
 
     #[tool(
+        description = "Smart code locator that routes ambiguous lookups to the most likely discovery primitive. Use this when you are not sure whether the target is a symbol, file, snippet, or repo subtree. The response normalizes the best candidates and tells you the next tool to call. Prefer this over choosing between search_symbols, search_files, search_content, or get_project_outline yourself.",
+        meta = tool_meta("locate navigate discover symbol file snippet project"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn locate_code(&self, Parameters(req): Parameters<LocateCodeRequest>) -> String {
+        let params = tools::orchestrator::LocateCodeParams {
+            project: req.project,
+            query: req.query,
+            intent: req.intent,
+            kind: req.kind,
+            language: req.language,
+            scope: req.scope,
+            limit: req.limit,
+        };
+        match tools::orchestrator::locate_code(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Read the smallest useful code unit. Pass a symbol_id to fetch an implementation, or a file_path with an optional line range to fetch a file slice. This is the preferred confirmation step after locate_code.",
+        meta = tool_meta("read unit symbol file lines slice"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn read_code_unit(&self, Parameters(req): Parameters<ReadCodeUnitRequest>) -> String {
+        let params = tools::orchestrator::ReadCodeUnitParams {
+            project: req.project,
+            symbol_id: req.symbol_id,
+            file_path: req.file_path,
+            line_start: req.line_start,
+            line_end: req.line_end,
+            include_context: req.include_context,
+            signature_only: req.signature_only,
+        };
+        match tools::orchestrator::read_code_unit(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Trace a call or execution path from source to sink, or let the server infer the likely flow from a behavior question. Use this for path questions, entrypoint-to-effect tracing, and call-chain summaries. If you already know source or sink symbols, include them to strengthen the trace.",
+        meta = tool_meta("trace path flow call chain source sink execution"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn trace_path(&self, Parameters(req): Parameters<TracePathRequest>) -> String {
+        let params = tools::orchestrator::TracePathParams {
+            project: req.project,
+            query: req.query,
+            source: req.source,
+            sink: req.sink,
+            language: req.language,
+            file: req.file,
+            max_symbols: req.max_symbols,
+            max_depth: req.max_depth,
+        };
+        match tools::orchestrator::trace_path(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Estimate the blast radius of a symbol, file, or concept. Returns ranked impacted symbols and files using caller and usage traversal, plus the best follow-up verification targets.",
+        meta = tool_meta("impact blast radius callers usages refactor change"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn analyze_impact(&self, Parameters(req): Parameters<AnalyzeImpactRequest>) -> String {
+        let params = tools::orchestrator::AnalyzeImpactParams {
+            project: req.project,
+            query: req.query,
+            symbol_id: req.symbol_id,
+            file_path: req.file_path,
+            scope: req.scope,
+            depth: req.depth,
+            limit: req.limit,
+        };
+        match tools::orchestrator::analyze_impact(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Umbrella navigation tool. Use this when you want the server to decide whether to locate, read, trace, or analyze impact. It returns the routed result plus the chosen navigation path, which reduces tool thrash when the intent is still fuzzy.",
+        meta = tool_meta("navigate locate read trace impact route intent"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn navigate_code(&self, Parameters(req): Parameters<NavigateCodeRequest>) -> String {
+        let params = tools::orchestrator::NavigateCodeParams {
+            project: req.project,
+            query: req.query,
+            intent: req.intent,
+            symbol_id: req.symbol_id,
+            file_path: req.file_path,
+            line_start: req.line_start,
+            line_end: req.line_end,
+            include_context: req.include_context,
+            signature_only: req.signature_only,
+            source: req.source,
+            sink: req.sink,
+            kind: req.kind,
+            language: req.language,
+            scope: req.scope,
+            limit: req.limit,
+            max_symbols: req.max_symbols,
+            max_depth: req.max_depth,
+            depth: req.depth,
+        };
+        match tools::orchestrator::navigate_code(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
         description = "Trace a likely execution path for a behavior-level question in one step. Use this for requests like \"where is the main regex search path?\" or \"how does request handling flow?\" It performs symbol discovery, follows nearby callers/callees, and returns a compact set of important files, symbols, and edges spanning entry, orchestration, execution, and output layers. Prefer this over manually chaining many search_symbols/get_symbol calls for path questions.",
         meta = tool_meta("trace execution path architecture pipeline call graph flow"),
         annotations(
@@ -465,6 +725,8 @@ impl PitlaneMcp {
         let params = tools::trace_execution_path::TraceExecutionPathParams {
             project: req.project,
             query: req.query,
+            source: req.source,
+            sink: req.sink,
             language: req.language,
             file: req.file,
             max_symbols: req.max_symbols,
@@ -743,10 +1005,11 @@ impl ServerHandler for PitlaneMcp {
             .with_instructions(
                 "pitlane-mcp: AST-based code intelligence. \
                 Prefer ensure_project_ready first — it ensures indexing is done and reports embedding status without waiting. If unavailable in your client flow, call index_project first. \
-                Discovery: search_symbols (find symbols by name or intent), search_content (find literal text or regex snippets in source files), search_files (find repository files by name/path/glob), trace_execution_path (summarize a likely call/execution path for a behavior question), get_file_outline (file structure), get_project_outline (repo overview). \
-                Retrieval: get_symbol (fetch one implementation by ID). \
+                Discovery: locate_code (server-routed lookup for ambiguous symbol/file/snippet/project queries), search_symbols (find symbols by name or intent), search_content (find literal text or regex snippets in source files), search_files (find repository files by name/path/glob), get_project_outline (repo overview). \
+                Reading: read_code_unit (fetch the smallest useful unit), get_symbol (fetch one implementation by ID), get_file_outline (file structure), get_lines (file slices). \
+                Navigation: trace_path (server-routed flow/path tracing), trace_execution_path (explicit behavior/path tracing), analyze_impact (blast-radius analysis). \
                 Analysis: find_callees (direct outgoing references), find_callers (direct incoming references), find_usages (all call sites for a symbol). \
-                Suggested flow: ensure_project_ready, then search_symbols for symbol discovery, search_content when you know text but not the symbol, search_files when you know a file name or path pattern, trace_execution_path for behavior/path questions, then get_symbol to inspect the exact implementation. Call wait_for_embeddings separately only when semantic search must be ready before continuing. \
+                Suggested flow: ensure_project_ready, then use navigate_code or locate_code when the right primitive is unclear; use read_code_unit to confirm a candidate; use trace_path for source-to-sink or call-chain questions; use analyze_impact for refactor/change analysis. Call wait_for_embeddings separately only when semantic search must be ready before continuing. \
                 Maintenance: watch_project (keep index current as files change).",
             )
     }

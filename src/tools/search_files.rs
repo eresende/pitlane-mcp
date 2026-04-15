@@ -10,8 +10,9 @@ use crate::error::ToolError;
 use crate::indexer::load_gitignore_patterns;
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
+use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
-const DEFAULT_LIMIT: usize = 20;
+const DEFAULT_LIMIT: usize = 8;
 
 pub struct SearchFilesParams {
     pub project: String,
@@ -70,9 +71,9 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
     let total = matches.len();
     let page: Vec<FileMatch> = matches.into_iter().skip(offset).take(limit).collect();
     let truncated = offset + page.len() < total;
-
-    let mut response = json!({
-        "results": page.iter().map(|m| {
+    let steering_page = page
+        .iter()
+        .map(|m| {
             json!({
                 "file": m.file,
                 "file_name": m.file_name,
@@ -80,7 +81,11 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
                 "match_type": m.match_type,
                 "score": m.score,
             })
-        }).collect::<Vec<_>>(),
+        })
+        .collect::<Vec<_>>();
+
+    let mut response = json!({
+        "results": steering_page,
         "count": page.len(),
         "query": params.query,
         "mode": mode,
@@ -100,6 +105,34 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
         },
         "avoid": "Avoid shell globbing or find when search_files can locate repository paths directly."
     });
+    let steering = if page.is_empty() {
+        build_steering(
+            0.22,
+            "No strong file match was found, so this is a weak repository-path discovery result.",
+            "search_files",
+            json!({ "query": params.query, "mode": mode }),
+            take_fallback_candidates(&response["results"].as_array().cloned().unwrap_or_default()),
+        )
+    } else {
+        let top = &page[0];
+        build_steering(
+            match mode {
+                "exact" => 0.99,
+                "substring" => 0.88,
+                "fuzzy" => 0.74,
+                "glob" => 0.92,
+                _ => 0.8,
+            },
+            "The top file result matches the requested path intent.".to_string(),
+            "get_file_outline",
+            json!({
+                "file": top.file,
+                "match_type": top.match_type,
+            }),
+            take_fallback_candidates(&response["results"].as_array().cloned().unwrap_or_default()),
+        )
+    };
+    attach_steering(&mut response, steering);
     Ok(response)
 }
 

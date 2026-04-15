@@ -4,13 +4,15 @@ use std::io::{Read, Seek, SeekFrom};
 use crate::index::SymbolIndex;
 use crate::indexer::language::{Symbol, SymbolKind};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DirectReference {
     pub id: String,
     pub name: String,
     pub kind: String,
     pub file: String,
     pub line_start: u32,
+    pub evidence: String,
+    pub confidence: f32,
 }
 
 /// Extract unique identifier tokens from source text.
@@ -56,27 +58,61 @@ pub fn collect_direct_references(
     source_text: &str,
 ) -> Vec<DirectReference> {
     let identifiers = extract_identifiers(source_text);
+    let lines: Vec<&str> = source_text.lines().collect();
     let mut refs: Vec<DirectReference> = index
         .symbols
         .values()
         .filter(|candidate| candidate.id != sym.id && identifiers.contains(candidate.name.as_str()))
-        .map(|candidate| DirectReference {
-            id: candidate.id.clone(),
-            name: candidate.name.clone(),
-            kind: candidate.kind.to_string(),
-            file: candidate.file.to_string_lossy().replace('\\', "/"),
-            line_start: candidate.line_start,
+        .map(|candidate| {
+            let (evidence, confidence) =
+                reference_evidence(&lines, candidate.name.as_str(), &candidate.kind);
+            DirectReference {
+                id: candidate.id.clone(),
+                name: candidate.name.clone(),
+                kind: candidate.kind.to_string(),
+                file: candidate.file.to_string_lossy().replace('\\', "/"),
+                line_start: candidate.line_start,
+                evidence,
+                confidence,
+            }
         })
         .collect();
     refs.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.file.cmp(&b.file))
             .then_with(|| a.line_start.cmp(&b.line_start))
             .then_with(|| a.id.cmp(&b.id))
     });
     refs.dedup_by(|a, b| a.id == b.id);
     refs
+}
+
+fn reference_evidence(lines: &[&str], name: &str, kind: &SymbolKind) -> (String, f32) {
+    for line in lines {
+        if line.contains(name) {
+            let trimmed = line.trim();
+            let confidence = if trimmed.contains('(') && !trimmed.starts_with("//") {
+                if matches!(kind, SymbolKind::Function | SymbolKind::Method) {
+                    0.98
+                } else {
+                    0.9
+                }
+            } else if trimmed.contains("::") {
+                0.86
+            } else {
+                0.8
+            };
+            return (trimmed.chars().take(240).collect::<String>(), confidence);
+        }
+    }
+
+    (
+        format!("identifier `{name}` was extracted from the source text"),
+        0.72,
+    )
 }
 
 pub fn is_callable_kind(kind: &SymbolKind) -> bool {
