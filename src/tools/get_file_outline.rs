@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::path_policy::{resolve_project_file, resolve_project_path};
+use crate::session;
 use crate::tools::index_project::load_project_index;
 
 pub struct GetFileOutlineParams {
@@ -62,11 +63,20 @@ pub async fn get_file_outline(params: GetFileOutlineParams) -> anyhow::Result<Va
     // Sort by line_start
     symbols.sort_by_key(|s| s["line_start"].as_u64().unwrap_or(0));
 
-    Ok(json!({
+    let mut response = json!({
         "file": params.file_path,
         "symbols": symbols,
         "count": symbols.len(),
-    }))
+    });
+    let content_seen = session::record_content(
+        &project_path,
+        "outline",
+        &params.file_path,
+        &serde_json::to_string(&response["symbols"]).unwrap_or_default(),
+    );
+    response["content_seen"] = json!(content_seen);
+
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -126,5 +136,28 @@ mod tests {
 
         let err = err.downcast::<crate::error::ToolError>().unwrap();
         assert!(matches!(err, crate::error::ToolError::AccessDenied { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_get_file_outline_marks_content_seen_on_repeat() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        let project = setup_project(&dir).await;
+
+        let first = get_file_outline(GetFileOutlineParams {
+            project: project.clone(),
+            file_path: "lib.rs".to_string(),
+        })
+        .await
+        .unwrap();
+        let second = get_file_outline(GetFileOutlineParams {
+            project,
+            file_path: "lib.rs".to_string(),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first["content_seen"].as_bool(), Some(false));
+        assert_eq!(second["content_seen"].as_bool(), Some(true));
     }
 }

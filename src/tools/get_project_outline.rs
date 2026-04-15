@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
+use crate::index::format::load_project_meta;
 use crate::indexer::is_excluded_dir_name;
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
@@ -30,11 +31,13 @@ pub struct GetProjectOutlineParams {
 
 pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
+    let project_path = resolve_project_path(&params.project)?;
+    let profile = load_project_meta(&project_path)
+        .ok()
+        .map(|meta| meta.repo_profile);
     let depth = params.depth.unwrap_or(2) as usize;
     let max_dirs = params.max_dirs.unwrap_or(50).min(HARD_MAX_DIRS);
     let summary = params.summary.unwrap_or(false);
-
-    let project_path = resolve_project_path(&params.project)?;
 
     // Normalise the optional path filter to a forward-slash prefix for matching.
     let path_filter: Option<String> = params.path.as_ref().map(|p| {
@@ -94,6 +97,13 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
             "summary": true,
             "directories": dirs_json,
         });
+        if let Some(ref profile) = profile {
+            result["repo_profile"] = json!({
+                "archetype": crate::index::repo_profile::archetype_label(profile.archetype),
+                "role_counts": crate::index::repo_profile::summarize_role_counts(Some(profile)),
+                "entrypoints": profile.entrypoints.clone(),
+            });
+        }
 
         if let Some(ref p) = params.path {
             result["path_filter"] = json!(p);
@@ -220,6 +230,13 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
         "depth": depth,
         "directories": dirs_json,
     });
+    if let Some(ref profile) = profile {
+        result["repo_profile"] = json!({
+            "archetype": crate::index::repo_profile::archetype_label(profile.archetype),
+            "role_counts": crate::index::repo_profile::summarize_role_counts(Some(profile)),
+            "entrypoints": profile.entrypoints.clone(),
+        });
+    }
 
     if let Some(ref p) = params.path {
         result["path_filter"] = json!(p);

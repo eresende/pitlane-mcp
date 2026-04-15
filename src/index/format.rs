@@ -4,6 +4,7 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::index::repo_profile::{build_repo_profile, RepoProfile};
 use crate::index::SymbolIndex;
 use crate::indexer::language::{Symbol, SymbolId};
 
@@ -20,17 +21,31 @@ pub struct IndexMeta {
     pub version: u32,
     pub indexed_at: String,
     pub file_mtimes: HashMap<String, u64>,
+    pub repo_profile: RepoProfile,
 }
 
 impl IndexMeta {
     pub fn new(project_path: &Path) -> Self {
         Self {
             project_path: project_path.display().to_string(),
-            version: 1,
+            version: 2,
             indexed_at: chrono_now(),
             file_mtimes: HashMap::new(),
+            repo_profile: RepoProfile::default(),
         }
     }
+}
+
+pub fn build_index_meta(project_path: &Path, index: &SymbolIndex) -> IndexMeta {
+    let mut meta = IndexMeta::new(project_path);
+    meta.repo_profile = build_repo_profile(project_path, index);
+    meta
+}
+
+pub fn load_project_meta(project_path: &Path) -> anyhow::Result<IndexMeta> {
+    let idx_dir = index_dir(project_path)?;
+    let meta_path = idx_dir.join("meta.json");
+    load_meta(&meta_path)
 }
 
 fn chrono_now() -> String {
@@ -180,13 +195,14 @@ mod tests {
         let meta_path = dir.path().join("meta.json");
 
         let mut meta = IndexMeta::new(dir.path());
+        meta.repo_profile.archetype = crate::index::repo_profile::RepoArchetype::Cli;
         meta.file_mtimes
             .insert("src/foo.rs".to_string(), 1_700_000_000);
 
         save_meta(&meta, &meta_path).unwrap();
         let loaded = load_meta(&meta_path).unwrap();
 
-        assert_eq!(loaded.version, 1);
+        assert_eq!(loaded.version, 2);
         assert_eq!(loaded.file_mtimes["src/foo.rs"], 1_700_000_000);
     }
 

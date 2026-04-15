@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::path_policy::{resolve_project_file, resolve_project_path};
+use crate::session;
 
 /// Maximum lines that can be fetched in a single call.
 const MAX_LINES: u32 = 500;
@@ -45,6 +46,12 @@ pub async fn get_lines(params: GetLinesParams) -> anyhow::Result<Value> {
     let to = effective_end.min(total_lines) as usize;
 
     let source = lines[from..to].join("\n");
+    let content_seen = session::record_content(
+        &project_path,
+        "lines",
+        &format!("{}:{}-{}", params.file_path, params.line_start, to as u32),
+        &source,
+    );
 
     let mut resp = json!({
         "file": params.file_path,
@@ -52,6 +59,7 @@ pub async fn get_lines(params: GetLinesParams) -> anyhow::Result<Value> {
         "line_end": to as u32,   // actual end after clamping
         "total_file_lines": total_lines,
         "source": source,
+        "content_seen": content_seen,
     });
 
     if truncated {
@@ -94,6 +102,32 @@ mod tests {
         assert_eq!(result["source"].as_str().unwrap(), "line2\nline3\nline4");
         assert_eq!(result["line_start"].as_u64().unwrap(), 2);
         assert_eq!(result["line_end"].as_u64().unwrap(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_get_lines_marks_content_seen_on_repeat() {
+        let dir = TempDir::new().unwrap();
+        let project = make_file(&dir, "lib.rs", "line1\nline2\nline3");
+
+        let first = get_lines(GetLinesParams {
+            project: project.clone(),
+            file_path: "lib.rs".to_string(),
+            line_start: 1,
+            line_end: 2,
+        })
+        .await
+        .unwrap();
+        let second = get_lines(GetLinesParams {
+            project,
+            file_path: "lib.rs".to_string(),
+            line_start: 1,
+            line_end: 2,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first["content_seen"].as_bool(), Some(false));
+        assert_eq!(second["content_seen"].as_bool(), Some(true));
     }
 
     #[tokio::test]

@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::embed::EmbedConfig;
 use serde_json::{json, Value};
 
+use crate::index::format::load_project_meta;
+use crate::path_policy::resolve_project_path;
+use crate::session;
 use crate::tools::find_callers::{find_callers, FindCallersParams};
 use crate::tools::find_usages::{find_usages, FindUsagesParams};
 use crate::tools::get_file_outline::{get_file_outline, GetFileOutlineParams};
@@ -164,11 +168,35 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         "results": results,
         "count": results.len(),
     });
+    let canonical = resolve_project_path(&params.project)?;
+    session::record_query(&canonical, &params.query);
+    session::record_files(
+        &canonical,
+        response["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["file"].as_str().map(ToOwned::to_owned)),
+    );
+    session::record_symbols(
+        &canonical,
+        response["results"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let id = item["id"].as_str()?.to_string();
+                let file = item["file"].as_str().map(ToOwned::to_owned);
+                Some((id, file))
+            }),
+    );
     attach_steering(&mut response, steering);
     Ok(response)
 }
 
 pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value> {
+    let canonical = resolve_project_path(&params.project)?;
+
     if let Some(symbol_id) = params.symbol_id {
         let response = get_symbol(GetSymbolParams {
             project: params.project,
@@ -187,13 +215,15 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
     };
 
     if let (Some(line_start), Some(line_end)) = (params.line_start, params.line_end) {
+        let file_path_for_record = file_path.clone();
         let response = get_lines(GetLinesParams {
             project: params.project,
-            file_path,
+            file_path: file_path.clone(),
             line_start,
             line_end,
         })
         .await?;
+        session::record_file(&canonical, Path::new(&file_path_for_record));
         return Ok(response);
     }
 
@@ -221,11 +251,13 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
             take_fallback_candidates(&outline_symbols),
         ),
     );
+    session::record_file(&canonical, Path::new(&file_path));
 
     Ok(response)
 }
 
 pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
+    let canonical = resolve_project_path(&params.project)?;
     let mut query = params.query.trim().to_string();
     let source_hint = params.source.clone();
     let sink_hint = params.sink.clone();
@@ -259,10 +291,35 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
     if let Some(sink) = sink_hint {
         response["sink_hint"] = json!(sink);
     }
+    session::record_query(&canonical, &query);
+    session::record_files(
+        &canonical,
+        response["important_symbols"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["file"].as_str().map(ToOwned::to_owned)),
+    );
+    session::record_symbols(
+        &canonical,
+        response["important_symbols"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let id = item["id"].as_str()?.to_string();
+                let file = item["file"].as_str().map(ToOwned::to_owned);
+                Some((id, file))
+            }),
+    );
     Ok(response)
 }
 
 pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value> {
+    let canonical = resolve_project_path(&params.project)?;
+    let profile = load_project_meta(&canonical)
+        .ok()
+        .map(|meta| meta.repo_profile);
     let depth_limit = params.depth.unwrap_or(2).clamp(1, 3);
     let limit = params.limit.unwrap_or(8).clamp(1, 12);
     let seeds = resolve_impact_seeds(&params).await?;
@@ -308,7 +365,14 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
             let file = caller["file"].as_str().unwrap_or("").to_string();
             let distance = depth + 1;
             let confidence = caller["confidence"].as_f64().unwrap_or(0.72) as f32;
-            let score = impact_score(distance, &file, from_name) + (confidence * 10.0) as i32;
+            let score = impact_score(
+                distance,
+                &file,
+                from_name,
+                &canonical,
+                profile.as_ref(),
+                params.query.as_deref().unwrap_or(""),
+            ) + (confidence * 10.0) as i32;
             let entry = impacted_symbols
                 .entry(from_id.to_string())
                 .or_insert_with(|| ImpactSymbol::new(from_id, from_name, file.clone(), distance));
@@ -352,7 +416,14 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
                 .entry(file.to_string())
                 .or_insert_with(|| ImpactFile::new(file.to_string()))
                 .observe(
-                    92 - depth as i32 * 8,
+                    impact_score(
+                        depth + 1,
+                        file,
+                        usage["symbol_name"].as_str().unwrap_or("usage"),
+                        &canonical,
+                        profile.as_ref(),
+                        params.query.as_deref().unwrap_or(""),
+                    ),
                     confidence,
                     format!("usage at line {line}: {snippet}"),
                 );
@@ -417,6 +488,27 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
             "Caller/usage traversal identified the most likely blast-radius targets."
         },
     });
+    session::record_query(&canonical, params.query.as_deref().unwrap_or(""));
+    session::record_files(
+        &canonical,
+        response["impact_files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["file"].as_str().map(ToOwned::to_owned)),
+    );
+    session::record_symbols(
+        &canonical,
+        response["impact_symbols"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let id = item["id"].as_str()?.to_string();
+                let file = item["file"].as_str().map(ToOwned::to_owned);
+                Some((id, file))
+            }),
+    );
     attach_steering(&mut response, steering);
     Ok(response)
 }
@@ -1056,7 +1148,14 @@ impl ImpactFile {
     }
 }
 
-fn impact_score(distance: usize, file: &str, name: &str) -> i32 {
+fn impact_score(
+    distance: usize,
+    file: &str,
+    name: &str,
+    project_path: &std::path::Path,
+    profile: Option<&crate::index::repo_profile::RepoProfile>,
+    query: &str,
+) -> i32 {
     let mut score = 100 - distance as i32 * 20;
     if file.contains("/tests/") || file.ends_with("_test.rs") || file.ends_with("test.ts") {
         score += 10;
@@ -1064,6 +1163,9 @@ fn impact_score(distance: usize, file: &str, name: &str) -> i32 {
     if name == "main" || name == "run" || name == "build" {
         score -= 10;
     }
+    let file_path = std::path::Path::new(file);
+    score +=
+        crate::index::repo_profile::role_boost_for_path(project_path, file_path, profile, query);
     score
 }
 

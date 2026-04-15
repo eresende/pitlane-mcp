@@ -17,7 +17,9 @@ use tracing::info;
 
 use crate::embed::EmbedConfig;
 use crate::error::ToolError;
-use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMeta};
+use crate::index::format::{
+    build_index_meta, index_dir, load_meta, save_index, save_meta, IndexMeta,
+};
 use crate::index::SymbolIndex;
 use crate::indexer::{
     is_declaration_file, is_excluded_dir_name, is_supported_extension, load_gitignore_patterns,
@@ -303,7 +305,7 @@ async fn do_index_project(
     save_index(&index, &index_path)?;
 
     let canonical_for_meta = canonical.clone();
-    let mut meta = IndexMeta::new(&canonical_for_meta);
+    let mut meta = build_index_meta(&canonical_for_meta, &index);
     meta.file_mtimes = file_mtimes;
     save_meta(&meta, &meta_path)?;
 
@@ -554,6 +556,9 @@ fn current_file_mtimes(
 
 fn is_index_up_to_date(project_path: &Path, meta: &IndexMeta, exclude_patterns: &[String]) -> bool {
     if meta.project_path != project_path.display().to_string() {
+        return false;
+    }
+    if meta.version != 2 {
         return false;
     }
 

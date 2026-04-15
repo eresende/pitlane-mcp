@@ -10,8 +10,11 @@ use crate::embed::store::EmbedStore;
 use crate::embed::EmbedConfig;
 use crate::error::ToolError;
 use crate::index::format::index_dir;
+use crate::index::format::load_project_meta;
+use crate::index::repo_profile::{archetype_label, role_boost_for_path, role_by_path, role_label};
 use crate::indexer::language::{Language, Symbol, SymbolKind};
 use crate::path_policy::resolve_project_path;
+use crate::session;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
@@ -208,6 +211,10 @@ fn semantic_query_timeout_ms() -> u64 {
 
 pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
+    let canonical = resolve_project_path(&params.project)?;
+    let profile = load_project_meta(&canonical)
+        .ok()
+        .map(|meta| meta.repo_profile);
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
     let offset = params.offset.unwrap_or(0);
 
@@ -354,7 +361,11 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 // Sub-task 7: score each symbol present in the store
                 .filter_map(|sym| {
                     let vec = store.vectors.get(&sym.id)?;
-                    let score = cosine_similarity(&query_vec, vec);
+                    let score = cosine_similarity(&query_vec, vec)
+                        + session::symbol_boost(&canonical, &sym.id, Some(sym.file.as_ref()))
+                            as f32
+                            / 100.0
+                        + session::query_boost(&canonical, &params.query) as f32 / 200.0;
                     Some((
                         score,
                         json!({
@@ -399,6 +410,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                     offset + limit
                 ));
             }
+            record_search_session(&canonical, &params.query, &steering_results);
             attach_guidance(&mut resp, mode, &params.query, page.len(), truncated);
             attach_search_steering(&mut resp, mode, &params.query, &steering_results, truncated);
             return Ok(resp);
@@ -421,8 +433,6 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
     // (e.g. first call after upgrade) and the mode wasn't set explicitly.
     // ------------------------------------------------------------------
     if mode == "bm25" {
-        let canonical = resolve_project_path(&params.project)?;
-
         let bm25_result: anyhow::Result<Value> = (|| {
             let tantivy_dir = index_dir(&canonical)?.join("tantivy");
             crate::index::bm25::ensure(&index.symbols, &tantivy_dir)?;
@@ -444,10 +454,10 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 fetch.max(1),
             )?;
 
-            let mut results: Vec<Value> = Vec::new();
+            let mut results: Vec<(i32, Value)> = Vec::new();
             let mut skipped = 0usize;
             let mut truncated = false;
-            for id in ids {
+            for (rank, id) in ids.into_iter().enumerate() {
                 let sym = match index.symbols.get(&id) {
                     Some(s) => s,
                     None => continue,
@@ -479,18 +489,37 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                     truncated = true;
                     break;
                 }
-                results.push(json!({
-                    "id": sym.id,
-                    "name": sym.name,
-                    "qualified": sym.qualified,
-                    "kind": sym.kind.to_string(),
-                    "language": sym.language.to_string(),
-                    "file": sym.file.to_string_lossy().replace('\\', "/"),
-                    "line_start": sym.line_start,
-                    "line_end": sym.line_end,
-                    "signature": sym.signature,
-                }));
+                let mut score = 1000_i32 - rank as i32 * 3;
+                score += role_boost_for_path(
+                    canonical.as_path(),
+                    sym.file.as_ref(),
+                    profile.as_ref(),
+                    &params.query,
+                );
+                score += session::symbol_boost(&canonical, &sym.id, Some(sym.file.as_ref()));
+                results.push((
+                    score,
+                    json!({
+                        "id": sym.id,
+                        "name": sym.name,
+                        "qualified": sym.qualified,
+                        "kind": sym.kind.to_string(),
+                        "language": sym.language.to_string(),
+                        "file": sym.file.to_string_lossy().replace('\\', "/"),
+                        "path_role": role_label(role_by_path(
+                            canonical.as_path(),
+                            sym.file.as_ref(),
+                            profile.as_ref(),
+                        )),
+                        "line_start": sym.line_start,
+                        "line_end": sym.line_end,
+                        "signature": sym.signature,
+                    }),
+                ));
             }
+
+            results.sort_by(|a, b| b.0.cmp(&a.0));
+            let results: Vec<Value> = results.into_iter().map(|(_, v)| v).collect();
 
             let mut resp = json!({
                 "results": results,
@@ -498,6 +527,12 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 "query": params.query,
                 "truncated": truncated,
             });
+            if let Some(ref profile) = profile {
+                resp["repo_profile"] = json!({
+                    "archetype": archetype_label(profile.archetype),
+                    "entrypoints": profile.entrypoints.clone(),
+                });
+            }
             let steering_results = results.clone();
             if truncated {
                 resp["next_page_message"] = json!(format!(
@@ -505,6 +540,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                     offset + limit
                 ));
             }
+            record_search_session(&canonical, &params.query, &steering_results);
             attach_guidance(&mut resp, mode, &params.query, results.len(), truncated);
             attach_search_steering(&mut resp, mode, &params.query, &steering_results, truncated);
             Ok(resp)
@@ -554,7 +590,25 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             candidates.push(sym);
         }
 
-        candidates.sort_by_key(|sym| exact_sort_key(sym));
+        candidates.sort_by(|a, b| {
+            let a_boost = profile
+                .as_ref()
+                .map(|p| role_boost_for_path(&canonical, a.file.as_ref(), Some(p), &params.query))
+                .unwrap_or(0);
+            let b_boost = profile
+                .as_ref()
+                .map(|p| role_boost_for_path(&canonical, b.file.as_ref(), Some(p), &params.query))
+                .unwrap_or(0);
+            let a_session = session::symbol_boost(&canonical, &a.id, Some(a.file.as_ref()))
+                + session::query_boost(&canonical, &params.query);
+            let b_session = session::symbol_boost(&canonical, &b.id, Some(b.file.as_ref()))
+                + session::query_boost(&canonical, &params.query);
+            let a_total = a_boost + a_session;
+            let b_total = b_boost + b_session;
+            b_total
+                .cmp(&a_total)
+                .then_with(|| exact_sort_key(a).cmp(&exact_sort_key(b)))
+        });
 
         let truncated = candidates.len() > offset + limit;
         let page: Vec<_> = candidates
@@ -569,6 +623,11 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                     "kind": sym.kind.to_string(),
                     "language": sym.language.to_string(),
                     "file": sym.file.to_string_lossy().replace('\\', "/"),
+                    "path_role": role_label(role_by_path(
+                        canonical.as_path(),
+                        sym.file.as_ref(),
+                        profile.as_ref(),
+                    )),
                     "line_start": sym.line_start,
                     "line_end": sym.line_end,
                     "signature": sym.signature,
@@ -582,12 +641,19 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             "query": params.query,
             "truncated": truncated,
         });
+        if let Some(ref profile) = profile {
+            resp["repo_profile"] = json!({
+                "archetype": archetype_label(profile.archetype),
+                "entrypoints": profile.entrypoints.clone(),
+            });
+        }
         if truncated {
             resp["next_page_message"] = json!(format!(
                 "More results available. Call again with offset: {}",
                 offset + limit
             ));
         }
+        record_search_session(&canonical, &params.query, &steering_results);
         attach_guidance(&mut resp, mode, &params.query, page.len(), truncated);
         attach_search_steering(&mut resp, mode, &params.query, &steering_results, truncated);
         return Ok(resp);
@@ -626,9 +692,21 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
         .filter_map(|sym| {
             let name_lower = sym.name.to_lowercase();
             let qualified_lower = sym.qualified.to_lowercase();
-            let score = trigram_similarity(&query_lower, &name_lower)
+            let base_score = trigram_similarity(&query_lower, &name_lower)
                 .max(trigram_similarity(&query_lower, &qualified_lower));
-            if score >= FUZZY_THRESHOLD {
+            if base_score >= FUZZY_THRESHOLD {
+                let role_boost = profile
+                    .as_ref()
+                    .map(|p| {
+                        role_boost_for_path(&canonical, sym.file.as_ref(), Some(p), &params.query)
+                    })
+                    .unwrap_or(0) as f32
+                    / 100.0;
+                let score = base_score
+                    + role_boost
+                    + session::symbol_boost(&canonical, &sym.id, Some(sym.file.as_ref())) as f32
+                        / 100.0
+                    + session::query_boost(&canonical, &params.query) as f32 / 200.0;
                 Some((
                     score,
                     json!({
@@ -638,6 +716,11 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                         "kind": sym.kind.to_string(),
                         "language": sym.language.to_string(),
                         "file": sym.file.to_string_lossy().replace('\\', "/"),
+                        "path_role": role_label(role_by_path(
+                            canonical.as_path(),
+                            sym.file.as_ref(),
+                            profile.as_ref(),
+                        )),
                         "line_start": sym.line_start,
                         "line_end": sym.line_end,
                         "signature": sym.signature,
@@ -667,9 +750,34 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
         "fuzzy": true,
         "fuzzy_note": "Results are fuzzy-matched by trigram similarity and ranked by score.",
     });
+    if let Some(ref profile) = profile {
+        resp["repo_profile"] = json!({
+            "archetype": archetype_label(profile.archetype),
+            "entrypoints": profile.entrypoints.clone(),
+        });
+    }
+    record_search_session(&canonical, &params.query, &steering_results);
     attach_guidance(&mut resp, mode, &params.query, page.len(), false);
     attach_search_steering(&mut resp, mode, &params.query, &steering_results, false);
     Ok(resp)
+}
+
+fn record_search_session(project: &Path, query: &str, results: &[Value]) {
+    session::record_query(project, query);
+    session::record_files(
+        project,
+        results
+            .iter()
+            .filter_map(|item| item["file"].as_str().map(ToOwned::to_owned)),
+    );
+    session::record_symbols(
+        project,
+        results.iter().filter_map(|item| {
+            let id = item["id"].as_str()?.to_string();
+            let file = item["file"].as_str().map(ToOwned::to_owned);
+            Some((id, file))
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -677,7 +785,7 @@ mod tests {
     use super::*;
     use crate::embed::store::EmbedStore;
     use crate::embed::EmbedConfig;
-    use crate::index::format::{index_dir, save_index};
+    use crate::index::format::{build_index_meta, index_dir, save_index, save_meta};
     use crate::index::SymbolIndex;
     use crate::indexer::language::{Language, Symbol, SymbolKind};
     use crate::indexer::{registry, Indexer};
@@ -694,6 +802,18 @@ mod tests {
         let idx_dir = index_dir(&canonical).unwrap();
         std::fs::create_dir_all(&idx_dir).unwrap();
         save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let mut meta = build_index_meta(&canonical, &index);
+        meta.file_mtimes.insert(
+            "lib.rs".to_string(),
+            std::fs::metadata(dir.path().join("lib.rs"))
+                .unwrap()
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        );
+        save_meta(&meta, &idx_dir.join("meta.json")).unwrap();
         // Invalidate cache so load_project_index reads from disk.
         crate::cache::invalidate(&canonical);
         dir.path().to_string_lossy().to_string()
@@ -708,6 +828,8 @@ mod tests {
         let idx_dir = index_dir(&canonical).unwrap();
         std::fs::create_dir_all(&idx_dir).unwrap();
         save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let meta = build_index_meta(&canonical, &index);
+        save_meta(&meta, &idx_dir.join("meta.json")).unwrap();
         crate::cache::invalidate(&canonical);
         dir.path().to_string_lossy().to_string()
     }
@@ -958,6 +1080,42 @@ mod tests {
                 "Call get_symbol on the top 1-3 results before launching more discovery searches."
             )
         );
+    }
+
+    #[tokio::test]
+    async fn test_exact_mode_prefers_entrypoint_role() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "pub fn hello() {}\n").unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let meta = build_index_meta(&canonical, &index);
+        save_meta(&meta, &idx_dir.join("meta.json")).unwrap();
+        crate::cache::invalidate(&canonical);
+
+        let result = search_symbols(SearchSymbolsParams {
+            project: dir.path().to_string_lossy().to_string(),
+            query: "hello".to_string(),
+            kind: None,
+            language: None,
+            file: None,
+            limit: Some(2),
+            offset: Some(0),
+            mode: Some("exact".to_string()),
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["results"][0]["path_role"], json!("entrypoint"));
+        assert!(result["results"][0]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("main.rs"));
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 pub mod bm25;
 pub mod format;
+pub mod repo_profile;
 
 use crate::indexer::language::{Language, Symbol, SymbolId, SymbolKind};
 use std::collections::HashMap;

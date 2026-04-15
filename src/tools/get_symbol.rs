@@ -1,9 +1,11 @@
 use serde_json::{json, Value};
+use std::path::Path;
 
 use crate::error::ToolError;
 use crate::graph::{collect_direct_references, read_symbol_source};
 use crate::indexer::language::SymbolKind;
 use crate::path_policy::resolve_project_path;
+use crate::session;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
@@ -41,6 +43,13 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
     if use_signature_only {
         let returned_bytes = sym.signature.as_deref().unwrap_or("").len() as u64
             + sym.doc.as_deref().unwrap_or("").len() as u64;
+        let content = format!(
+            "{}\n{}",
+            sym.signature.as_deref().unwrap_or(""),
+            sym.doc.as_deref().unwrap_or("")
+        );
+        let content_seen =
+            session::record_content(Path::new(&canonical_project), "symbol", &sym.id, &content);
         let mut response = json!({
             "id": sym.id,
             "name": sym.name,
@@ -52,13 +61,19 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             "line_end": sym.line_end,
             "signature": sym.signature,
             "doc": sym.doc,
+            "content_seen": content_seen,
         });
         attach_steering(
             &mut response,
             build_steering(
-                0.84,
-                "The symbol shape and documentation were returned without reading the full body."
-                    .to_string(),
+                if content_seen { 0.72 } else { 0.84 },
+                if content_seen {
+                    "The symbol shape and documentation were already returned in this session, so this is a repeat read."
+                        .to_string()
+                } else {
+                    "The symbol shape and documentation were returned without reading the full body."
+                        .to_string()
+                },
                 "find_usages",
                 json!({
                     "symbol_id": sym.id,
@@ -73,6 +88,11 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             true,
             full_source_bytes,
             returned_bytes,
+        );
+        session::record_symbol(
+            Path::new(&canonical_project),
+            &sym.id,
+            Some(sym.file.as_ref()),
         );
         return Ok(response);
     }
@@ -117,21 +137,35 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         "source": source_text,
         "signature": sym.signature,
         "doc": sym.doc,
+        "content_seen": session::record_content(
+            Path::new(&canonical_project),
+            "symbol",
+            &sym.id,
+            &source_text,
+        ),
         "references": refs,
         "references_truncated": references_truncated,
     });
+    let content_seen = response["content_seen"].as_bool().unwrap_or(false);
     attach_steering(
         &mut response,
         build_steering(
-            if references_truncated {
+            if content_seen {
+                0.76
+            } else if references_truncated {
                 0.86
             } else if has_references {
                 0.9
             } else {
                 0.72
             },
-            "The symbol body was read and direct identifier references were extracted for local expansion."
-                .to_string(),
+            if content_seen {
+                "The symbol body was already returned in this session, so this read is a repeat."
+                    .to_string()
+            } else {
+                "The symbol body was read and direct identifier references were extracted for local expansion."
+                    .to_string()
+            },
             "find_usages",
             json!({
                 "symbol_id": sym.id,
@@ -140,6 +174,11 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             }),
             take_fallback_candidates(&steering_refs),
         ),
+    );
+    session::record_symbol(
+        Path::new(&canonical_project),
+        &sym.id,
+        Some(sym.file.as_ref()),
     );
 
     Ok(response)
@@ -212,6 +251,35 @@ mod tests {
 
         assert!(result.get("source").is_some(), "source should be present");
         assert_eq!(result["source"].as_str().unwrap(), "pub fn hello() {}");
+    }
+
+    /// Repeating the same symbol read should mark the content as seen.
+    #[tokio::test]
+    async fn test_repeated_symbol_read_marks_content_seen() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn hello() {}").unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = first_symbol_id(&project);
+
+        let first = get_symbol(GetSymbolParams {
+            project: project.clone(),
+            symbol_id: symbol_id.clone(),
+            include_context: None,
+            signature_only: None,
+        })
+        .await
+        .unwrap();
+        let second = get_symbol(GetSymbolParams {
+            project,
+            symbol_id,
+            include_context: None,
+            signature_only: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first["content_seen"].as_bool(), Some(false));
+        assert_eq!(second["content_seen"].as_bool(), Some(true));
     }
 
     /// signature_only captures the doc comment stored in the index.

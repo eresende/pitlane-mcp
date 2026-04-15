@@ -7,8 +7,11 @@ use serde_json::{json, Value};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::error::ToolError;
+use crate::index::format::load_project_meta;
+use crate::index::repo_profile::{archetype_label, role_boost_for_path, role_by_path, role_label};
 use crate::indexer::load_gitignore_patterns;
 use crate::path_policy::resolve_project_path;
+use crate::session;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
@@ -35,6 +38,9 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
 
     let canonical = resolve_project_path(&params.project)?;
     let _index = load_project_index(&params.project)?;
+    let profile = load_project_meta(&canonical)
+        .ok()
+        .map(|meta| meta.repo_profile);
 
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
     let offset = params.offset.unwrap_or(0);
@@ -64,6 +70,8 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
         scope_glob.as_ref(),
         language_filter,
         &matcher,
+        profile.as_ref(),
+        &params.query,
     )?;
 
     matches.sort_by(compare_matches);
@@ -80,6 +88,7 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
                 "extension": m.extension,
                 "match_type": m.match_type,
                 "score": m.score,
+                "path_role": m.path_role.as_deref().unwrap_or("unknown"),
             })
         })
         .collect::<Vec<_>>();
@@ -91,6 +100,12 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
         "mode": mode,
         "truncated": truncated,
     });
+    if let Some(ref profile) = profile {
+        response["repo_profile"] = json!({
+            "archetype": archetype_label(profile.archetype),
+            "entrypoints": profile.entrypoints.clone(),
+        });
+    }
     if truncated {
         response["next_page_message"] = json!(format!(
             "More files available. Call again with offset: {}",
@@ -132,6 +147,11 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
             take_fallback_candidates(&response["results"].as_array().cloned().unwrap_or_default()),
         )
     };
+    session::record_query(&canonical, &params.query);
+    session::record_files(
+        &canonical,
+        page.iter().map(|m| m.file.clone()).collect::<Vec<_>>(),
+    );
     attach_steering(&mut response, steering);
     Ok(response)
 }
@@ -143,6 +163,7 @@ struct FileMatch {
     extension: String,
     match_type: String,
     score: f32,
+    path_role: Option<String>,
 }
 
 enum FileMatcher {
@@ -240,6 +261,8 @@ fn collect_files(
     scope_glob: Option<&globset::GlobMatcher>,
     language_filter: Option<&[&str]>,
     matcher: &FileMatcher,
+    profile: Option<&crate::index::repo_profile::RepoProfile>,
+    query: &str,
 ) -> anyhow::Result<Vec<FileMatch>> {
     let mut files = Vec::new();
     for entry in WalkDir::new(root)
@@ -277,6 +300,11 @@ fn collect_files(
         let Some((score, match_type)) = matcher.matches(&rel_str, file_name) else {
             continue;
         };
+        let role = role_by_path(root, path, profile);
+        let score = score
+            + role_boost_for_path(root, path, profile, query) as f32
+            + session::file_boost(root, path) as f32
+            + session::query_boost(root, query) as f32 / 2.0;
 
         files.push(FileMatch {
             file: rel_str,
@@ -284,6 +312,7 @@ fn collect_files(
             extension: extension.to_string(),
             match_type: match_type.to_string(),
             score,
+            path_role: Some(role_label(role).to_string()),
         });
     }
     Ok(files)
@@ -385,7 +414,7 @@ fn should_descend(root: &Path, exclude_set: &GlobSet, entry: &DirEntry) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::format::{index_dir, save_index};
+    use crate::index::format::{build_index_meta, index_dir, save_index, save_meta};
     use crate::indexer::{registry, Indexer};
     use tempfile::TempDir;
 
@@ -396,6 +425,8 @@ mod tests {
         let idx_dir = index_dir(&canonical).unwrap();
         std::fs::create_dir_all(&idx_dir).unwrap();
         save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let meta = build_index_meta(&canonical, &index);
+        save_meta(&meta, &idx_dir.join("meta.json")).unwrap();
         crate::cache::invalidate(&canonical);
         dir.path().to_string_lossy().to_string()
     }
@@ -435,6 +466,7 @@ mod tests {
             json!("tests/ImmutableListTest.java")
         );
         assert_eq!(result["results"][0]["match_type"], json!("name_substring"));
+        assert_eq!(result["results"][0]["path_role"], json!("test"));
     }
 
     #[tokio::test]

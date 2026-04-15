@@ -5,6 +5,8 @@ use serde_json::{json, Value};
 use crate::embed::store::EmbedStore;
 use crate::embed::EmbedConfig;
 use crate::index::format::index_dir;
+use crate::index::format::load_project_meta;
+use crate::index::repo_profile::{archetype_label, summarize_role_counts};
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering};
@@ -42,6 +44,9 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
     let total_symbols = index.symbol_count();
     let embed_config = EmbedConfig::from_env();
     let canonical = resolve_project_path(&params.project)?;
+    let profile = load_project_meta(&canonical)
+        .ok()
+        .map(|meta| meta.repo_profile);
     let idx_dir = index_dir(&canonical)?;
     let store_path = idx_dir.join("embeddings.bin");
 
@@ -90,6 +95,16 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
     if let Some(pct) = embeddings_percent {
         result.insert("embeddings_percent".into(), json!(pct));
     }
+    if let Some(ref profile) = profile {
+        result.insert(
+            "repo_profile".into(),
+            json!({
+                "archetype": archetype_label(profile.archetype),
+                "role_counts": summarize_role_counts(Some(profile)),
+                "entrypoints": profile.entrypoints.clone(),
+            }),
+        );
+    }
 
     let steering = build_steering(
         0.58,
@@ -108,7 +123,7 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::index::format::{index_dir, save_index};
+    use crate::index::format::{build_index_meta, index_dir, save_index, save_meta};
     use crate::indexer::{registry, Indexer};
     use tempfile::TempDir;
     use tokio::sync::Mutex;
@@ -123,6 +138,8 @@ mod tests {
         let idx_dir = index_dir(&canonical).unwrap();
         std::fs::create_dir_all(&idx_dir).unwrap();
         save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let meta = build_index_meta(&canonical, &index);
+        save_meta(&meta, &idx_dir.join("meta.json")).unwrap();
         dir.path().to_string_lossy().to_string()
     }
 
@@ -149,6 +166,7 @@ mod tests {
         assert!(result["by_language"]["rust"].as_u64().unwrap() > 0);
         assert!(result["by_kind"]["function"].as_u64().unwrap() > 0);
         assert!(result["by_kind"]["struct"].as_u64().unwrap() > 0);
+        assert_eq!(result["repo_profile"]["archetype"], json!("library"));
 
         // Embedding fields: env vars not set → disabled, no progress fields
         assert_eq!(result["embeddings"].as_str().unwrap(), "disabled");

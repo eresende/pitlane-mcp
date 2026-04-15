@@ -5,8 +5,12 @@ use serde_json::{json, Value};
 
 use crate::embed::EmbedConfig;
 use crate::graph::{collect_direct_callable_references, is_callable_kind, read_symbol_source};
+use crate::index::format::load_project_meta;
+use crate::index::repo_profile::role_boost_for_path;
 use crate::index::SymbolIndex;
 use crate::indexer::language::Symbol;
+use crate::path_policy::resolve_project_path;
+use crate::session;
 use crate::tools::index_project::load_project_index;
 use crate::tools::search_symbols::{search_symbols, SearchSymbolsParams};
 use crate::tools::steering::{attach_steering, build_steering};
@@ -46,8 +50,17 @@ struct TraceEdge {
     confidence: f32,
 }
 
+struct TraceContext<'a> {
+    project_path: &'a std::path::Path,
+    profile: Option<&'a crate::index::repo_profile::RepoProfile>,
+}
+
 pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::Result<Value> {
     let index = load_project_index(&params.project)?;
+    let canonical = resolve_project_path(&params.project)?;
+    let profile = load_project_meta(&canonical)
+        .ok()
+        .map(|meta| meta.repo_profile);
     let max_symbols = params.max_symbols.unwrap_or(DEFAULT_MAX_SYMBOLS).max(1);
     let max_depth = params.max_depth.unwrap_or(DEFAULT_MAX_DEPTH).min(3);
 
@@ -55,6 +68,10 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
     let mut nodes: HashMap<String, TraceNode> = HashMap::new();
     let mut edges: Vec<TraceEdge> = Vec::new();
     let mut seen_edges: HashSet<(String, String, &'static str)> = HashSet::new();
+    let trace_ctx = TraceContext {
+        project_path: &canonical,
+        profile: profile.as_ref(),
+    };
 
     let seeds: Vec<&Symbol> = seed_ids
         .iter()
@@ -65,13 +82,21 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
         upsert_node(
             &mut nodes,
             seed,
-            adjusted_score(seed, 100),
+            adjusted_score(seed, 100, &params.query, profile.as_ref(), &canonical),
             classify_symbol(seed),
             0,
             1.0,
             "discovered as a strong seed for the requested behavior".to_string(),
         );
-        trace_callers(&index, seed, &mut nodes, &mut edges, &mut seen_edges, 0);
+        trace_callers(
+            &index,
+            seed,
+            &mut nodes,
+            &mut edges,
+            &mut seen_edges,
+            &trace_ctx,
+            0,
+        );
         trace_callees(
             &index,
             seed,
@@ -79,6 +104,7 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
             &mut nodes,
             &mut edges,
             &mut seen_edges,
+            &trace_ctx,
         );
     }
 
@@ -164,6 +190,27 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
             "answer_now_hint": "Prefer answering from the returned important_symbols, edges, and summary before doing more discovery."
         }
     });
+    session::record_query(&canonical, &params.query);
+    session::record_files(
+        &canonical,
+        response["important_symbols"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["file"].as_str().map(ToOwned::to_owned)),
+    );
+    session::record_symbols(
+        &canonical,
+        response["important_symbols"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| {
+                let id = item["id"].as_str()?.to_string();
+                let file = item["file"].as_str().map(ToOwned::to_owned);
+                Some((id, file))
+            }),
+    );
     attach_steering(&mut response, steering);
 
     Ok(response)
@@ -250,6 +297,7 @@ fn trace_callers(
     nodes: &mut HashMap<String, TraceNode>,
     edges: &mut Vec<TraceEdge>,
     seen_edges: &mut HashSet<(String, String, &'static str)>,
+    ctx: &TraceContext<'_>,
     depth: usize,
 ) {
     if depth > 1 {
@@ -274,6 +322,9 @@ fn trace_callers(
                 adjusted_score(
                     candidate,
                     90 - depth as i32 * 10 + (reference.confidence * 10.0) as i32,
+                    &seed.qualified,
+                    ctx.profile,
+                    ctx.project_path,
                 ),
                 classify_symbol(candidate),
                 depth + 1,
@@ -303,6 +354,7 @@ fn trace_callees(
     nodes: &mut HashMap<String, TraceNode>,
     edges: &mut Vec<TraceEdge>,
     seen_edges: &mut HashSet<(String, String, &'static str)>,
+    ctx: &TraceContext<'_>,
 ) {
     let mut queue = VecDeque::from([(seed.id.clone(), 0usize)]);
     let mut seen = HashSet::from([seed.id.clone()]);
@@ -331,6 +383,9 @@ fn trace_callees(
                 adjusted_score(
                     target,
                     80 - depth as i32 * 10 + (reference.confidence * 10.0) as i32,
+                    &current.qualified,
+                    ctx.profile,
+                    ctx.project_path,
                 ),
                 classify_symbol(target),
                 depth + 1,
@@ -467,7 +522,13 @@ fn is_noise_symbol(sym: &Symbol) -> bool {
         || file.contains("generated")
 }
 
-fn adjusted_score(sym: &Symbol, base: i32) -> i32 {
+fn adjusted_score(
+    sym: &Symbol,
+    base: i32,
+    query: &str,
+    profile: Option<&crate::index::repo_profile::RepoProfile>,
+    project_path: &std::path::Path,
+) -> i32 {
     let mut score = base;
     if is_noise_symbol(sym) {
         score -= 40;
@@ -484,6 +545,7 @@ fn adjusted_score(sym: &Symbol, base: i32) -> i32 {
     {
         score += 8;
     }
+    score += role_boost_for_path(project_path, sym.file.as_ref(), profile, query);
     score
 }
 
