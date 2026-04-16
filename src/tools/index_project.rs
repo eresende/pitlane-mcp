@@ -558,7 +558,7 @@ fn is_index_up_to_date(project_path: &Path, meta: &IndexMeta, exclude_patterns: 
     if meta.project_path != project_path.display().to_string() {
         return false;
     }
-    if meta.version != 2 {
+    if meta.version != 3 {
         return false;
     }
 

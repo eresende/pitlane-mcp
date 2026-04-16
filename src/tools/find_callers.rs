@@ -4,9 +4,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::{json, Value};
 
 use crate::error::ToolError;
-use crate::graph::{
-    collect_direct_callable_references, is_callable_kind, is_low_signal_name, read_symbol_source,
-};
+use crate::graph::collect_incoming_callable_references;
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
@@ -43,37 +41,25 @@ pub async fn find_callers(params: FindCallersParams) -> anyhow::Result<Value> {
     });
 
     let mut callers = Vec::new();
-    for candidate in index.symbols.values() {
-        if candidate.id == sym.id {
+    for caller in collect_incoming_callable_references(&index, sym) {
+        let Some(candidate) = index.symbols.get(&caller.id) else {
             continue;
-        }
-        if !is_callable_kind(&candidate.kind) || is_low_signal_name(&candidate.name) {
-            continue;
-        }
-
+        };
         let path = candidate.file.as_ref().as_path();
         if !matches_scope(path, &project_path, scope_set.as_ref()) {
             continue;
         }
-
-        let source_text = match read_symbol_source(candidate, false) {
-            Ok(source) => source,
-            Err(_) => continue,
-        };
-        let direct_refs = collect_direct_callable_references(&index, candidate, &source_text);
-        if let Some(reference) = direct_refs.iter().find(|reference| reference.id == sym.id) {
-            callers.push(json!({
-                "edge_kind": "calls",
-                "from_id": candidate.id,
-                "from_name": candidate.name,
-                "from_kind": candidate.kind.to_string(),
-                "file": candidate.file.to_string_lossy().replace('\\', "/"),
-                "line_start": candidate.line_start,
-                "reason": "indexed symbol source references the target symbol",
-                "evidence": reference.evidence,
-                "confidence": reference.confidence,
-            }));
-        }
+        callers.push(json!({
+            "edge_kind": "calls",
+            "from_id": candidate.id,
+            "from_name": candidate.name,
+            "from_kind": candidate.kind.to_string(),
+            "file": candidate.file.to_string_lossy().replace('\\', "/"),
+            "line_start": candidate.line_start,
+            "reason": "indexed navigation graph links the caller to the target symbol",
+            "evidence": caller.evidence,
+            "confidence": caller.confidence,
+        }));
     }
 
     callers.sort_by(|a, b| {

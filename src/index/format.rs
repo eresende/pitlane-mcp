@@ -4,13 +4,20 @@ use std::path::Path;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
+use crate::graph::NavigationGraph;
 use crate::index::repo_profile::{build_repo_profile, RepoProfile};
 use crate::index::SymbolIndex;
 use crate::indexer::language::{Symbol, SymbolId};
 
-/// Serializable form of index - only contains the symbols map
+/// Serializable form of index.
 #[derive(Serialize, Deserialize)]
 struct IndexOnDisk {
+    symbols: HashMap<SymbolId, Symbol>,
+    graph: NavigationGraph,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LegacyIndexOnDisk {
     symbols: HashMap<SymbolId, Symbol>,
 }
 
@@ -28,7 +35,7 @@ impl IndexMeta {
     pub fn new(project_path: &Path) -> Self {
         Self {
             project_path: project_path.display().to_string(),
-            version: 2,
+            version: 3,
             indexed_at: chrono_now(),
             file_mtimes: HashMap::new(),
             repo_profile: RepoProfile::default(),
@@ -61,6 +68,7 @@ fn chrono_now() -> String {
 pub fn save_index(index: &SymbolIndex, index_path: &Path) -> anyhow::Result<()> {
     let on_disk = IndexOnDisk {
         symbols: index.symbols.clone(),
+        graph: index.graph.clone(),
     };
 
     let encoded = bincode::serde::encode_to_vec(&on_disk, bincode::config::standard())
@@ -77,15 +85,27 @@ pub fn save_index(index: &SymbolIndex, index_path: &Path) -> anyhow::Result<()> 
 pub fn load_index(index_path: &Path) -> anyhow::Result<SymbolIndex> {
     let bytes = std::fs::read(index_path).context("Failed to read index file")?;
 
-    let (on_disk, _): (IndexOnDisk, _) =
-        bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
-            .context("Failed to decode index")?;
+    let on_disk = bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+        .map(|(on_disk, _): (IndexOnDisk, _)| on_disk)
+        .or_else(|_| {
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).map(
+                |(legacy, _): (LegacyIndexOnDisk, _)| IndexOnDisk {
+                    symbols: legacy.symbols,
+                    graph: NavigationGraph::default(),
+                },
+            )
+        })
+        .context("Failed to decode index")?;
 
     let mut index = SymbolIndex {
         symbols: on_disk.symbols,
+        graph: on_disk.graph,
         ..Default::default()
     };
     index.rebuild_secondary_indexes();
+    if !index.graph.built {
+        index.rebuild_navigation_graph();
+    }
 
     Ok(index)
 }
@@ -129,6 +149,7 @@ fn dirs_home() -> anyhow::Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::{EdgeRelation, NavigationEdge};
     use crate::index::SymbolIndex;
     use crate::indexer::language::{make_symbol_id, Language, Symbol, SymbolKind};
     use std::sync::Arc;
@@ -175,6 +196,46 @@ mod tests {
     }
 
     #[test]
+    fn test_save_load_index_roundtrip_preserves_graph() {
+        let dir = TempDir::new().unwrap();
+        let index_path = dir.path().join("index.bin");
+
+        let mut index = SymbolIndex::new();
+        let sym1 = make_test_symbol("hello");
+        let sym2 = make_test_symbol("world");
+        let id1 = sym1.id.clone();
+        let id2 = sym2.id.clone();
+        index.insert(sym1);
+        index.insert(sym2);
+        index.graph.built = true;
+        index.graph.outgoing.insert(
+            id1.clone(),
+            vec![NavigationEdge {
+                symbol_id: id2.clone(),
+                relation: EdgeRelation::Calls,
+                evidence: "world();".to_string(),
+                confidence: 0.98,
+            }],
+        );
+        index.graph.incoming.insert(
+            id2.clone(),
+            vec![NavigationEdge {
+                symbol_id: id1.clone(),
+                relation: EdgeRelation::Calls,
+                evidence: "world();".to_string(),
+                confidence: 0.98,
+            }],
+        );
+
+        save_index(&index, &index_path).unwrap();
+        let loaded = load_index(&index_path).unwrap();
+
+        assert!(loaded.graph.built);
+        assert_eq!(loaded.graph.outgoing[&id1][0].symbol_id, id2);
+        assert_eq!(loaded.graph.incoming[&id2][0].symbol_id, id1);
+    }
+
+    #[test]
     fn test_load_index_rebuilds_secondary_indexes() {
         let dir = TempDir::new().unwrap();
         let index_path = dir.path().join("index.bin");
@@ -202,7 +263,7 @@ mod tests {
         save_meta(&meta, &meta_path).unwrap();
         let loaded = load_meta(&meta_path).unwrap();
 
-        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.version, 3);
         assert_eq!(loaded.file_mtimes["src/foo.rs"], 1_700_000_000);
     }
 

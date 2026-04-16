@@ -1,15 +1,15 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
 use crate::embed::EmbedConfig;
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::{json, Value};
 
+use crate::graph::{edge_evidence_quality, navigation_edge_metrics, EdgeRelation};
 use crate::index::format::load_project_meta;
 use crate::path_policy::resolve_project_path;
 use crate::session;
-use crate::tools::find_callers::{find_callers, FindCallersParams};
-use crate::tools::find_usages::{find_usages, FindUsagesParams};
 use crate::tools::get_file_outline::{get_file_outline, GetFileOutlineParams};
 use crate::tools::get_lines::{get_lines, GetLinesParams};
 use crate::tools::get_project_outline::{get_project_outline, GetProjectOutlineParams};
@@ -316,12 +316,15 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
 }
 
 pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value> {
+    let index = load_project_index(&params.project)?;
     let canonical = resolve_project_path(&params.project)?;
     let profile = load_project_meta(&canonical)
         .ok()
         .map(|meta| meta.repo_profile);
     let depth_limit = params.depth.unwrap_or(2).clamp(1, 3);
     let limit = params.limit.unwrap_or(8).clamp(1, 12);
+    let query = params.query.as_deref().unwrap_or("");
+    let scope_set = build_scope_set(params.scope.as_deref());
     let seeds = resolve_impact_seeds(&params).await?;
     if seeds.is_empty() {
         return Err(anyhow::anyhow!(
@@ -331,102 +334,72 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
 
     let mut impacted_symbols: HashMap<String, ImpactSymbol> = HashMap::new();
     let mut impacted_files: HashMap<String, ImpactFile> = HashMap::new();
-    let mut queue: VecDeque<(String, usize, String)> = VecDeque::new();
-    let mut seen: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<(String, usize, i32, String)> = VecDeque::new();
+    let mut best_paths: HashMap<String, i32> = HashMap::new();
 
     for seed in &seeds {
-        queue.push_back((seed.id.clone(), 0, "seed".to_string()));
-        seen.insert(seed.id.clone());
+        queue.push_back((seed.id.clone(), 0, 120, "seed".to_string()));
+        best_paths.insert(seed.id.clone(), 120);
         impacted_files
             .entry(seed.file.clone())
             .or_insert_with(|| ImpactFile::new(seed.file.clone()))
             .observe(100, 1.0, "seed symbol");
     }
 
-    while let Some((symbol_id, depth, provenance)) = queue.pop_front() {
+    while let Some((symbol_id, depth, path_score, provenance)) = queue.pop_front() {
         if depth >= depth_limit {
             continue;
         }
 
-        let callers = find_callers(FindCallersParams {
-            project: params.project.clone(),
-            symbol_id: symbol_id.clone(),
-            scope: params.scope.clone(),
-            limit: Some(12),
-            offset: Some(0),
-        })
-        .await?;
-
-        for caller in callers["callers"].as_array().into_iter().flatten() {
-            let Some(from_id) = caller["from_id"].as_str() else {
-                continue;
-            };
-            let from_name = caller["from_name"].as_str().unwrap_or(from_id);
-            let file = caller["file"].as_str().unwrap_or("").to_string();
+        for neighbor in collect_impact_neighbors(&index, &symbol_id, &canonical, scope_set.as_ref())
+        {
             let distance = depth + 1;
-            let confidence = caller["confidence"].as_f64().unwrap_or(0.72) as f32;
-            let score = impact_score(
-                distance,
-                &file,
-                from_name,
-                &canonical,
-                profile.as_ref(),
-                params.query.as_deref().unwrap_or(""),
-            ) + (confidence * 10.0) as i32;
+            let score = impact_edge_score(distance, &neighbor, &canonical, profile.as_ref(), query);
+            let next_path_score = path_score + score - (distance as i32 * 8);
+            let reason = format!(
+                "{} {}: {}",
+                neighbor.direction_label(),
+                neighbor.relation.as_str(),
+                neighbor.evidence
+            );
             let entry = impacted_symbols
-                .entry(from_id.to_string())
-                .or_insert_with(|| ImpactSymbol::new(from_id, from_name, file.clone(), distance));
+                .entry(neighbor.id.clone())
+                .or_insert_with(|| {
+                    ImpactSymbol::new(
+                        &neighbor.id,
+                        &neighbor.name,
+                        neighbor.kind.clone(),
+                        neighbor.file.clone(),
+                        distance,
+                    )
+                });
             entry.observe(
                 score,
                 distance,
-                confidence,
-                "direct caller",
+                neighbor.confidence.max(neighbor.evidence_quality),
+                reason.clone(),
                 provenance.clone(),
             );
             impacted_files
-                .entry(file.clone())
-                .or_insert_with(|| ImpactFile::new(file.clone()))
-                .observe(score, confidence, format!("direct caller of {}", symbol_id));
-            if seen.insert(from_id.to_string()) {
+                .entry(neighbor.file.clone())
+                .or_insert_with(|| ImpactFile::new(neighbor.file.clone()))
+                .observe(
+                    score,
+                    neighbor.confidence.max(neighbor.evidence_quality),
+                    reason.clone(),
+                );
+            let should_expand = best_paths
+                .get(&neighbor.id)
+                .is_none_or(|best| next_path_score > *best);
+            if should_expand {
+                best_paths.insert(neighbor.id.clone(), next_path_score);
                 queue.push_back((
-                    from_id.to_string(),
+                    neighbor.id.clone(),
                     distance,
-                    format!("direct caller of {}", symbol_id),
+                    next_path_score,
+                    format!("{} of {}", neighbor.direction_label(), symbol_id),
                 ));
             }
-        }
-
-        let usages = find_usages(FindUsagesParams {
-            project: params.project.clone(),
-            symbol_id: symbol_id.clone(),
-            scope: params.scope.clone(),
-            limit: Some(12),
-            offset: Some(0),
-        })
-        .await?;
-
-        for usage in usages["usages"].as_array().into_iter().flatten() {
-            let Some(file) = usage["file"].as_str() else {
-                continue;
-            };
-            let line = usage["line"].as_u64().unwrap_or(0) as u32;
-            let snippet = usage["snippet"].as_str().unwrap_or("").to_string();
-            let confidence = 0.78_f32;
-            impacted_files
-                .entry(file.to_string())
-                .or_insert_with(|| ImpactFile::new(file.to_string()))
-                .observe(
-                    impact_score(
-                        depth + 1,
-                        file,
-                        usage["symbol_name"].as_str().unwrap_or("usage"),
-                        &canonical,
-                        profile.as_ref(),
-                        params.query.as_deref().unwrap_or(""),
-                    ),
-                    confidence,
-                    format!("usage at line {line}: {snippet}"),
-                );
         }
     }
 
@@ -446,7 +419,7 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
     let steering = if symbol_values.is_empty() {
         build_steering(
             0.28,
-            "No strong blast-radius candidates were recovered from caller and usage traversal."
+            "No strong blast-radius candidates were recovered from weighted graph traversal."
                 .to_string(),
             "locate_code",
             json!({ "query": params.query, "symbol_id": params.symbol_id, "file_path": params.file_path }),
@@ -455,7 +428,7 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
     } else {
         build_steering(
             0.9,
-            "Caller and usage traversal produced a ranked blast-radius view.".to_string(),
+            "Weighted graph traversal produced a ranked blast-radius view.".to_string(),
             "read_code_unit",
             json!({
                 "symbol_id": symbol_values[0].id,
@@ -482,13 +455,14 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
         "depth_limit": depth_limit,
         "impact_symbols": symbol_values.iter().map(|s| s.to_json()).collect::<Vec<_>>(),
         "impact_files": file_values.iter().map(|f| f.to_json()).collect::<Vec<_>>(),
+        "edge_provenance_summary": build_edge_provenance_summary(&symbol_values, &file_values),
         "summary": if symbol_values.is_empty() {
-            "No significant callers/usages were found."
+            "No significant weighted graph neighbors were found."
         } else {
-            "Caller/usage traversal identified the most likely blast-radius targets."
+            "Weighted graph traversal identified the most likely blast-radius targets."
         },
     });
-    session::record_query(&canonical, params.query.as_deref().unwrap_or(""));
+    session::record_query(&canonical, query);
     session::record_files(
         &canonical,
         response["impact_files"]
@@ -675,24 +649,25 @@ struct NavigationRouteContext<'a> {
 
 fn choose_navigation_route(ctx: NavigationRouteContext<'_>) -> NavigationRoute {
     let intent_lower = ctx.intent.unwrap_or("").to_lowercase();
+    let query_lower = ctx.query.to_lowercase();
     if ctx.has_symbol || ctx.has_file || ctx.has_line_start || ctx.has_line_end {
         NavigationRoute::Read
-    } else if intent_lower.contains("impact")
-        || intent_lower.contains("blast")
-        || intent_lower.contains("refactor")
-        || ctx.query.to_lowercase().contains("impact")
-        || ctx.query.to_lowercase().contains("blast radius")
-        || ctx.query.to_lowercase().contains("break")
+    } else if contains_term(&intent_lower, "impact")
+        || contains_term(&intent_lower, "blast")
+        || contains_term(&intent_lower, "refactor")
+        || contains_term(&query_lower, "impact")
+        || contains_term(&query_lower, "blast radius")
+        || contains_term(&query_lower, "break")
     {
         NavigationRoute::Impact
-    } else if intent_lower.contains("trace")
-        || intent_lower.contains("path")
-        || intent_lower.contains("flow")
-        || intent_lower.contains("call")
+    } else if contains_term(&intent_lower, "trace")
+        || contains_term(&intent_lower, "path")
+        || contains_term(&intent_lower, "flow")
+        || contains_term(&intent_lower, "call")
         || ctx.source.is_some()
         || ctx.sink.is_some()
-        || ctx.query.to_lowercase().contains("how does")
-        || ctx.query.to_lowercase().contains("execution")
+        || contains_term(&query_lower, "how does")
+        || contains_term(&query_lower, "execution")
     {
         NavigationRoute::Trace
     } else {
@@ -731,6 +706,26 @@ fn looks_broad_repo_query(query: &str) -> bool {
             | "project layout"
             | "codebase overview"
     )
+}
+
+fn contains_term(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+
+    haystack.match_indices(needle).any(|(start, _)| {
+        let end = start + needle.len();
+        let before_ok = haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(is_term_boundary);
+        let after_ok = haystack[end..].chars().next().is_none_or(is_term_boundary);
+        before_ok && after_ok
+    })
+}
+
+fn is_term_boundary(ch: char) -> bool {
+    !(ch.is_ascii_alphanumeric() || ch == '_')
 }
 
 fn looks_like_exact_symbol(query: &str) -> bool {
@@ -1049,6 +1044,48 @@ struct ImpactSeed {
     file: String,
 }
 
+#[derive(Clone, Copy)]
+enum ImpactDirection {
+    Incoming,
+    Outgoing,
+}
+
+impl ImpactDirection {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Incoming => "direct caller",
+            Self::Outgoing => "direct callee",
+        }
+    }
+
+    fn score_bonus(self) -> i32 {
+        match self {
+            Self::Incoming => 12,
+            Self::Outgoing => 4,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ImpactNeighbor {
+    id: String,
+    name: String,
+    kind: String,
+    file: String,
+    direction: ImpactDirection,
+    relation: EdgeRelation,
+    evidence: String,
+    confidence: f32,
+    evidence_quality: f32,
+    priority: i32,
+}
+
+impl ImpactNeighbor {
+    fn direction_label(&self) -> &'static str {
+        self.direction.label()
+    }
+}
+
 #[derive(Clone)]
 struct ImpactSymbol {
     id: String,
@@ -1062,11 +1099,11 @@ struct ImpactSymbol {
 }
 
 impl ImpactSymbol {
-    fn new(id: &str, name: &str, file: String, distance: usize) -> Self {
+    fn new(id: &str, name: &str, kind: String, file: String, distance: usize) -> Self {
         Self {
             id: id.to_string(),
             name: name.to_string(),
-            kind: "symbol".to_string(),
+            kind,
             file,
             distance,
             score: 0,
@@ -1148,6 +1185,80 @@ impl ImpactFile {
     }
 }
 
+fn build_scope_set(scope: Option<&str>) -> Option<GlobSet> {
+    scope.map(|scope| {
+        let mut builder = GlobSetBuilder::new();
+        if let Ok(glob) = Glob::new(scope) {
+            builder.add(glob);
+        }
+        builder
+            .build()
+            .unwrap_or_else(|_| GlobSetBuilder::new().build().unwrap())
+    })
+}
+
+fn matches_scope(path: &Path, project_path: &Path, scope_set: Option<&GlobSet>) -> bool {
+    let Some(set) = scope_set else {
+        return true;
+    };
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let rel = canonical
+        .strip_prefix(project_path)
+        .unwrap_or(canonical.as_path());
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    set.is_match(rel_str.as_str()) || set.is_match(canonical.as_path())
+}
+
+fn collect_impact_neighbors(
+    index: &Arc<crate::index::SymbolIndex>,
+    symbol_id: &str,
+    project_path: &Path,
+    scope_set: Option<&GlobSet>,
+) -> Vec<ImpactNeighbor> {
+    let mut neighbors = Vec::new();
+
+    for (direction, bucket) in [
+        (
+            ImpactDirection::Incoming,
+            index.graph.incoming.get(symbol_id),
+        ),
+        (
+            ImpactDirection::Outgoing,
+            index.graph.outgoing.get(symbol_id),
+        ),
+    ] {
+        for edge in bucket.into_iter().flatten() {
+            let Some(symbol) = index.symbols.get(&edge.symbol_id) else {
+                continue;
+            };
+            if !matches_scope(symbol.file.as_ref(), project_path, scope_set) {
+                continue;
+            }
+            let metrics = navigation_edge_metrics(edge.relation, edge.confidence, &edge.evidence);
+            neighbors.push(ImpactNeighbor {
+                id: symbol.id.clone(),
+                name: symbol.name.clone(),
+                kind: symbol.kind.to_string(),
+                file: symbol.file.to_string_lossy().replace('\\', "/"),
+                direction,
+                relation: edge.relation,
+                evidence: edge.evidence.clone(),
+                confidence: edge.confidence,
+                evidence_quality: metrics.evidence_quality,
+                priority: metrics.priority,
+            });
+        }
+    }
+
+    neighbors.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.file.cmp(&b.file))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    neighbors
+}
+
 fn impact_score(
     distance: usize,
     file: &str,
@@ -1169,6 +1280,53 @@ fn impact_score(
     score
 }
 
+fn impact_edge_score(
+    distance: usize,
+    neighbor: &ImpactNeighbor,
+    project_path: &std::path::Path,
+    profile: Option<&crate::index::repo_profile::RepoProfile>,
+    query: &str,
+) -> i32 {
+    let metrics =
+        navigation_edge_metrics(neighbor.relation, neighbor.confidence, &neighbor.evidence);
+    impact_score(
+        distance,
+        &neighbor.file,
+        &neighbor.name,
+        project_path,
+        profile,
+        query,
+    ) + metrics.priority
+        + neighbor.direction.score_bonus()
+        + (edge_evidence_quality(&neighbor.evidence) * 10.0).round() as i32
+}
+
+fn build_edge_provenance_summary(symbols: &[ImpactSymbol], files: &[ImpactFile]) -> Value {
+    let mut direct_calls = 0;
+    let mut direct_references = 0;
+    for reason in symbols
+        .iter()
+        .flat_map(|symbol| symbol.reasons.iter())
+        .chain(files.iter().flat_map(|file| file.reasons.iter()))
+    {
+        if reason.contains(" calls: ") {
+            direct_calls += 1;
+        } else if reason.contains(" references: ") {
+            direct_references += 1;
+        }
+    }
+
+    json!({
+        "direct_calls": direct_calls,
+        "direct_references": direct_references,
+        "dominant_signal": if direct_calls >= direct_references {
+            "calls"
+        } else {
+            "references"
+        },
+    })
+}
+
 fn candidate_target(candidate: &Value) -> Value {
     if candidate["kind"].as_str() == Some("file") || candidate["kind"].as_str() == Some("directory")
     {
@@ -1186,9 +1344,20 @@ fn candidate_target(candidate: &Value) -> Value {
 }
 
 fn contains_regex_meta(query: &str) -> bool {
-    query
-        .chars()
-        .any(|c| matches!(c, '[' | ']' | '(' | ')' | '|' | '+' | '?' | '^' | '$' | '*'))
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    trimmed.starts_with('^')
+        || trimmed.ends_with('$')
+        || trimmed.contains('\\')
+        || (trimmed.contains('[') && trimmed.contains(']'))
+        || (trimmed.contains('{') && trimmed.contains('}'))
+        || trimmed.contains('|')
+        || trimmed.contains(".*")
+        || trimmed.contains(".+")
+        || trimmed.contains(".?")
 }
 
 #[cfg(test)]
@@ -1264,6 +1433,23 @@ mod tests {
             sink: Some("sink"),
         });
         assert!(matches!(route, NavigationRoute::Trace));
+    }
+
+    #[test]
+    fn test_choose_navigation_route_keeps_identifier_like_queries_in_locate() {
+        for query in ["impact_score", "callback", "path_policy"] {
+            let route = choose_navigation_route(NavigationRouteContext {
+                intent: None,
+                has_symbol: false,
+                has_file: false,
+                has_line_start: false,
+                has_line_end: false,
+                query,
+                source: None,
+                sink: None,
+            });
+            assert!(matches!(route, NavigationRoute::Locate), "{query}");
+        }
     }
 
     #[tokio::test]
@@ -1350,6 +1536,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_analyze_impact_prefers_direct_calls_over_reference_edges() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn leaf() {}\npub fn branch() { leaf(); }\npub fn wrapper(f: fn()) { f(); }\npub fn root() { wrapper(leaf); }\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = analyze_impact(AnalyzeImpactParams {
+            project: project.clone(),
+            query: None,
+            symbol_id: Some(symbol_id_by_name(&project, "leaf")),
+            file_path: None,
+            scope: None,
+            depth: Some(2),
+            limit: Some(5),
+        })
+        .await
+        .unwrap();
+
+        let impact_symbols = result["impact_symbols"].as_array().unwrap();
+        let names: Vec<&str> = impact_symbols
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .collect();
+        assert!(names.contains(&"branch"));
+        assert!(names.contains(&"root"));
+        assert_eq!(impact_symbols[0]["name"], json!("branch"));
+    }
+
+    #[tokio::test]
     async fn test_navigate_code_routes_to_read() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
@@ -1396,7 +1614,7 @@ mod tests {
         let project = setup_project(&dir).await;
 
         let result = navigate_code(NavigateCodeParams {
-            project,
+            project: project.clone(),
             query: "how does branch flow".to_string(),
             intent: Some("trace".to_string()),
             symbol_id: None,
@@ -1421,6 +1639,15 @@ mod tests {
         assert_eq!(result["navigation_route"].as_str().unwrap(), "trace_path");
         assert_eq!(result["source_hint"].as_str().unwrap(), "branch");
         assert_eq!(result["sink_hint"].as_str().unwrap(), "leaf");
+        let shortest_path = result["shortest_path"].as_array().unwrap();
+        assert_eq!(
+            shortest_path[0]["symbol_id"],
+            json!(symbol_id_by_name(&project, "branch"))
+        );
+        assert_eq!(
+            shortest_path.last().unwrap()["symbol_id"],
+            json!(symbol_id_by_name(&project, "leaf"))
+        );
     }
 
     #[tokio::test]
@@ -1461,6 +1688,12 @@ mod tests {
             "analyze_impact"
         );
         assert!(!result["impact_symbols"].as_array().unwrap().is_empty());
+        assert!(
+            result["edge_provenance_summary"]["direct_calls"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        );
     }
 
     #[tokio::test]
@@ -1494,5 +1727,16 @@ mod tests {
 
         assert_eq!(result["navigation_route"].as_str().unwrap(), "locate_code");
         assert_eq!(result["route_used"].as_str().unwrap(), "search_symbols");
+    }
+
+    #[test]
+    fn test_contains_regex_meta_requires_explicit_regex_signals() {
+        for literal in ["C++", "foo?bar", "do(something)", "impact_score"] {
+            assert!(!contains_regex_meta(literal), "{literal}");
+        }
+
+        for pattern in [r"^foo$", r"[A-Z]+", r"\bword\b", r"foo.*bar", r"(foo|bar)"] {
+            assert!(contains_regex_meta(pattern), "{pattern}");
+        }
     }
 }

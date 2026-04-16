@@ -123,20 +123,8 @@ pub fn record_content(project: &Path, namespace: &str, identity: &str, content: 
 
 pub fn file_boost(project: &Path, file: &Path) -> i32 {
     with_state(project, |state| {
-        let file = normalise(file);
         let now = CLOCK.load(Ordering::Relaxed);
-        let mut boost = score_recent(state.recent_files.get(&file).copied(), now, 18);
-
-        for ancestor in file_ancestors(&file) {
-            boost = boost.max(score_recent(
-                state.recent_dirs.get(&ancestor).copied(),
-                now,
-                12,
-            ));
-        }
-
-        boost += query_overlap_boost(state, &file);
-        boost
+        file_boost_from_state(state, file, now)
     })
 }
 
@@ -145,7 +133,7 @@ pub fn symbol_boost(project: &Path, symbol_id: &str, file: Option<&Path>) -> i32
         let now = CLOCK.load(Ordering::Relaxed);
         let mut boost = score_recent(state.recent_symbols.get(symbol_id).copied(), now, 20);
         if let Some(file) = file {
-            boost = boost.max(file_boost(project, file));
+            boost = boost.max(file_boost_from_state(state, file, now));
         }
         boost += query_overlap_boost(state, symbol_id);
         boost
@@ -191,6 +179,21 @@ fn file_ancestors(path: &str) -> Vec<String> {
         current = parent.parent();
     }
     ancestors
+}
+
+fn file_boost_from_state(state: &ProjectSessionState, file: &Path, now: u64) -> i32 {
+    let file = normalise(file);
+    let mut boost = score_recent(state.recent_files.get(&file).copied(), now, 18);
+
+    for ancestor in file_ancestors(&file) {
+        boost = boost.max(score_recent(
+            state.recent_dirs.get(&ancestor).copied(),
+            now,
+            12,
+        ));
+    }
+
+    boost + query_overlap_boost(state, &file)
 }
 
 fn score_recent(last_seen: Option<u64>, now: u64, base: i32) -> i32 {

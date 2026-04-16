@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 
 use crate::error::ToolError;
-use crate::graph::{collect_direct_callable_references, read_symbol_source};
+use crate::graph::collect_direct_callable_references;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
@@ -24,8 +24,7 @@ pub async fn find_callees(params: FindCalleesParams) -> anyhow::Result<Value> {
             symbol_id: params.symbol_id.clone(),
         })?;
 
-    let source_text = read_symbol_source(sym, false)?;
-    let callees = collect_direct_callable_references(&index, sym, &source_text);
+    let callees = collect_direct_callable_references(&index, sym);
     let truncated = callees.len() > offset.saturating_add(limit);
     let page: Vec<Value> = callees
         .into_iter()
@@ -193,5 +192,33 @@ mod tests {
         let callees = result["callees"].as_array().unwrap();
         assert_eq!(callees.len(), 1);
         assert_eq!(callees[0]["to_name"].as_str().unwrap(), "helper");
+    }
+
+    #[tokio::test]
+    async fn test_find_callees_does_not_treat_callable_argument_as_direct_callee() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "fn helper() {}\nfn wrapper(f: fn()) { f(); }\nfn root() { wrapper(helper); }\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = find_callees(FindCalleesParams {
+            project: project.clone(),
+            symbol_id: symbol_id(&project, "root"),
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        let callees = result["callees"].as_array().unwrap();
+        assert_eq!(callees.len(), 1);
+        assert_eq!(callees[0]["to_name"].as_str().unwrap(), "wrapper");
+        assert!(callees[0]["evidence"]
+            .as_str()
+            .unwrap()
+            .contains("wrapper(helper)"));
     }
 }

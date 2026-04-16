@@ -2,6 +2,7 @@ pub mod bm25;
 pub mod format;
 pub mod repo_profile;
 
+use crate::graph::NavigationGraph;
 use crate::indexer::language::{Language, Symbol, SymbolId, SymbolKind};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ pub struct SymbolIndex {
     pub by_file: HashMap<PathBuf, Vec<SymbolId>>,
     pub by_kind: HashMap<SymbolKind, Vec<SymbolId>>,
     pub by_language: HashMap<Language, Vec<SymbolId>>,
+    pub graph: NavigationGraph,
     /// Intern table: deduplicated Arc<PathBuf> per unique file path.
     /// Not serialized; rebuilt by rebuild_secondary_indexes after loading.
     file_interner: HashMap<PathBuf, Arc<PathBuf>>,
@@ -46,6 +48,7 @@ impl SymbolIndex {
             .or_default()
             .push(id.clone());
         self.symbols.insert(id, symbol);
+        self.graph = NavigationGraph::default();
     }
 
     pub fn remove_file(&mut self, path: &PathBuf) {
@@ -61,6 +64,7 @@ impl SymbolIndex {
                 }
             }
         }
+        self.graph = NavigationGraph::default();
     }
 
     pub fn rebuild_secondary_indexes(&mut self) {
@@ -107,6 +111,10 @@ impl SymbolIndex {
 
     pub fn file_count(&self) -> usize {
         self.by_file.len()
+    }
+
+    pub fn rebuild_navigation_graph(&mut self) {
+        self.graph = crate::graph::build_navigation_graph(self);
     }
 }
 

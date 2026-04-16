@@ -4,7 +4,10 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::embed::EmbedConfig;
-use crate::graph::{collect_direct_callable_references, is_callable_kind, read_symbol_source};
+use crate::graph::{
+    collect_direct_callable_references, collect_incoming_callable_references,
+    navigation_edge_metrics, read_symbol_source, EdgeRelation,
+};
 use crate::index::format::load_project_meta;
 use crate::index::repo_profile::role_boost_for_path;
 use crate::index::SymbolIndex;
@@ -45,9 +48,12 @@ struct TraceNode {
 struct TraceEdge {
     from_id: String,
     to_id: String,
-    relation: &'static str,
+    relation: EdgeRelation,
     evidence: String,
     confidence: f32,
+    evidence_quality: f32,
+    priority: i32,
+    path_cost: u32,
 }
 
 struct TraceContext<'a> {
@@ -67,7 +73,7 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
     let (discovery_mode, seed_ids) = discover_seed_ids(&params).await?;
     let mut nodes: HashMap<String, TraceNode> = HashMap::new();
     let mut edges: Vec<TraceEdge> = Vec::new();
-    let mut seen_edges: HashSet<(String, String, &'static str)> = HashSet::new();
+    let mut seen_edges: HashSet<(String, String, EdgeRelation)> = HashSet::new();
     let trace_ctx = TraceContext {
         project_path: &canonical,
         profile: profile.as_ref(),
@@ -123,13 +129,21 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
             json!({
                 "from_id": edge.from_id,
                 "to_id": edge.to_id,
-                "relation": edge.relation,
+                "relation": edge.relation.as_str(),
                 "evidence": edge.evidence,
                 "confidence": edge.confidence,
+                "evidence_quality": edge.evidence_quality,
+                "priority": edge.priority,
+                "path_cost": edge.path_cost,
             })
         })
         .collect();
-    let shortest_path = build_shortest_path(&important, &important_edge_records);
+    let shortest_path = build_shortest_path(
+        &important,
+        &important_edge_records,
+        params.source.as_deref(),
+        params.sink.as_deref(),
+    );
     let path_narrative = build_path_narrative(&important, Some(shortest_path.as_slice()));
 
     let fallback_candidates: Vec<Value> = important
@@ -296,54 +310,47 @@ fn trace_callers(
     seed: &Symbol,
     nodes: &mut HashMap<String, TraceNode>,
     edges: &mut Vec<TraceEdge>,
-    seen_edges: &mut HashSet<(String, String, &'static str)>,
+    seen_edges: &mut HashSet<(String, String, EdgeRelation)>,
     ctx: &TraceContext<'_>,
     depth: usize,
 ) {
     if depth > 1 {
         return;
     }
-    for candidate in index.symbols.values() {
-        if candidate.id == seed.id || !is_callable_kind(&candidate.kind) {
+    for reference in collect_incoming_callable_references(index, seed) {
+        let Some(candidate) = index.symbols.get(&reference.id) else {
             continue;
-        }
+        };
         if is_noise_symbol(candidate) && !is_entry_symbol(candidate) {
             continue;
         }
-        let source_text = match read_symbol_source(candidate, false) {
-            Ok(source) => source,
-            Err(_) => continue,
-        };
-        let refs = collect_direct_callable_references(index, candidate, &source_text);
-        if let Some(reference) = refs.iter().find(|reference| reference.id == seed.id) {
-            upsert_node(
-                nodes,
+        upsert_node(
+            nodes,
+            candidate,
+            adjusted_score(
                 candidate,
-                adjusted_score(
-                    candidate,
-                    90 - depth as i32 * 10 + (reference.confidence * 10.0) as i32,
-                    &seed.qualified,
-                    ctx.profile,
-                    ctx.project_path,
-                ),
-                classify_symbol(candidate),
-                depth + 1,
-                reference.confidence,
-                format!(
-                    "direct caller of {}: {}",
-                    seed.qualified, reference.evidence
-                ),
-            );
-            push_edge(
-                seen_edges,
-                edges,
-                &candidate.id,
-                &seed.id,
-                "calls",
-                reference.evidence.clone(),
-                reference.confidence,
-            );
-        }
+                90 - depth as i32 * 10 + (reference.confidence * 10.0) as i32,
+                &seed.qualified,
+                ctx.profile,
+                ctx.project_path,
+            ),
+            classify_symbol(candidate),
+            depth + 1,
+            reference.confidence,
+            format!(
+                "direct caller of {}: {}",
+                seed.qualified, reference.evidence
+            ),
+        );
+        push_edge(
+            seen_edges,
+            edges,
+            &candidate.id,
+            &seed.id,
+            EdgeRelation::Calls,
+            reference.evidence.clone(),
+            reference.confidence,
+        );
     }
 }
 
@@ -353,7 +360,7 @@ fn trace_callees(
     max_depth: usize,
     nodes: &mut HashMap<String, TraceNode>,
     edges: &mut Vec<TraceEdge>,
-    seen_edges: &mut HashSet<(String, String, &'static str)>,
+    seen_edges: &mut HashSet<(String, String, EdgeRelation)>,
     ctx: &TraceContext<'_>,
 ) {
     let mut queue = VecDeque::from([(seed.id.clone(), 0usize)]);
@@ -366,11 +373,7 @@ fn trace_callees(
         let Some(current) = index.symbols.get(&current_id) else {
             continue;
         };
-        let source_text = match read_symbol_source(current, false) {
-            Ok(source) => source,
-            Err(_) => continue,
-        };
-        for reference in collect_direct_callable_references(index, current, &source_text) {
+        for reference in collect_direct_callable_references(index, current) {
             let Some(target) = index.symbols.get(&reference.id) else {
                 continue;
             };
@@ -400,7 +403,7 @@ fn trace_callees(
                 edges,
                 &current.id,
                 &target.id,
-                "calls",
+                EdgeRelation::Calls,
                 reference.evidence.clone(),
                 reference.confidence,
             );
@@ -412,22 +415,26 @@ fn trace_callees(
 }
 
 fn push_edge(
-    seen_edges: &mut HashSet<(String, String, &'static str)>,
+    seen_edges: &mut HashSet<(String, String, EdgeRelation)>,
     edges: &mut Vec<TraceEdge>,
     from_id: &str,
     to_id: &str,
-    relation: &'static str,
+    relation: EdgeRelation,
     evidence: String,
     confidence: f32,
 ) {
     let key = (from_id.to_string(), to_id.to_string(), relation);
     if seen_edges.insert(key.clone()) {
+        let metrics = navigation_edge_metrics(relation, confidence, &evidence);
         edges.push(TraceEdge {
             from_id: key.0,
             to_id: key.1,
             relation,
             evidence,
             confidence,
+            evidence_quality: metrics.evidence_quality,
+            priority: metrics.priority,
+            path_cost: metrics.path_cost,
         });
     }
 }
@@ -719,8 +726,8 @@ fn build_snippet(sym: &Symbol) -> Option<String> {
     let source = read_symbol_source(sym, false).ok()?;
     let snippet = source
         .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.trim_end())
+        .filter(|line: &&str| !line.trim().is_empty())
         .take(3)
         .collect::<Vec<_>>()
         .join("\n");
@@ -766,19 +773,30 @@ fn build_path_narrative(symbols: &[ImportantSymbol], shortest_path: Option<&[Val
     }
 }
 
-fn build_shortest_path(symbols: &[ImportantSymbol], edges: &[TraceEdge]) -> Vec<Value> {
+fn build_shortest_path(
+    symbols: &[ImportantSymbol],
+    edges: &[TraceEdge],
+    source_hint: Option<&str>,
+    sink_hint: Option<&str>,
+) -> Vec<Value> {
     let symbol_by_id: HashMap<&str, &ImportantSymbol> = symbols
         .iter()
         .map(|symbol| (symbol.id.as_str(), symbol))
         .collect();
-    let start = symbols
-        .iter()
-        .find(|symbol| symbol.hot_path && symbol.category == "entry")
+    let start = select_path_endpoint(symbols, source_hint, true)
+        .or_else(|| {
+            symbols
+                .iter()
+                .find(|symbol| symbol.hot_path && symbol.category == "entry")
+        })
         .or_else(|| symbols.first());
-    let goal = symbols
-        .iter()
-        .rev()
-        .find(|symbol| symbol.hot_path && symbol.category == "output")
+    let goal = select_path_endpoint(symbols, sink_hint, false)
+        .or_else(|| {
+            symbols
+                .iter()
+                .rev()
+                .find(|symbol| symbol.hot_path && symbol.category == "output")
+        })
         .or_else(|| symbols.last());
     let (Some(start), Some(goal)) = (start, goal) else {
         return Vec::new();
@@ -800,34 +818,62 @@ fn build_shortest_path(symbols: &[ImportantSymbol], edges: &[TraceEdge]) -> Vec<
             .push(edge);
     }
 
-    let mut queue = VecDeque::from([start.id.as_str()]);
-    let mut visited: HashSet<&str> = HashSet::from([start.id.as_str()]);
-    let mut parent: HashMap<&str, (&str, &TraceEdge)> = HashMap::new();
+    let mut frontier = vec![(start.id.clone(), 0_u32, 0_usize, 0_i32)];
+    let mut best: HashMap<String, (u32, usize, i32)> =
+        HashMap::from([(start.id.clone(), (0, 0, 0))]);
+    let mut parent: HashMap<String, (String, TraceEdge)> = HashMap::new();
 
-    while let Some(current) = queue.pop_front() {
-        if current == goal.id.as_str() {
+    while !frontier.is_empty() {
+        let (best_idx, _) = frontier
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                left.1
+                    .cmp(&right.1)
+                    .then(left.2.cmp(&right.2))
+                    .then(right.3.cmp(&left.3))
+                    .then(left.0.cmp(&right.0))
+            })
+            .unwrap_or((0, &(String::new(), 0, 0, 0)));
+        let (current, current_cost, current_hops, current_score) = frontier.swap_remove(best_idx);
+        let Some(best_state) = best.get(&current) else {
+            continue;
+        };
+        if *best_state != (current_cost, current_hops, current_score) {
+            continue;
+        }
+        if current == goal.id {
             break;
         }
-        let Some(outgoing) = adjacency.get(current) else {
+        let Some(outgoing) = adjacency.get(current.as_str()) else {
             continue;
         };
         for edge in outgoing {
-            let next = edge.to_id.as_str();
-            if visited.insert(next) {
-                parent.insert(next, (current, edge));
-                queue.push_back(next);
+            let next = edge.to_id.clone();
+            let candidate = (
+                current_cost + edge.path_cost,
+                current_hops + 1,
+                current_score + edge.priority,
+            );
+            let should_update = best
+                .get(&next)
+                .is_none_or(|existing| better_path(candidate, *existing));
+            if should_update {
+                best.insert(next.clone(), candidate);
+                parent.insert(next.clone(), (current.clone(), (*edge).clone()));
+                frontier.push((next, candidate.0, candidate.1, candidate.2));
             }
         }
     }
 
-    if !visited.contains(goal.id.as_str()) {
+    if !best.contains_key(&goal.id) {
         return Vec::new();
     }
 
     let mut path = Vec::new();
-    let mut cursor = goal.id.as_str();
+    let mut cursor = goal.id.clone();
     loop {
-        let current = symbol_by_id.get(cursor).copied();
+        let current = symbol_by_id.get(cursor.as_str()).copied();
         if let Some(symbol) = current {
             let mut step = json!({
                 "symbol_id": symbol.id,
@@ -835,11 +881,14 @@ fn build_shortest_path(symbols: &[ImportantSymbol], edges: &[TraceEdge]) -> Vec<
                 "qualified": symbol.qualified,
                 "category": symbol.category,
             });
-            if let Some(&(prev, edge)) = parent.get(cursor) {
-                step["relation"] = json!(edge.relation);
+            if let Some((prev, edge)) = parent.get(&cursor) {
+                step["relation"] = json!(edge.relation.as_str());
                 step["evidence"] = json!(edge.evidence);
                 step["confidence"] = json!(edge.confidence);
-                cursor = prev;
+                step["evidence_quality"] = json!(edge.evidence_quality);
+                step["path_cost"] = json!(edge.path_cost);
+                step["priority"] = json!(edge.priority);
+                cursor = prev.clone();
             } else {
                 path.push(step);
                 break;
@@ -848,8 +897,8 @@ fn build_shortest_path(symbols: &[ImportantSymbol], edges: &[TraceEdge]) -> Vec<
         } else {
             break;
         }
-        if cursor == start.id.as_str() {
-            if let Some(symbol) = symbol_by_id.get(cursor) {
+        if cursor == start.id {
+            if let Some(symbol) = symbol_by_id.get(cursor.as_str()) {
                 path.push(json!({
                     "symbol_id": symbol.id,
                     "name": symbol.name,
@@ -862,6 +911,58 @@ fn build_shortest_path(symbols: &[ImportantSymbol], edges: &[TraceEdge]) -> Vec<
     }
     path.reverse();
     path
+}
+
+fn select_path_endpoint<'a>(
+    symbols: &'a [ImportantSymbol],
+    hint: Option<&str>,
+    prefer_earlier: bool,
+) -> Option<&'a ImportantSymbol> {
+    let hint = hint?.trim();
+    if hint.is_empty() {
+        return None;
+    }
+    let hint_lower = hint.to_ascii_lowercase();
+    let iter: Box<dyn Iterator<Item = &'a ImportantSymbol> + 'a> = if prefer_earlier {
+        Box::new(symbols.iter())
+    } else {
+        Box::new(symbols.iter().rev())
+    };
+
+    iter.map(|symbol| (path_endpoint_match_score(symbol, &hint_lower), symbol))
+        .filter(|(score, _)| *score > 0)
+        .max_by(|(left_score, left_symbol), (right_score, right_symbol)| {
+            left_score
+                .cmp(right_score)
+                .then(left_symbol.score.cmp(&right_symbol.score))
+        })
+        .map(|(_, symbol)| symbol)
+}
+
+fn path_endpoint_match_score(symbol: &ImportantSymbol, hint_lower: &str) -> i32 {
+    let name = symbol.name.to_ascii_lowercase();
+    let qualified = symbol.qualified.to_ascii_lowercase();
+    let file = symbol.file.to_ascii_lowercase();
+    if name == hint_lower || qualified == hint_lower {
+        400
+    } else if qualified.ends_with(&format!("::{hint_lower}")) {
+        360
+    } else if name.contains(hint_lower) {
+        260
+    } else if qualified.contains(hint_lower) {
+        220
+    } else if file.contains(hint_lower) {
+        140
+    } else {
+        0
+    }
+}
+
+fn better_path(candidate: (u32, usize, i32), existing: (u32, usize, i32)) -> bool {
+    candidate.0 < existing.0
+        || (candidate.0 == existing.0
+            && (candidate.1 < existing.1
+                || (candidate.1 == existing.1 && candidate.2 > existing.2)))
 }
 
 #[cfg(test)]
@@ -906,6 +1007,119 @@ mod tests {
             ranges.push((start, start + line.len()));
         }
         ranges
+    }
+
+    fn make_important_symbol(
+        id: &str,
+        qualified: &str,
+        category: &'static str,
+        hot_path: bool,
+    ) -> ImportantSymbol {
+        ImportantSymbol {
+            id: id.to_string(),
+            name: id.to_string(),
+            qualified: qualified.to_string(),
+            kind: "function".to_string(),
+            language: "rust".to_string(),
+            file: format!("{id}.rs"),
+            line_start: 1,
+            line_end: 1,
+            signature: Some(format!("fn {id}()")),
+            category,
+            why: format!("{id} is relevant"),
+            score: 100,
+            confidence: "high",
+            noise_reason: None,
+            snippet: None,
+            verified_by_source: true,
+            hot_path,
+        }
+    }
+
+    fn make_trace_edge(
+        from_id: &str,
+        to_id: &str,
+        relation: EdgeRelation,
+        evidence: &str,
+        confidence: f32,
+    ) -> TraceEdge {
+        let metrics = navigation_edge_metrics(relation, confidence, evidence);
+        TraceEdge {
+            from_id: from_id.to_string(),
+            to_id: to_id.to_string(),
+            relation,
+            evidence: evidence.to_string(),
+            confidence,
+            evidence_quality: metrics.evidence_quality,
+            priority: metrics.priority,
+            path_cost: metrics.path_cost,
+        }
+    }
+
+    #[test]
+    fn test_build_shortest_path_prefers_higher_quality_edges() {
+        let symbols = vec![
+            make_important_symbol("entry", "entry", "entry", true),
+            make_important_symbol("weak_mid", "weak_mid", "orchestration", false),
+            make_important_symbol("strong_mid", "strong_mid", "orchestration", false),
+            make_important_symbol("output", "output", "output", true),
+        ];
+        let edges = vec![
+            make_trace_edge(
+                "entry",
+                "weak_mid",
+                EdgeRelation::Calls,
+                "identifier `weak_mid` was extracted from the source text",
+                0.86,
+            ),
+            make_trace_edge("weak_mid", "output", EdgeRelation::Calls, "output();", 0.98),
+            make_trace_edge(
+                "entry",
+                "strong_mid",
+                EdgeRelation::Calls,
+                "strong_mid();",
+                0.99,
+            ),
+            make_trace_edge(
+                "strong_mid",
+                "output",
+                EdgeRelation::Calls,
+                "output();",
+                0.98,
+            ),
+        ];
+
+        let path = build_shortest_path(&symbols, &edges, None, None);
+        let path_ids: Vec<&str> = path
+            .iter()
+            .filter_map(|step| step["symbol_id"].as_str())
+            .collect();
+
+        assert_eq!(path_ids, vec!["entry", "strong_mid", "output"]);
+        assert!(path[1]["path_cost"].as_u64().is_some());
+        assert!(path[1]["evidence_quality"].as_f64().is_some());
+    }
+
+    #[test]
+    fn test_build_shortest_path_prefers_source_and_sink_hints() {
+        let symbols = vec![
+            make_important_symbol("entry", "entry", "entry", true),
+            make_important_symbol("branch", "branch", "orchestration", true),
+            make_important_symbol("leaf", "leaf", "output", true),
+            make_important_symbol("printer", "printer", "output", true),
+        ];
+        let edges = vec![
+            make_trace_edge("entry", "printer", EdgeRelation::Calls, "printer();", 0.99),
+            make_trace_edge("branch", "leaf", EdgeRelation::Calls, "leaf();", 0.98),
+        ];
+
+        let path = build_shortest_path(&symbols, &edges, Some("branch"), Some("leaf"));
+        let path_ids: Vec<&str> = path
+            .iter()
+            .filter_map(|step| step["symbol_id"].as_str())
+            .collect();
+
+        assert_eq!(path_ids, vec!["branch", "leaf"]);
     }
 
     #[tokio::test]
@@ -1022,11 +1236,13 @@ mod tests {
         );
         assert_eq!(result["path_narrative"], json!("search -> calls printer"));
         assert!(result["shortest_path"].as_array().unwrap().len() >= 2);
-        assert!(result["edges"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|edge| { edge["evidence"].is_string() && edge["confidence"].as_f64().is_some() }));
+        assert!(result["edges"].as_array().unwrap().iter().all(|edge| {
+            edge["evidence"].is_string()
+                && edge["confidence"].as_f64().is_some()
+                && edge["evidence_quality"].as_f64().is_some()
+                && edge["path_cost"].as_u64().is_some()
+                && edge["priority"].as_i64().is_some()
+        }));
         assert_eq!(important[0]["hot_path"], json!(true));
         assert_eq!(important[0]["verified_by_source"], json!(true));
         assert!(important.iter().any(|item| item["snippet"]

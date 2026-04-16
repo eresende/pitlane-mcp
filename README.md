@@ -16,8 +16,9 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 
 - **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, Svelte (embedded `<script>` / `<script lang="ts">` blocks only), C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, Solidity, and Bash source into structured symbols
 - **BM25 full-text search** — tantivy-backed ranked search over name, qualified name, signature, and doc fields with a custom camelCase tokenizer (`LowerInstruction` → `["lower", "instruction"]`); falls back to exact substring match if the index isn't ready
-- **Graph-aware navigation tools** — direct callers and callees for shallow impact checks without whole-repo back-and-forth
-- **Seventeen MCP tools** spanning startup, discovery, retrieval, and impact analysis
+- **Intent-aware composite tools** — `locate_code`, `read_code_unit`, `trace_path`, `analyze_impact`, and `navigate_code` reduce tool thrash and broad file reads
+- **Graph-aware navigation tools** — evidence-backed callers, callees, path tracing, and impact analysis without whole-repo back-and-forth
+- **MCP tools spanning startup, discovery, retrieval, and impact analysis**
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
 - **Smart exclusions** — automatically skips `.venv`, `node_modules`, `target`, `__pycache__`, `dist`, `.next`, and other dependency/build trees at any depth
@@ -130,11 +131,16 @@ Use the tools by intent, not by implementation detail:
 - **Startup**
   - `ensure_project_ready` — preferred one-call startup; indexes the repo and waits for embeddings only when needed
   - `index_project` + `wait_for_embeddings` — lower-level primitives when you need explicit control
+- **Intent-aware navigation**
+  - `navigate_code` — umbrella entrypoint when the intent is still fuzzy
+  - `locate_code` — route an ambiguous query to the best symbol, file, or content lookup
+  - `read_code_unit` — read the smallest useful code unit once the target is known
 - **Discovery**
   - `search_symbols` — find symbols by name or intent
   - `search_content` — find literal text, regex fragments, import paths, log strings, or macros when you do not know the symbol boundary
   - `search_files` — find repository files by file name, path fragment, or glob pattern
   - `trace_execution_path` — answer behavior/path questions with a compact set of files, symbols, and edges
+  - `trace_path` — answer explicit path questions such as source-to-sink, config-to-effect, and shortest-path traces
 - **Retrieval**
   - `get_symbol` — fetch one implementation by symbol ID
   - `get_file_outline` — inspect a file's symbol structure before choosing what to read
@@ -145,6 +151,7 @@ Use the tools by intent, not by implementation detail:
 - **Graph / Impact**
   - `find_callees` — direct outgoing references
   - `find_callers` — direct incoming references
+  - `analyze_impact` — ranked blast-radius analysis from a symbol, file, or concept
   - `find_usages` — all call sites / name-based usages
 - **Maintenance**
   - `watch_project` — keep the index current while a repo is changing
@@ -153,13 +160,10 @@ Use the tools by intent, not by implementation detail:
 Recommended flow:
 
 1. Call `ensure_project_ready`.
-2. Choose one discovery tool:
-   - `search_symbols` for names or intent
-   - `search_content` for text snippets
-   - `search_files` for file-name or path discovery
-   - `trace_execution_path` for behavior and execution-path questions
-3. Switch to `get_symbol` once you have the right symbol.
-4. Use `find_callees`, `find_callers`, or `find_usages` only when you need graph or impact information.
+2. If the intent is fuzzy, start with `navigate_code` or `locate_code`.
+3. Use `trace_execution_path` or `trace_path` for behavior, source-to-sink, config-to-effect, and execution-path questions.
+4. Switch to `read_code_unit` or `get_symbol` once you have the right target.
+5. Use `analyze_impact`, `find_callees`, `find_callers`, or `find_usages` only when you need graph or impact information.
 
 Avoid shell `grep`, globbing, or broad file reads when the MCP tools can answer the question directly.
 
@@ -238,6 +242,57 @@ Trace a likely execution path for a behavior-level question in one step.
 ```
 
 Use this for questions like "where is X implemented?", "how does Y flow?", or "what is the main execution path?" The response returns a compact set of important files, symbols, edges, and a ready-to-explain path summary so agents do not need to assemble the whole graph manually.
+
+### `locate_code`
+
+Resolve an ambiguous query into the most likely symbol, file, or content lookup path.
+
+```json
+{ "project": "/your/project", "query": "config loader", "intent": "symbol" }
+```
+
+Use this when you are not sure whether the target is a symbol, file, text fragment, or repo subtree. The response returns the best candidates plus steering metadata with the recommended next tool and target, so the agent does not have to branch across multiple discovery calls.
+
+### `read_code_unit`
+
+Read the smallest useful code unit once the target is known.
+
+```json
+{ "project": "/your/project", "symbol_id": "src/auth.rs::Auth::login#method" }
+{ "project": "/your/project", "file_path": "src/auth.rs", "line_start": 20, "line_end": 60 }
+```
+
+Use this instead of manually deciding between `get_symbol`, `get_file_outline`, and `get_lines`. It reads either a symbol body or a file slice depending on which target information you already have.
+
+### `trace_path`
+
+Trace a likely path across the navigation graph for explicit path questions.
+
+```json
+{ "project": "/your/project", "query": "config to HTTP handler path", "source": "Config", "sink": "handle_request" }
+```
+
+Use this when the question is source-to-sink, config-to-effect, or shortest-path oriented. Compared with `trace_execution_path`, this is the more explicit graph-native path tool.
+
+### `analyze_impact`
+
+Estimate the blast radius of a symbol, file, or concept.
+
+```json
+{ "project": "/your/project", "query": "Auth::login", "depth": 2 }
+```
+
+Use this before edits or refactors when you want ranked impacted symbols and files plus concrete follow-up verification targets.
+
+### `navigate_code`
+
+Umbrella navigation tool that routes to locate, read, trace, or impact analysis.
+
+```json
+{ "project": "/your/project", "query": "where does config reach the CLI output?" }
+```
+
+Use this when the prompt is underspecified and you want the server to choose the best next navigation primitive without forcing the agent to branch manually.
 
 ### `get_symbol`
 
@@ -319,7 +374,7 @@ Optional parameters:
 - `limit` — maximum callers to return (default: 100).
 - `offset` — offset into callers for pagination.
 
-Like `find_callees`, this stays shallow by design and returns heuristic direct callers, not a full transitive call graph.
+Like `find_callees`, this stays shallow by design and returns filtered direct callers rather than a full transitive call graph.
 
 ### `get_lines`
 

@@ -107,7 +107,7 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         full_source_bytes,
     );
 
-    let mut refs: Vec<Value> = collect_direct_references(&index, sym, &source_text)
+    let mut refs: Vec<Value> = collect_direct_references(&index, sym, Some(&source_text))
         .into_iter()
         .map(|reference| {
             json!({

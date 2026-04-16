@@ -208,6 +208,7 @@ impl Indexer {
                 index.insert(symbol);
             }
         }
+        index.rebuild_navigation_graph();
 
         // Notify: Phase 2+3 complete (always fire the final tick).
         if let Some(cb) = on_progress {
@@ -240,6 +241,7 @@ impl Indexer {
                 index.insert(symbol);
             }
         }
+        index.rebuild_navigation_graph();
 
         Ok(())
     }
