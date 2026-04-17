@@ -709,19 +709,3 @@ mod tests {
         assert!(support_edges[0]["score"].as_i64().is_some());
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn embeddings_count_in_store_returns_saved_vector_count() {
-        let tmp = tempfile::NamedTempFile::new().unwrap();
-        let mut store = pitlane_mcp::embed::store::EmbedStore::new();
-        store.update("sym:a".to_string(), vec![1.0, 2.0]);
-        store.update("sym:b".to_string(), vec![3.0, 4.0]);
-        store.save(tmp.path()).unwrap();
-
-        assert_eq!(embeddings_count_in_store(tmp.path()), 2);
-    }
-}
