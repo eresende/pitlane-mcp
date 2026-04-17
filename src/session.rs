@@ -128,6 +128,13 @@ pub fn file_boost(project: &Path, file: &Path) -> i32 {
     })
 }
 
+pub fn directory_boost(project: &Path, dir: &Path) -> i32 {
+    with_state(project, |state| {
+        let now = CLOCK.load(Ordering::Relaxed);
+        directory_boost_from_state(state, dir, now)
+    })
+}
+
 pub fn symbol_boost(project: &Path, symbol_id: &str, file: Option<&Path>) -> i32 {
     with_state(project, |state| {
         let now = CLOCK.load(Ordering::Relaxed);
@@ -194,6 +201,28 @@ fn file_boost_from_state(state: &ProjectSessionState, file: &Path, now: u64) -> 
     }
 
     boost + query_overlap_boost(state, &file)
+}
+
+fn directory_boost_from_state(state: &ProjectSessionState, dir: &Path, now: u64) -> i32 {
+    let dir = normalise(dir);
+    let mut boost = score_recent(state.recent_dirs.get(&dir).copied(), now, 14);
+
+    for ancestor in file_ancestors(&dir) {
+        boost = boost.max(score_recent(
+            state.recent_dirs.get(&ancestor).copied(),
+            now,
+            10,
+        ));
+    }
+
+    let child_prefix = format!("{dir}/");
+    for (recent_dir, seen) in &state.recent_dirs {
+        if recent_dir.starts_with(&child_prefix) {
+            boost = boost.max(score_recent(Some(*seen), now, 12));
+        }
+    }
+
+    boost + query_overlap_boost(state, &dir)
 }
 
 fn score_recent(last_seen: Option<u64>, now: u64, base: i32) -> i32 {
@@ -281,6 +310,14 @@ mod tests {
         let project = Path::new("/tmp/session-test-symbol");
         record_symbol(project, "abc", Some(Path::new("src/lib.rs")));
         assert!(symbol_boost(project, "abc", Some(Path::new("src/lib.rs"))) > 0);
+    }
+
+    #[test]
+    fn test_directory_boost_prefers_recent_directory() {
+        let project = Path::new("/tmp/session-test-dir");
+        record_file(project, Path::new("src/tools/search.rs"));
+        assert!(directory_boost(project, Path::new("src/tools")) > 0);
+        assert!(directory_boost(project, Path::new("src")) > 0);
     }
 
     #[test]

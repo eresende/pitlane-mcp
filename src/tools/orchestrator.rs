@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,6 +8,9 @@ use serde_json::{json, Value};
 
 use crate::graph::{edge_evidence_quality, navigation_edge_metrics, EdgeRelation};
 use crate::index::format::load_project_meta;
+use crate::index::repo_profile::{
+    compact_repo_map, profile_entrypoints, role_label, summarize_role_counts, RepoProfile,
+};
 use crate::path_policy::resolve_project_path;
 use crate::session;
 use crate::tools::get_file_outline::{get_file_outline, GetFileOutlineParams};
@@ -100,27 +103,20 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
     };
 
     if results.is_empty() {
-        let fallback = match route {
-            LocateRoute::Project => LocateRoute::Files,
-            LocateRoute::Files | LocateRoute::Content => LocateRoute::Symbols {
-                mode: "semantic".to_string(),
-            },
-            LocateRoute::Symbols { .. } => LocateRoute::Symbols {
-                mode: "semantic".to_string(),
-            },
-        };
-        let fallback_route = fallback.as_str().to_string();
-        let fallback_results = match fallback {
-            LocateRoute::Project => locate_project(&params, limit).await?,
-            LocateRoute::Files => locate_files(&params, limit).await?,
-            LocateRoute::Content => locate_content(&params, limit).await?,
-            LocateRoute::Symbols { ref mode } => {
-                locate_symbols(&params, limit, mode.as_str()).await?
+        if let Some(fallback) = fallback_locate_route(&route, &params.query) {
+            let fallback_route = fallback.as_str().to_string();
+            let fallback_results = match fallback {
+                LocateRoute::Project => locate_project(&params, limit).await?,
+                LocateRoute::Files => locate_files(&params, limit).await?,
+                LocateRoute::Content => locate_content(&params, limit).await?,
+                LocateRoute::Symbols { ref mode } => {
+                    locate_symbols(&params, limit, mode.as_str()).await?
+                }
+            };
+            if !fallback_results.is_empty() {
+                route_used = fallback_route;
+                results = fallback_results;
             }
-        };
-        if !fallback_results.is_empty() {
-            route_used = fallback_route;
-            results = fallback_results;
         }
     }
 
@@ -133,6 +129,7 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         }
     } else {
         match results[0]["kind"].as_str().unwrap_or("symbol") {
+            "repo_map" => "search_files",
             "directory" => "search_files",
             "file" | "content" => "read_code_unit",
             _ => "read_code_unit",
@@ -334,19 +331,38 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
 
     let mut impacted_symbols: HashMap<String, ImpactSymbol> = HashMap::new();
     let mut impacted_files: HashMap<String, ImpactFile> = HashMap::new();
-    let mut queue: VecDeque<(String, usize, i32, String)> = VecDeque::new();
-    let mut best_paths: HashMap<String, i32> = HashMap::new();
+    let mut frontier: Vec<(String, usize, i32, i32, String)> = Vec::new();
+    let mut best_paths: HashMap<String, (i32, usize, i32)> = HashMap::new();
 
     for seed in &seeds {
-        queue.push_back((seed.id.clone(), 0, 120, "seed".to_string()));
-        best_paths.insert(seed.id.clone(), 120);
+        frontier.push((seed.id.clone(), 0, 120, 0, "seed".to_string()));
+        best_paths.insert(seed.id.clone(), (120, 0, 0));
         impacted_files
             .entry(seed.file.clone())
             .or_insert_with(|| ImpactFile::new(seed.file.clone()))
-            .observe(100, 1.0, "seed symbol");
+            .observe(100, 1.0, "seed symbol", None);
     }
 
-    while let Some((symbol_id, depth, path_score, provenance)) = queue.pop_front() {
+    while !frontier.is_empty() {
+        let (best_idx, _) = frontier
+            .iter()
+            .enumerate()
+            .max_by(|(_, left), (_, right)| {
+                left.2
+                    .cmp(&right.2)
+                    .then(right.1.cmp(&left.1))
+                    .then(left.3.cmp(&right.3))
+                    .then(right.0.cmp(&left.0))
+            })
+            .unwrap_or((0, &(String::new(), 0, 0, 0, String::new())));
+        let (symbol_id, depth, path_score, path_priority, provenance) =
+            frontier.swap_remove(best_idx);
+        let Some(best_state) = best_paths.get(&symbol_id) else {
+            continue;
+        };
+        if *best_state != (path_score, depth, path_priority) {
+            continue;
+        }
         if depth >= depth_limit {
             continue;
         }
@@ -356,12 +372,16 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
             let distance = depth + 1;
             let score = impact_edge_score(distance, &neighbor, &canonical, profile.as_ref(), query);
             let next_path_score = path_score + score - (distance as i32 * 8);
+            let next_path_priority = path_priority + neighbor.priority;
+            let candidate_state = (next_path_score, distance, next_path_priority);
             let reason = format!(
                 "{} {}: {}",
                 neighbor.direction_label(),
                 neighbor.relation.as_str(),
                 neighbor.evidence
             );
+            let support_edge =
+                ImpactSupportEdge::from_neighbor(&neighbor, score, &symbol_id, provenance.clone());
             let entry = impacted_symbols
                 .entry(neighbor.id.clone())
                 .or_insert_with(|| {
@@ -379,6 +399,7 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
                 neighbor.confidence.max(neighbor.evidence_quality),
                 reason.clone(),
                 provenance.clone(),
+                support_edge.clone(),
             );
             impacted_files
                 .entry(neighbor.file.clone())
@@ -387,16 +408,18 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
                     score,
                     neighbor.confidence.max(neighbor.evidence_quality),
                     reason.clone(),
+                    Some(support_edge),
                 );
             let should_expand = best_paths
                 .get(&neighbor.id)
-                .is_none_or(|best| next_path_score > *best);
+                .is_none_or(|existing| better_impact_path(candidate_state, *existing));
             if should_expand {
-                best_paths.insert(neighbor.id.clone(), next_path_score);
-                queue.push_back((
+                best_paths.insert(neighbor.id.clone(), candidate_state);
+                frontier.push((
                     neighbor.id.clone(),
                     distance,
                     next_path_score,
+                    next_path_priority,
                     format!("{} of {}", neighbor.direction_label(), symbol_id),
                 ));
             }
@@ -488,6 +511,10 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
 }
 
 pub async fn navigate_code(params: NavigateCodeParams) -> anyhow::Result<Value> {
+    let canonical = resolve_project_path(&params.project)?;
+    let profile = load_project_meta(&canonical)
+        .ok()
+        .map(|meta| meta.repo_profile);
     let route = choose_navigation_route(NavigationRouteContext {
         intent: params.intent.as_deref(),
         has_symbol: params.symbol_id.is_some(),
@@ -557,6 +584,15 @@ pub async fn navigate_code(params: NavigateCodeParams) -> anyhow::Result<Value> 
             "navigation_reason".to_string(),
             json!(route.reason(&params)),
         );
+        if let Some(ref profile) = profile {
+            map.insert(
+                "navigation_repo_context".to_string(),
+                json!({
+                    "repo_map": compact_repo_map(Some(profile)),
+                    "route_bias": route.repo_bias(profile, &params.query),
+                }),
+            );
+        }
     }
     Ok(response)
 }
@@ -612,6 +648,30 @@ impl NavigationRoute {
             Self::Locate => "no explicit read/trace/impact target was provided".to_string(),
         }
     }
+
+    fn repo_bias(&self, profile: &RepoProfile, query: &str) -> String {
+        let archetype = crate::index::repo_profile::archetype_label(profile.archetype);
+        let query_lower = query.to_ascii_lowercase();
+        match self {
+            Self::Read => {
+                format!("read route bypassed repo-role bias for explicit target selection in a {archetype} repo")
+            }
+            Self::Trace if query_lower.contains("config") || query_lower.contains("env") => {
+                format!("trace route favored bootstrap/config-heavy paths in a {archetype} repo")
+            }
+            Self::Trace => {
+                format!(
+                    "trace route favored entrypoint/bootstrap-heavy paths in a {archetype} repo"
+                )
+            }
+            Self::Impact => {
+                format!("impact route favored direct callers/callees but kept repo-role priors for a {archetype} repo")
+            }
+            Self::Locate => {
+                format!("locate route kept repo-role priors active for broad discovery in a {archetype} repo")
+            }
+        }
+    }
 }
 
 fn choose_locate_route(intent: &Option<String>, query: &str) -> LocateRoute {
@@ -633,6 +693,26 @@ fn choose_locate_route(intent: &Option<String>, query: &str) -> LocateRoute {
         LocateRoute::Symbols {
             mode: mode.to_string(),
         }
+    }
+}
+
+fn fallback_locate_route(route: &LocateRoute, query: &str) -> Option<LocateRoute> {
+    match route {
+        LocateRoute::Project => Some(LocateRoute::Files),
+        LocateRoute::Files | LocateRoute::Content => Some(LocateRoute::Symbols {
+            mode: fallback_symbol_mode(query).to_string(),
+        }),
+        LocateRoute::Symbols { .. } => None,
+    }
+}
+
+fn fallback_symbol_mode(query: &str) -> &'static str {
+    if prefers_semantic_discovery(query) {
+        "semantic"
+    } else if looks_like_exact_symbol(query) {
+        "bm25"
+    } else {
+        "fuzzy"
     }
 }
 
@@ -692,6 +772,19 @@ fn looks_like_text_snippet(query: &str) -> bool {
     words >= 3 || query.contains('\"') || query.contains('\'') || query.contains("=>")
 }
 
+fn prefers_semantic_discovery(query: &str) -> bool {
+    let trimmed = query.trim();
+    if trimmed.is_empty()
+        || looks_like_exact_symbol(trimmed)
+        || looks_like_path(trimmed)
+        || looks_like_text_snippet(trimmed)
+    {
+        return false;
+    }
+
+    trimmed.split_whitespace().count() >= 2
+}
+
 fn looks_broad_repo_query(query: &str) -> bool {
     let lower = query.trim().to_lowercase();
     matches!(
@@ -748,7 +841,19 @@ async fn locate_project(params: &LocateCodeParams, limit: usize) -> anyhow::Resu
     })
     .await?;
 
-    let results = result["directories"]
+    let mut results = Vec::new();
+    if !result["repo_map"].is_null() {
+        results.push(json!({
+            "kind": "repo_map",
+            "name": "repo map",
+            "file": "",
+            "repo_map": result["repo_map"],
+            "source_tool": "get_project_outline",
+        }));
+    }
+
+    let repo_map = result["repo_map"].clone();
+    let mut directories = result["directories"]
         .as_array()
         .cloned()
         .unwrap_or_default()
@@ -764,7 +869,111 @@ async fn locate_project(params: &LocateCodeParams, limit: usize) -> anyhow::Resu
             })
         })
         .collect::<Vec<_>>();
+    let canonical = resolve_project_path(&params.project)?;
+    rerank_project_directories(&mut directories, &canonical, &params.query, &repo_map);
+    results.extend(directories);
+    results.truncate(limit);
     Ok(results)
+}
+
+fn rerank_project_directories(
+    results: &mut [Value],
+    project_path: &Path,
+    query: &str,
+    repo_map: &Value,
+) {
+    if results.is_empty() {
+        return;
+    }
+    let top_roles = repo_map["top_roles"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let entrypoints = repo_map["entrypoints"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+        .collect::<Vec<_>>();
+    let query_lower = query.to_ascii_lowercase();
+
+    results.sort_by(|left, right| {
+        let left_score = project_directory_score(
+            left,
+            project_path,
+            &query_lower,
+            top_roles.as_slice(),
+            entrypoints.as_slice(),
+        );
+        let right_score = project_directory_score(
+            right,
+            project_path,
+            &query_lower,
+            top_roles.as_slice(),
+            entrypoints.as_slice(),
+        );
+        right_score.cmp(&left_score).then_with(|| {
+            left["dir"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(right["dir"].as_str().unwrap_or(""))
+        })
+    });
+}
+
+fn project_directory_score(
+    candidate: &Value,
+    project_path: &Path,
+    query_lower: &str,
+    top_roles: &[Value],
+    entrypoints: &[String],
+) -> i32 {
+    let dir = candidate["dir"].as_str().unwrap_or("").to_ascii_lowercase();
+    let mut score = 0;
+
+    for (rank, role) in top_roles.iter().enumerate() {
+        let role_name = role["role"].as_str().unwrap_or("");
+        if !role_name.is_empty() && dir.contains(role_name) {
+            score += 20 - rank as i32 * 4;
+        }
+    }
+
+    if entrypoints.iter().any(|entry| {
+        entry.eq_ignore_ascii_case(dir.as_str()) || entry.starts_with(&format!("{dir}/"))
+    }) {
+        score += 12;
+    }
+
+    if query_lower.contains("config")
+        || query_lower.contains("setting")
+        || query_lower.contains("env")
+    {
+        if dir.contains("config") {
+            score += 16;
+        }
+        if dir.contains("bootstrap") || dir.contains("init") {
+            score += 8;
+        }
+    }
+    if (query_lower.contains("start")
+        || query_lower.contains("boot")
+        || query_lower.contains("entry"))
+        && (dir.contains("src") || dir.contains("bin") || dir.contains("main"))
+    {
+        score += 10;
+    }
+    if (query_lower.contains("route")
+        || query_lower.contains("request")
+        || query_lower.contains("http"))
+        && (dir.contains("handler") || dir.contains("route") || dir.contains("http"))
+    {
+        score += 12;
+    }
+
+    score += session::directory_boost(project_path, Path::new(&dir));
+
+    score
 }
 
 async fn locate_files(params: &LocateCodeParams, limit: usize) -> anyhow::Result<Vec<Value>> {
@@ -882,6 +1091,7 @@ async fn locate_symbols(
                 "name": sym["name"],
                 "qualified": sym["qualified"],
                 "symbol_kind": sym["kind"],
+                "path_role": sym["path_role"],
                 "language": sym["language"],
                 "file": sym["file"],
                 "line_start": sym["line_start"],
@@ -924,6 +1134,7 @@ async fn locate_symbols(
                         "name": sym["name"],
                         "qualified": sym["qualified"],
                         "symbol_kind": sym["kind"],
+                        "path_role": sym["path_role"],
                         "language": sym["language"],
                         "file": sym["file"],
                         "line_start": sym["line_start"],
@@ -936,10 +1147,124 @@ async fn locate_symbols(
         }
     }
 
+    if mode == "semantic" && !looks_like_exact_symbol(&params.query) && !results.is_empty() {
+        let canonical = resolve_project_path(&params.project)?;
+        let profile = load_project_meta(&canonical)
+            .ok()
+            .map(|meta| meta.repo_profile);
+        rerank_locate_symbol_results(&mut results, &canonical, &params.query, profile.as_ref());
+    }
+
     Ok(results)
 }
 
+fn rerank_locate_symbol_results(
+    results: &mut [Value],
+    project_path: &Path,
+    query: &str,
+    profile: Option<&RepoProfile>,
+) {
+    let Some(profile) = profile else {
+        return;
+    };
+    let role_counts = summarize_role_counts(Some(profile));
+    let mut dominant_roles: Vec<(String, usize)> = role_counts.into_iter().collect();
+    dominant_roles.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    dominant_roles.truncate(3);
+    let entrypoints = profile_entrypoints(Some(profile));
+    let query_lower = query.to_ascii_lowercase();
+
+    results.sort_by(|left, right| {
+        let left_score = locate_symbol_repo_score(
+            left,
+            project_path,
+            &query_lower,
+            &dominant_roles,
+            entrypoints.as_slice(),
+        );
+        let right_score = locate_symbol_repo_score(
+            right,
+            project_path,
+            &query_lower,
+            &dominant_roles,
+            entrypoints.as_slice(),
+        );
+        right_score.cmp(&left_score).then_with(|| {
+            left["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(right["name"].as_str().unwrap_or(""))
+        })
+    });
+}
+
+fn locate_symbol_repo_score(
+    candidate: &Value,
+    project_path: &Path,
+    query_lower: &str,
+    dominant_roles: &[(String, usize)],
+    entrypoints: &[String],
+) -> i32 {
+    let role = candidate["path_role"].as_str().unwrap_or("");
+    let file = candidate["file"].as_str().unwrap_or("");
+    let mut score = 0;
+
+    for (rank, (dominant_role, count)) in dominant_roles.iter().enumerate() {
+        if role == dominant_role {
+            score += 18 - rank as i32 * 4 + (*count as i32).min(6);
+        }
+    }
+
+    if entrypoints.iter().any(|entry| entry == file) {
+        score += 10;
+        if query_lower.contains("start")
+            || query_lower.contains("boot")
+            || query_lower.contains("entry")
+            || query_lower.contains("flow")
+            || query_lower.contains("path")
+        {
+            score += 8;
+        }
+    }
+
+    if role == role_label(crate::index::repo_profile::PathRole::Config)
+        && (query_lower.contains("config")
+            || query_lower.contains("setting")
+            || query_lower.contains("env"))
+    {
+        score += 14;
+    }
+    if role == role_label(crate::index::repo_profile::PathRole::Bootstrap)
+        && (query_lower.contains("start")
+            || query_lower.contains("boot")
+            || query_lower.contains("init"))
+    {
+        score += 14;
+    }
+    if role == role_label(crate::index::repo_profile::PathRole::Handler)
+        && (query_lower.contains("request")
+            || query_lower.contains("route")
+            || query_lower.contains("http"))
+    {
+        score += 12;
+    }
+
+    if let Some(symbol_id) = candidate["id"].as_str() {
+        score += session::symbol_boost(project_path, symbol_id, Some(Path::new(file)));
+    } else {
+        score += session::file_boost(project_path, Path::new(file));
+    }
+
+    score
+}
+
 async fn resolve_impact_seeds(params: &AnalyzeImpactParams) -> anyhow::Result<Vec<ImpactSeed>> {
+    let canonical = resolve_project_path(&params.project)?;
+    let profile = load_project_meta(&canonical)
+        .ok()
+        .map(|meta| meta.repo_profile);
+    let profile_ref = profile.as_ref();
+
     if let Some(symbol_id) = params.symbol_id.as_deref() {
         let index = load_project_index(&params.project)?;
         if let Some(sym) = index.symbols.get(symbol_id) {
@@ -964,24 +1289,13 @@ async fn resolve_impact_seeds(params: &AnalyzeImpactParams) -> anyhow::Result<Ve
             file_path: file_path.to_string(),
         })
         .await?;
-        let seeds = outline["symbols"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .take(3)
-            .filter_map(|sym| {
-                Some(ImpactSeed {
-                    id: sym["id"].as_str()?.to_string(),
-                    name: sym["name"]
-                        .as_str()
-                        .unwrap_or(sym["id"].as_str()?)
-                        .to_string(),
-                    kind: sym["kind"].as_str().unwrap_or("symbol").to_string(),
-                    file: file_path.to_string(),
-                })
-            })
-            .collect::<Vec<_>>();
+        let seeds = impact_file_outline_seeds(
+            &outline,
+            file_path,
+            params.query.as_deref(),
+            &canonical,
+            profile_ref,
+        );
         if !seeds.is_empty() {
             return Ok(seeds);
         }
@@ -998,8 +1312,10 @@ async fn resolve_impact_seeds(params: &AnalyzeImpactParams) -> anyhow::Result<Ve
             limit: Some(5),
         })
         .await?;
+        let mut candidates = located["results"].as_array().cloned().unwrap_or_default();
+        rerank_impact_seed_candidates(&mut candidates, query, &canonical, profile_ref);
         let mut seeds = Vec::new();
-        for candidate in located["results"].as_array().into_iter().flatten() {
+        for candidate in candidates {
             if let Some(id) = candidate["id"].as_str() {
                 seeds.push(ImpactSeed {
                     id: id.to_string(),
@@ -1016,24 +1332,133 @@ async fn resolve_impact_seeds(params: &AnalyzeImpactParams) -> anyhow::Result<Ve
                     file_path: file.to_string(),
                 })
                 .await?;
-                for sym in outline["symbols"].as_array().into_iter().flatten().take(3) {
-                    if let Some(id) = sym["id"].as_str() {
-                        seeds.push(ImpactSeed {
-                            id: id.to_string(),
-                            name: sym["name"].as_str().unwrap_or(id).to_string(),
-                            kind: sym["kind"].as_str().unwrap_or("symbol").to_string(),
-                            file: file.to_string(),
-                        });
-                    }
-                }
+                seeds.extend(impact_file_outline_seeds(
+                    &outline,
+                    file,
+                    Some(query),
+                    &canonical,
+                    profile_ref,
+                ));
             }
         }
         if !seeds.is_empty() {
-            return Ok(seeds);
+            let mut deduped = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for seed in seeds {
+                if seen.insert(seed.id.clone()) {
+                    deduped.push(seed);
+                }
+                if deduped.len() >= 5 {
+                    break;
+                }
+            }
+            return Ok(deduped);
         }
     }
 
     Ok(Vec::new())
+}
+
+fn rerank_impact_seed_candidates(
+    candidates: &mut [Value],
+    query: &str,
+    project_path: &Path,
+    profile: Option<&crate::index::repo_profile::RepoProfile>,
+) {
+    candidates.sort_by(|left, right| {
+        let left_score = impact_seed_candidate_score(left, query, project_path, profile);
+        let right_score = impact_seed_candidate_score(right, query, project_path, profile);
+        right_score.cmp(&left_score).then_with(|| {
+            left["name"]
+                .as_str()
+                .unwrap_or(left["file"].as_str().unwrap_or(""))
+                .cmp(
+                    right["name"]
+                        .as_str()
+                        .unwrap_or(right["file"].as_str().unwrap_or("")),
+                )
+        })
+    });
+}
+
+fn impact_seed_candidate_score(
+    candidate: &Value,
+    query: &str,
+    project_path: &Path,
+    profile: Option<&crate::index::repo_profile::RepoProfile>,
+) -> i32 {
+    let file = candidate["file"].as_str().unwrap_or("");
+    let name = candidate["name"]
+        .as_str()
+        .or_else(|| candidate["qualified"].as_str())
+        .unwrap_or(file);
+    let mut score = impact_score(0, file, name, project_path, profile, query);
+    match candidate["kind"].as_str().unwrap_or("symbol") {
+        "symbol" => {
+            score += 24;
+            score += impact_symbol_kind_bonus(candidate["symbol_kind"].as_str().unwrap_or(""));
+        }
+        "file" => score += 8,
+        "content" => score += 4,
+        _ => {}
+    }
+    if let Some(symbol_id) = candidate["id"].as_str() {
+        score += session::symbol_boost(project_path, symbol_id, Some(Path::new(file)));
+    } else {
+        score += session::file_boost(project_path, Path::new(file));
+    }
+    score
+}
+
+fn impact_file_outline_seeds(
+    outline: &Value,
+    file: &str,
+    query: Option<&str>,
+    project_path: &Path,
+    profile: Option<&crate::index::repo_profile::RepoProfile>,
+) -> Vec<ImpactSeed> {
+    let query = query.unwrap_or("");
+    let mut ranked = outline["symbols"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|sym| {
+            let id = sym["id"].as_str()?.to_string();
+            let name = sym["name"].as_str().unwrap_or(&id).to_string();
+            let kind = sym["kind"].as_str().unwrap_or("symbol").to_string();
+            let score = impact_score(0, file, &name, project_path, profile, query)
+                + 20
+                + impact_symbol_kind_bonus(&kind);
+            Some((
+                score,
+                ImpactSeed {
+                    id,
+                    name,
+                    kind,
+                    file: file.to_string(),
+                },
+            ))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.name.cmp(&right.1.name))
+    });
+    ranked.into_iter().take(3).map(|(_, seed)| seed).collect()
+}
+
+fn impact_symbol_kind_bonus(kind: &str) -> i32 {
+    match kind {
+        "function" | "method" => 14,
+        "impl_method" | "associated_function" => 12,
+        "trait_method" => 10,
+        "class" | "struct" | "enum" | "trait" | "interface" => 4,
+        "module" | "namespace" => -6,
+        _ => 0,
+    }
 }
 
 #[derive(Clone)]
@@ -1087,6 +1512,54 @@ impl ImpactNeighbor {
 }
 
 #[derive(Clone)]
+struct ImpactSupportEdge {
+    direction: &'static str,
+    relation: EdgeRelation,
+    evidence: String,
+    confidence: f32,
+    evidence_quality: f32,
+    priority: i32,
+    score: i32,
+    via_symbol_id: String,
+    provenance: String,
+}
+
+impl ImpactSupportEdge {
+    fn from_neighbor(
+        neighbor: &ImpactNeighbor,
+        score: i32,
+        via_symbol_id: &str,
+        provenance: String,
+    ) -> Self {
+        Self {
+            direction: neighbor.direction_label(),
+            relation: neighbor.relation,
+            evidence: neighbor.evidence.clone(),
+            confidence: neighbor.confidence,
+            evidence_quality: neighbor.evidence_quality,
+            priority: neighbor.priority,
+            score,
+            via_symbol_id: via_symbol_id.to_string(),
+            provenance,
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "direction": self.direction,
+            "relation": self.relation.as_str(),
+            "evidence": self.evidence,
+            "confidence": self.confidence,
+            "evidence_quality": self.evidence_quality,
+            "priority": self.priority,
+            "score": self.score,
+            "via_symbol_id": self.via_symbol_id,
+            "provenance": self.provenance,
+        })
+    }
+}
+
+#[derive(Clone)]
 struct ImpactSymbol {
     id: String,
     name: String,
@@ -1096,6 +1569,7 @@ struct ImpactSymbol {
     score: i32,
     confidence: f32,
     reasons: Vec<String>,
+    support_edges: Vec<ImpactSupportEdge>,
 }
 
 impl ImpactSymbol {
@@ -1109,6 +1583,7 @@ impl ImpactSymbol {
             score: 0,
             confidence: 0.0,
             reasons: Vec::new(),
+            support_edges: Vec::new(),
         }
     }
 
@@ -1119,6 +1594,7 @@ impl ImpactSymbol {
         confidence: f32,
         reason: impl Into<String>,
         provenance: String,
+        support_edge: ImpactSupportEdge,
     ) {
         if score > self.score {
             self.score = score;
@@ -1131,9 +1607,31 @@ impl ImpactSymbol {
         }
         self.reasons
             .push(format!("{} ({})", reason.into(), provenance));
+        self.support_edges.push(support_edge);
+        self.support_edges.sort_by(|a, b| {
+            b.score
+                .cmp(&a.score)
+                .then_with(|| b.priority.cmp(&a.priority))
+                .then_with(|| {
+                    b.evidence_quality
+                        .partial_cmp(&a.evidence_quality)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        });
+        self.support_edges.truncate(3);
     }
 
     fn to_json(&self) -> Value {
+        let direct_calls = self
+            .reasons
+            .iter()
+            .filter(|reason| reason.contains(" calls: "))
+            .count();
+        let direct_references = self
+            .reasons
+            .iter()
+            .filter(|reason| reason.contains(" references: "))
+            .count();
         json!({
             "id": self.id,
             "name": self.name,
@@ -1143,6 +1641,16 @@ impl ImpactSymbol {
             "score": self.score,
             "confidence": self.confidence,
             "reasons": self.reasons,
+            "support_edges": self.support_edges.iter().map(|edge| edge.to_json()).collect::<Vec<_>>(),
+            "provenance": {
+                "direct_calls": direct_calls,
+                "direct_references": direct_references,
+                "dominant_signal": if direct_calls >= direct_references {
+                    "calls"
+                } else {
+                    "references"
+                },
+            },
         })
     }
 }
@@ -1154,6 +1662,7 @@ struct ImpactFile {
     usage_count: usize,
     confidence: f32,
     reasons: Vec<String>,
+    support_edges: Vec<ImpactSupportEdge>,
 }
 
 impl ImpactFile {
@@ -1164,23 +1673,64 @@ impl ImpactFile {
             usage_count: 0,
             confidence: 0.0,
             reasons: Vec::new(),
+            support_edges: Vec::new(),
         }
     }
 
-    fn observe(&mut self, score: i32, confidence: f32, reason: impl Into<String>) {
+    fn observe(
+        &mut self,
+        score: i32,
+        confidence: f32,
+        reason: impl Into<String>,
+        support_edge: Option<ImpactSupportEdge>,
+    ) {
         self.usage_count += 1;
         self.score = self.score.max(score);
         self.confidence = self.confidence.max(confidence);
         self.reasons.push(reason.into());
+        if let Some(edge) = support_edge {
+            self.support_edges.push(edge);
+            self.support_edges.sort_by(|a, b| {
+                b.score
+                    .cmp(&a.score)
+                    .then_with(|| b.priority.cmp(&a.priority))
+                    .then_with(|| {
+                        b.evidence_quality
+                            .partial_cmp(&a.evidence_quality)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+            self.support_edges.truncate(3);
+        }
     }
 
     fn to_json(&self) -> Value {
+        let direct_calls = self
+            .reasons
+            .iter()
+            .filter(|reason| reason.contains(" calls: "))
+            .count();
+        let direct_references = self
+            .reasons
+            .iter()
+            .filter(|reason| reason.contains(" references: "))
+            .count();
         json!({
             "file": self.file,
             "score": self.score,
             "usage_count": self.usage_count,
             "confidence": self.confidence,
             "reasons": self.reasons,
+            "support_edges": self.support_edges.iter().map(|edge| edge.to_json()).collect::<Vec<_>>(),
+            "provenance": {
+                "direct_calls": direct_calls,
+                "direct_references": direct_references,
+                "dominant_signal": if direct_calls >= direct_references {
+                    "calls"
+                } else {
+                    "references"
+                },
+            },
         })
     }
 }
@@ -1301,6 +1851,13 @@ fn impact_edge_score(
         + (edge_evidence_quality(&neighbor.evidence) * 10.0).round() as i32
 }
 
+fn better_impact_path(candidate: (i32, usize, i32), existing: (i32, usize, i32)) -> bool {
+    candidate.0 > existing.0
+        || (candidate.0 == existing.0
+            && (candidate.1 < existing.1
+                || (candidate.1 == existing.1 && candidate.2 > existing.2)))
+}
+
 fn build_edge_provenance_summary(symbols: &[ImpactSymbol], files: &[ImpactFile]) -> Value {
     let mut direct_calls = 0;
     let mut direct_references = 0;
@@ -1328,7 +1885,13 @@ fn build_edge_provenance_summary(symbols: &[ImpactSymbol], files: &[ImpactFile])
 }
 
 fn candidate_target(candidate: &Value) -> Value {
-    if candidate["kind"].as_str() == Some("file") || candidate["kind"].as_str() == Some("directory")
+    if candidate["kind"].as_str() == Some("repo_map") {
+        json!({
+            "intent": "project",
+            "project_view": "repo_map",
+        })
+    } else if candidate["kind"].as_str() == Some("file")
+        || candidate["kind"].as_str() == Some("directory")
     {
         json!({
             "file_path": candidate["file"],
@@ -1482,6 +2045,263 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_locate_code_project_query_surfaces_repo_map() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("main.rs"),
+            "pub fn main() { bootstrap(); }\npub fn bootstrap() {}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config").join("settings.rs"),
+            "pub fn load() {}\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = locate_code(LocateCodeParams {
+            project,
+            query: "repo layout".to_string(),
+            intent: None,
+            kind: None,
+            language: None,
+            scope: None,
+            limit: Some(5),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            result["route_used"].as_str().unwrap(),
+            "get_project_outline"
+        );
+        assert_eq!(result["results"][0]["kind"].as_str().unwrap(), "repo_map");
+        assert_eq!(
+            result["steering"]["recommended_next_tool"]
+                .as_str()
+                .unwrap(),
+            "search_files"
+        );
+        assert_eq!(
+            result["results"][0]["repo_map"]["archetype"],
+            serde_json::json!("cli")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_locate_code_project_query_prefers_config_directory_for_config_queries() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("main.rs"),
+            "pub fn main() { bootstrap(); }\npub fn bootstrap() {}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config").join("settings.rs"),
+            "pub fn load() {}\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("handlers")).unwrap();
+        std::fs::write(
+            dir.path().join("handlers").join("http.rs"),
+            "pub fn serve() {}\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = locate_code(LocateCodeParams {
+            project,
+            query: "config overview".to_string(),
+            intent: Some("project".to_string()),
+            kind: None,
+            language: None,
+            scope: None,
+            limit: Some(5),
+        })
+        .await
+        .unwrap();
+
+        let directories = result["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["kind"].as_str() == Some("directory"))
+            .collect::<Vec<_>>();
+        assert!(!directories.is_empty());
+        assert_eq!(directories[0]["dir"], json!("config"));
+    }
+
+    #[test]
+    fn test_rerank_locate_symbol_results_prefers_entrypoints_for_startup_queries() {
+        let project = std::path::Path::new("/tmp/orchestrator-rerank-startup");
+        let profile = RepoProfile {
+            archetype: crate::index::repo_profile::RepoArchetype::Cli,
+            file_roles: HashMap::from([
+                (
+                    "main.rs".to_string(),
+                    crate::index::repo_profile::PathRole::Entrypoint,
+                ),
+                (
+                    "config/settings.rs".to_string(),
+                    crate::index::repo_profile::PathRole::Config,
+                ),
+            ]),
+            role_counts: HashMap::from([
+                (crate::index::repo_profile::PathRole::Entrypoint, 1),
+                (crate::index::repo_profile::PathRole::Config, 1),
+            ]),
+            entrypoints: vec!["main.rs".to_string()],
+        };
+        let mut results = vec![
+            json!({
+                "kind": "symbol",
+                "id": "load_settings",
+                "name": "load_settings",
+                "file": "config/settings.rs",
+                "path_role": "config",
+            }),
+            json!({
+                "kind": "symbol",
+                "id": "main",
+                "name": "main",
+                "file": "main.rs",
+                "path_role": "entrypoint",
+            }),
+        ];
+
+        rerank_locate_symbol_results(&mut results, project, "startup flow", Some(&profile));
+
+        assert_eq!(results[0]["name"], json!("main"));
+    }
+
+    #[test]
+    fn test_rerank_locate_symbol_results_prefers_recent_symbol_in_same_subsystem() {
+        let project = std::path::Path::new("/tmp/orchestrator-rerank-session-symbol");
+        crate::session::record_symbol(
+            project,
+            "config_loader",
+            Some(std::path::Path::new("config/settings.rs")),
+        );
+        let profile = RepoProfile {
+            archetype: crate::index::repo_profile::RepoArchetype::Service,
+            file_roles: HashMap::from([
+                (
+                    "config/settings.rs".to_string(),
+                    crate::index::repo_profile::PathRole::Config,
+                ),
+                (
+                    "config/loader.rs".to_string(),
+                    crate::index::repo_profile::PathRole::Config,
+                ),
+            ]),
+            role_counts: HashMap::from([(crate::index::repo_profile::PathRole::Config, 2)]),
+            entrypoints: vec![],
+        };
+        let mut results = vec![
+            json!({
+                "kind": "symbol",
+                "id": "config_loader",
+                "name": "config_loader",
+                "file": "config/settings.rs",
+                "path_role": "config",
+            }),
+            json!({
+                "kind": "symbol",
+                "id": "config_bootstrap",
+                "name": "config_bootstrap",
+                "file": "config/loader.rs",
+                "path_role": "config",
+            }),
+        ];
+
+        rerank_locate_symbol_results(&mut results, project, "config flow", Some(&profile));
+
+        assert_eq!(results[0]["name"], json!("config_loader"));
+    }
+
+    #[test]
+    fn test_fallback_symbol_mode_uses_semantic_only_for_vague_discovery_queries() {
+        assert_eq!(fallback_symbol_mode("startup flow"), "semantic");
+        assert_eq!(fallback_symbol_mode("impact_score"), "bm25");
+        assert_eq!(fallback_symbol_mode("src/config/settings.rs"), "fuzzy");
+        assert_eq!(fallback_symbol_mode("pub fn load()"), "fuzzy");
+    }
+
+    #[test]
+    fn test_rerank_impact_seed_candidates_prefers_repo_aligned_symbols() {
+        let profile = RepoProfile {
+            archetype: crate::index::repo_profile::RepoArchetype::Service,
+            file_roles: HashMap::from([
+                (
+                    "config/settings.rs".to_string(),
+                    crate::index::repo_profile::PathRole::Config,
+                ),
+                (
+                    "handlers/http.rs".to_string(),
+                    crate::index::repo_profile::PathRole::Handler,
+                ),
+            ]),
+            role_counts: HashMap::from([
+                (crate::index::repo_profile::PathRole::Config, 1),
+                (crate::index::repo_profile::PathRole::Handler, 1),
+            ]),
+            entrypoints: vec!["main.rs".to_string()],
+        };
+        let mut candidates = vec![
+            json!({
+                "kind": "file",
+                "file": "config/settings.rs",
+                "name": "settings.rs",
+            }),
+            json!({
+                "kind": "symbol",
+                "name": "serve_http",
+                "file": "handlers/http.rs",
+                "symbol_kind": "function",
+            }),
+            json!({
+                "kind": "symbol",
+                "name": "load_settings",
+                "file": "config/settings.rs",
+                "symbol_kind": "function",
+            }),
+        ];
+
+        rerank_impact_seed_candidates(
+            &mut candidates,
+            "config impact",
+            std::path::Path::new("."),
+            Some(&profile),
+        );
+
+        assert_eq!(candidates[0]["name"], json!("load_settings"));
+        assert_eq!(candidates[2]["file"], json!("config/settings.rs"));
+    }
+
+    #[test]
+    fn test_rerank_project_directories_prefers_recent_subsystem_focus() {
+        let project = std::path::Path::new("/tmp/orchestrator-rerank-session-dir");
+        crate::session::record_file(project, std::path::Path::new("handlers/http.rs"));
+        let repo_map = json!({
+            "top_roles": [
+                { "role": "config", "count": 1 },
+                { "role": "handler", "count": 1 }
+            ],
+            "entrypoints": []
+        });
+        let mut results = vec![
+            json!({ "kind": "directory", "dir": "config", "file": "config" }),
+            json!({ "kind": "directory", "dir": "handlers", "file": "handlers" }),
+        ];
+
+        rerank_project_directories(&mut results, project, "overview", &repo_map);
+
+        assert_eq!(results[0]["dir"], json!("handlers"));
+    }
+
+    #[tokio::test]
     async fn test_read_code_unit_returns_outline_for_file() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
@@ -1565,6 +2385,20 @@ mod tests {
         assert!(names.contains(&"branch"));
         assert!(names.contains(&"root"));
         assert_eq!(impact_symbols[0]["name"], json!("branch"));
+        assert_eq!(
+            impact_symbols[0]["support_edges"][0]["relation"],
+            json!("calls")
+        );
+        assert_eq!(
+            impact_symbols[0]["support_edges"][0]["direction"],
+            json!("direct caller")
+        );
+        assert!(
+            impact_symbols[0]["support_edges"][0]["evidence_quality"]
+                .as_f64()
+                .unwrap_or(0.0)
+                > 0.0
+        );
     }
 
     #[tokio::test]
@@ -1639,6 +2473,14 @@ mod tests {
         assert_eq!(result["navigation_route"].as_str().unwrap(), "trace_path");
         assert_eq!(result["source_hint"].as_str().unwrap(), "branch");
         assert_eq!(result["sink_hint"].as_str().unwrap(), "leaf");
+        assert_eq!(
+            result["navigation_repo_context"]["repo_map"]["archetype"],
+            serde_json::json!("library")
+        );
+        assert!(result["navigation_repo_context"]["route_bias"]
+            .as_str()
+            .unwrap()
+            .contains("entrypoint/bootstrap"));
         let shortest_path = result["shortest_path"].as_array().unwrap();
         assert_eq!(
             shortest_path[0]["symbol_id"],
@@ -1693,6 +2535,18 @@ mod tests {
                 .as_u64()
                 .unwrap_or(0)
                 >= 1
+        );
+        assert!(
+            result["impact_symbols"][0]["provenance"]["direct_calls"]
+                .as_u64()
+                .unwrap_or(0)
+                >= 1
+        );
+        assert_eq!(
+            result["impact_symbols"][0]["provenance"]["dominant_signal"]
+                .as_str()
+                .unwrap(),
+            "calls"
         );
     }
 

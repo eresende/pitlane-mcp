@@ -11,7 +11,7 @@ struct Cli {
     command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Index a project (or load from cache if up to date)
     Index {
@@ -166,6 +166,54 @@ enum Command {
         /// Path to the indexed project
         project: String,
     },
+    /// Trace the strongest graph-backed path for a query
+    TracePath {
+        /// Path to the indexed project
+        project: String,
+        /// Flow or execution-path intent to trace
+        query: String,
+        /// Optional source symbol or source hint
+        #[arg(long)]
+        source: Option<String>,
+        /// Optional sink symbol or sink hint
+        #[arg(long)]
+        sink: Option<String>,
+        /// Restrict tracing to a language
+        #[arg(long)]
+        lang: Option<String>,
+        /// Restrict tracing to files matching a glob pattern
+        #[arg(long)]
+        file: Option<String>,
+        /// Maximum important symbols to retain
+        #[arg(long)]
+        max_symbols: Option<usize>,
+        /// Maximum graph expansion depth
+        #[arg(long)]
+        max_depth: Option<usize>,
+    },
+    /// Analyze blast radius using weighted graph traversal
+    AnalyzeImpact {
+        /// Path to the indexed project
+        project: String,
+        /// Optional symbol or concept query
+        #[arg(long)]
+        query: Option<String>,
+        /// Stable symbol ID to analyze directly
+        #[arg(long)]
+        symbol_id: Option<String>,
+        /// File path to analyze when the target is file-centric
+        #[arg(long)]
+        file_path: Option<String>,
+        /// Restrict callers/usages to a subtree or glob
+        #[arg(long)]
+        scope: Option<String>,
+        /// Maximum traversal depth
+        #[arg(long)]
+        depth: Option<usize>,
+        /// Maximum impacted symbols/files to return
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Show token-efficiency statistics for get_symbol
     UsageStats {
         /// Path to the indexed project (omit for global totals)
@@ -191,7 +239,32 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let result = match cli.command {
+    match cli.command {
+        Command::Watch { project } => {
+            let embed_config = pitlane_mcp::embed::EmbedConfig::from_env().map(Arc::new);
+            let registry = tools::watch_project::WatcherRegistry::new();
+            let params = tools::watch_project::WatchProjectParams {
+                project: project.clone(),
+                stop: None,
+                status_only: None,
+                embed_config,
+            };
+            let result = tools::watch_project::watch_project(params, &registry).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            tokio::signal::ctrl_c().await?;
+            let _ = registry.stop(&project);
+            Ok(())
+        }
+        command => {
+            let result = run_command(command).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+            Ok(())
+        }
+    }
+}
+
+async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
+    let result = match command {
         Command::Index {
             path,
             force,
@@ -401,25 +474,55 @@ async fn main() -> anyhow::Result<()> {
             tools::wait_for_embeddings::wait_for_embeddings(params).await?
         }
 
-        Command::Watch { project } => {
-            let embed_config = pitlane_mcp::embed::EmbedConfig::from_env().map(Arc::new);
-            let registry = tools::watch_project::WatcherRegistry::new();
-            let params = tools::watch_project::WatchProjectParams {
-                project: project.clone(),
-                stop: None,
-                status_only: None,
-                embed_config,
-            };
-            let result = tools::watch_project::watch_project(params, &registry).await?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            tokio::signal::ctrl_c().await?;
-            let _ = registry.stop(&project);
-            return Ok(());
-        }
+        Command::Watch { .. } => unreachable!("watch is handled directly in main"),
 
         Command::Stats { project } => {
             let params = tools::get_index_stats::GetIndexStatsParams { project };
             tools::get_index_stats::get_index_stats(params).await?
+        }
+
+        Command::TracePath {
+            project,
+            query,
+            source,
+            sink,
+            lang,
+            file,
+            max_symbols,
+            max_depth,
+        } => {
+            let params = tools::orchestrator::TracePathParams {
+                project,
+                query,
+                source,
+                sink,
+                language: lang,
+                file,
+                max_symbols,
+                max_depth,
+            };
+            tools::orchestrator::trace_path(params).await?
+        }
+
+        Command::AnalyzeImpact {
+            project,
+            query,
+            symbol_id,
+            file_path,
+            scope,
+            depth,
+            limit,
+        } => {
+            let params = tools::orchestrator::AnalyzeImpactParams {
+                project,
+                query,
+                symbol_id,
+                file_path,
+                scope,
+                depth,
+                limit,
+            };
+            tools::orchestrator::analyze_impact(params).await?
         }
 
         Command::UsageStats { project } => {
@@ -427,14 +530,28 @@ async fn main() -> anyhow::Result<()> {
             tools::get_usage_stats::get_usage_stats(params).await?
         }
     };
-
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(())
+    Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    async fn setup_project(dir: &TempDir) -> String {
+        let project = dir.path().to_string_lossy().to_string();
+        let params = tools::index_project::IndexProjectParams {
+            path: project.clone(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        };
+        tools::index_project::index_project(params).await.unwrap();
+        project
+    }
 
     #[test]
     fn embeddings_count_in_store_returns_saved_vector_count() {
@@ -445,5 +562,150 @@ mod tests {
         store.save(tmp.path()).unwrap();
 
         assert_eq!(embeddings_count_in_store(tmp.path()), 2);
+    }
+
+    #[test]
+    fn clap_parses_trace_path_command() {
+        let cli = Cli::try_parse_from([
+            "pitlane",
+            "trace-path",
+            "/tmp/project",
+            "config to sink",
+            "--source",
+            "bootstrap",
+            "--sink",
+            "handler",
+            "--lang",
+            "rust",
+            "--file",
+            "src/**/*.rs",
+            "--max-symbols",
+            "7",
+            "--max-depth",
+            "3",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::TracePath {
+                project,
+                query,
+                source,
+                sink,
+                lang,
+                file,
+                max_symbols,
+                max_depth,
+            } => {
+                assert_eq!(project, "/tmp/project");
+                assert_eq!(query, "config to sink");
+                assert_eq!(source.as_deref(), Some("bootstrap"));
+                assert_eq!(sink.as_deref(), Some("handler"));
+                assert_eq!(lang.as_deref(), Some("rust"));
+                assert_eq!(file.as_deref(), Some("src/**/*.rs"));
+                assert_eq!(max_symbols, Some(7));
+                assert_eq!(max_depth, Some(3));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_analyze_impact_command() {
+        let cli = Cli::try_parse_from([
+            "pitlane",
+            "analyze-impact",
+            "/tmp/project",
+            "--symbol-id",
+            "sym::bootstrap",
+            "--scope",
+            "src/**/*.rs",
+            "--depth",
+            "2",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::AnalyzeImpact {
+                project,
+                query,
+                symbol_id,
+                file_path,
+                scope,
+                depth,
+                limit,
+            } => {
+                assert_eq!(project, "/tmp/project");
+                assert_eq!(query, None);
+                assert_eq!(symbol_id.as_deref(), Some("sym::bootstrap"));
+                assert_eq!(file_path, None);
+                assert_eq!(scope.as_deref(), Some("src/**/*.rs"));
+                assert_eq!(depth, Some(2));
+                assert_eq!(limit, Some(5));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_command_trace_path_includes_edge_metadata() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn leaf() {}\npub fn branch() { leaf(); }\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = run_command(Command::TracePath {
+            project,
+            query: "branch to leaf".to_string(),
+            source: Some("branch".to_string()),
+            sink: Some("leaf".to_string()),
+            lang: None,
+            file: None,
+            max_symbols: Some(5),
+            max_depth: Some(2),
+        })
+        .await
+        .unwrap();
+
+        let edges = result["edges"].as_array().unwrap();
+        assert!(!edges.is_empty());
+        assert!(edges[0]["path_cost"].as_u64().is_some());
+        assert!(edges[0]["evidence_quality"].as_f64().is_some());
+    }
+
+    #[tokio::test]
+    async fn run_command_analyze_impact_includes_support_edges() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn leaf() {}\npub fn branch() { leaf(); }\npub fn wrapper(f: fn()) { f(); }\npub fn root() { wrapper(leaf); }\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = run_command(Command::AnalyzeImpact {
+            project,
+            query: Some("leaf".to_string()),
+            symbol_id: None,
+            file_path: None,
+            scope: None,
+            depth: Some(2),
+            limit: Some(5),
+        })
+        .await
+        .unwrap();
+
+        let impact_symbols = result["impact_symbols"].as_array().unwrap();
+        assert!(!impact_symbols.is_empty());
+        let support_edges = impact_symbols[0]["support_edges"].as_array().unwrap();
+        assert!(!support_edges.is_empty());
+        assert_eq!(support_edges[0]["relation"], serde_json::json!("calls"));
+        assert!(support_edges[0]["evidence_quality"].as_f64().is_some());
+        assert!(support_edges[0]["score"].as_i64().is_some());
     }
 }

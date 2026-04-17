@@ -103,6 +103,7 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
                 "role_counts": crate::index::repo_profile::summarize_role_counts(Some(profile)),
                 "entrypoints": profile.entrypoints.clone(),
             });
+            result["repo_map"] = crate::index::repo_profile::compact_repo_map(Some(profile));
         }
 
         if let Some(ref p) = params.path {
@@ -236,6 +237,7 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
             "role_counts": crate::index::repo_profile::summarize_role_counts(Some(profile)),
             "entrypoints": profile.entrypoints.clone(),
         });
+        result["repo_map"] = crate::index::repo_profile::compact_repo_map(Some(profile));
     }
 
     if let Some(ref p) = params.path {

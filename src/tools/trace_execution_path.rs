@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use serde_json::{json, Value};
@@ -9,7 +9,9 @@ use crate::graph::{
     navigation_edge_metrics, read_symbol_source, EdgeRelation,
 };
 use crate::index::format::load_project_meta;
-use crate::index::repo_profile::role_boost_for_path;
+use crate::index::repo_profile::{
+    profile_entrypoints, role_boost_for_path, role_label, summarize_role_counts, RepoProfile,
+};
 use crate::index::SymbolIndex;
 use crate::indexer::language::Symbol;
 use crate::path_policy::resolve_project_path;
@@ -42,6 +44,8 @@ struct TraceNode {
     why: String,
     distance: usize,
     evidence_hits: usize,
+    best_path_cost: u32,
+    best_path_priority: i32,
 }
 
 #[derive(Clone)]
@@ -59,6 +63,13 @@ struct TraceEdge {
 struct TraceContext<'a> {
     project_path: &'a std::path::Path,
     profile: Option<&'a crate::index::repo_profile::RepoProfile>,
+}
+
+struct TraceNodeEvidence {
+    confidence: f32,
+    path_cost: u32,
+    path_priority: i32,
+    why: String,
 }
 
 pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::Result<Value> {
@@ -91,8 +102,12 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
             adjusted_score(seed, 100, &params.query, profile.as_ref(), &canonical),
             classify_symbol(seed),
             0,
-            1.0,
-            "discovered as a strong seed for the requested behavior".to_string(),
+            TraceNodeEvidence {
+                confidence: 1.0,
+                path_cost: 0,
+                path_priority: 0,
+                why: "discovered as a strong seed for the requested behavior".to_string(),
+            },
         );
         trace_callers(
             &index,
@@ -141,6 +156,7 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
     let shortest_path = build_shortest_path(
         &important,
         &important_edge_records,
+        &params.query,
         params.source.as_deref(),
         params.sink.as_deref(),
     );
@@ -235,6 +251,10 @@ async fn discover_seed_ids(
 ) -> anyhow::Result<(&'static str, Vec<String>)> {
     let mut ids = Vec::new();
     let mut discovered_modes = Vec::new();
+    let canonical = resolve_project_path(&params.project)?;
+    let profile = load_project_meta(&canonical)
+        .ok()
+        .map(|meta| meta.repo_profile);
 
     for query in [
         Some(params.query.as_str()),
@@ -257,7 +277,8 @@ async fn discover_seed_ids(
         })
         .await;
 
-        if let Ok(response) = semantic {
+        if let Ok(mut response) = semantic {
+            rerank_seed_response(&mut response, &canonical, query, profile.as_ref());
             let candidate_ids = extract_symbol_ids(&response);
             if !candidate_ids.is_empty() {
                 discovered_modes.push("semantic");
@@ -278,6 +299,8 @@ async fn discover_seed_ids(
             embed_config: params.embed_config.clone(),
         })
         .await?;
+        let mut bm25 = bm25;
+        rerank_seed_response(&mut bm25, &canonical, query, profile.as_ref());
         let candidate_ids = extract_symbol_ids(&bm25);
         if !candidate_ids.is_empty() {
             discovered_modes.push("bm25");
@@ -305,6 +328,112 @@ fn extract_symbol_ids(response: &Value) -> Vec<String> {
         .collect()
 }
 
+fn rerank_seed_response(
+    response: &mut Value,
+    project_path: &std::path::Path,
+    query: &str,
+    profile: Option<&RepoProfile>,
+) {
+    let Some(results) = response["results"].as_array_mut() else {
+        return;
+    };
+    rerank_seed_candidates(results, project_path, query, profile);
+}
+
+fn rerank_seed_candidates(
+    results: &mut [Value],
+    project_path: &std::path::Path,
+    query: &str,
+    profile: Option<&RepoProfile>,
+) {
+    let Some(profile) = profile else {
+        return;
+    };
+    let role_counts = summarize_role_counts(Some(profile));
+    let mut dominant_roles: Vec<(String, usize)> = role_counts.into_iter().collect();
+    dominant_roles.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    dominant_roles.truncate(3);
+    let entrypoints = profile_entrypoints(Some(profile));
+    let query_lower = query.to_ascii_lowercase();
+
+    results.sort_by(|left, right| {
+        let left_score = seed_repo_score(
+            left,
+            project_path,
+            &query_lower,
+            &dominant_roles,
+            entrypoints.as_slice(),
+        );
+        let right_score = seed_repo_score(
+            right,
+            project_path,
+            &query_lower,
+            &dominant_roles,
+            entrypoints.as_slice(),
+        );
+        right_score.cmp(&left_score).then_with(|| {
+            left["name"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(right["name"].as_str().unwrap_or(""))
+        })
+    });
+}
+
+fn seed_repo_score(
+    candidate: &Value,
+    project_path: &std::path::Path,
+    query_lower: &str,
+    dominant_roles: &[(String, usize)],
+    entrypoints: &[String],
+) -> i32 {
+    let role = candidate["path_role"].as_str().unwrap_or("");
+    let file = candidate["file"].as_str().unwrap_or("");
+    let mut score = 0;
+
+    for (rank, (dominant_role, count)) in dominant_roles.iter().enumerate() {
+        if role == dominant_role {
+            score += 16 - rank as i32 * 4 + (*count as i32).min(6);
+        }
+    }
+
+    if entrypoints.iter().any(|entry| entry == file) {
+        score += 10;
+        if query_lower.contains("start")
+            || query_lower.contains("boot")
+            || query_lower.contains("entry")
+            || query_lower.contains("flow")
+            || query_lower.contains("path")
+        {
+            score += 8;
+        }
+    }
+
+    if role == role_label(crate::index::repo_profile::PathRole::Config)
+        && (query_lower.contains("config")
+            || query_lower.contains("setting")
+            || query_lower.contains("env"))
+    {
+        score += 14;
+    }
+
+    if let Some(symbol_id) = candidate["id"].as_str() {
+        score += session::symbol_boost(project_path, symbol_id, Some(file.as_ref()));
+    } else {
+        score += session::file_boost(project_path, file.as_ref());
+    }
+
+    if role == role_label(crate::index::repo_profile::PathRole::Bootstrap)
+        && (query_lower.contains("start")
+            || query_lower.contains("boot")
+            || query_lower.contains("init"))
+    {
+        score += 14;
+    }
+
+    score
+}
+
 fn trace_callers(
     index: &Arc<SymbolIndex>,
     seed: &Symbol,
@@ -324,23 +453,35 @@ fn trace_callers(
         if is_noise_symbol(candidate) && !is_entry_symbol(candidate) {
             continue;
         }
+        let metrics = navigation_edge_metrics(
+            EdgeRelation::Calls,
+            reference.confidence,
+            &reference.evidence,
+        );
         upsert_node(
             nodes,
             candidate,
             adjusted_score(
                 candidate,
-                90 - depth as i32 * 10 + (reference.confidence * 10.0) as i32,
+                90 - depth as i32 * 10
+                    + (reference.confidence * 10.0) as i32
+                    + metrics.priority / 4
+                    - (metrics.path_cost as i32 / 12),
                 &seed.qualified,
                 ctx.profile,
                 ctx.project_path,
             ),
             classify_symbol(candidate),
             depth + 1,
-            reference.confidence,
-            format!(
-                "direct caller of {}: {}",
-                seed.qualified, reference.evidence
-            ),
+            TraceNodeEvidence {
+                confidence: reference.confidence,
+                path_cost: metrics.path_cost,
+                path_priority: metrics.priority,
+                why: format!(
+                    "direct caller of {}: {}",
+                    seed.qualified, reference.evidence
+                ),
+            },
         );
         push_edge(
             seen_edges,
@@ -363,10 +504,29 @@ fn trace_callees(
     seen_edges: &mut HashSet<(String, String, EdgeRelation)>,
     ctx: &TraceContext<'_>,
 ) {
-    let mut queue = VecDeque::from([(seed.id.clone(), 0usize)]);
-    let mut seen = HashSet::from([seed.id.clone()]);
+    let mut frontier = vec![(seed.id.clone(), 0usize, 0_u32, 0_i32)];
+    let mut best: HashMap<String, (u32, usize, i32)> =
+        HashMap::from([(seed.id.clone(), (0, 0, 0))]);
 
-    while let Some((current_id, depth)) = queue.pop_front() {
+    while !frontier.is_empty() {
+        let (best_idx, _) = frontier
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                left.2
+                    .cmp(&right.2)
+                    .then(left.1.cmp(&right.1))
+                    .then(right.3.cmp(&left.3))
+                    .then(left.0.cmp(&right.0))
+            })
+            .unwrap_or((0, &(String::new(), 0, 0, 0)));
+        let (current_id, depth, current_cost, current_priority) = frontier.swap_remove(best_idx);
+        let Some(best_state) = best.get(&current_id) else {
+            continue;
+        };
+        if *best_state != (current_cost, depth, current_priority) {
+            continue;
+        }
         if depth >= max_depth {
             continue;
         }
@@ -380,23 +540,38 @@ fn trace_callees(
             if is_noise_symbol(target) && !is_entry_symbol(target) {
                 continue;
             }
+            let metrics = navigation_edge_metrics(
+                EdgeRelation::Calls,
+                reference.confidence,
+                &reference.evidence,
+            );
+            let candidate_cost = current_cost + metrics.path_cost;
+            let candidate_priority = current_priority + metrics.priority;
+            let candidate_state = (candidate_cost, depth + 1, candidate_priority);
             upsert_node(
                 nodes,
                 target,
                 adjusted_score(
                     target,
-                    80 - depth as i32 * 10 + (reference.confidence * 10.0) as i32,
+                    80 - depth as i32 * 10
+                        + (reference.confidence * 10.0) as i32
+                        + candidate_priority / 4
+                        - (candidate_cost as i32 / 10),
                     &current.qualified,
                     ctx.profile,
                     ctx.project_path,
                 ),
                 classify_symbol(target),
                 depth + 1,
-                reference.confidence,
-                format!(
-                    "direct callee of {}: {}",
-                    current.qualified, reference.evidence
-                ),
+                TraceNodeEvidence {
+                    confidence: reference.confidence,
+                    path_cost: candidate_cost,
+                    path_priority: candidate_priority,
+                    why: format!(
+                        "direct callee of {}: {}",
+                        current.qualified, reference.evidence
+                    ),
+                },
             );
             push_edge(
                 seen_edges,
@@ -407,8 +582,17 @@ fn trace_callees(
                 reference.evidence.clone(),
                 reference.confidence,
             );
-            if seen.insert(target.id.clone()) {
-                queue.push_back((target.id.clone(), depth + 1));
+            let should_expand = best
+                .get(&target.id)
+                .is_none_or(|existing| better_path(candidate_state, *existing));
+            if should_expand {
+                best.insert(target.id.clone(), candidate_state);
+                frontier.push((
+                    target.id.clone(),
+                    depth + 1,
+                    candidate_cost,
+                    candidate_priority,
+                ));
             }
         }
     }
@@ -445,8 +629,7 @@ fn upsert_node(
     score: i32,
     category: &'static str,
     distance: usize,
-    evidence_confidence: f32,
-    why: String,
+    evidence: TraceNodeEvidence,
 ) {
     nodes
         .entry(sym.id.clone())
@@ -454,19 +637,27 @@ fn upsert_node(
             if score > node.score {
                 node.score = score;
                 node.category = category;
-                node.why = why.clone();
+                node.why = evidence.why.clone();
             }
             node.distance = node.distance.min(distance);
             node.evidence_hits += 1;
-            node.score = node.score.max(score + (evidence_confidence * 10.0) as i32);
+            node.best_path_cost = node.best_path_cost.min(evidence.path_cost);
+            node.best_path_priority = node.best_path_priority.max(evidence.path_priority);
+            node.score = node.score.max(
+                score + (evidence.confidence * 10.0) as i32 + evidence.path_priority / 5
+                    - (evidence.path_cost as i32 / 12),
+            );
         })
         .or_insert_with(|| TraceNode {
             symbol_id: sym.id.clone(),
-            score: score + (evidence_confidence * 10.0) as i32,
+            score: score + (evidence.confidence * 10.0) as i32 + evidence.path_priority / 5
+                - (evidence.path_cost as i32 / 12),
             category,
-            why,
+            why: evidence.why,
             distance,
             evidence_hits: 1,
+            best_path_cost: evidence.path_cost,
+            best_path_priority: evidence.path_priority,
         });
 }
 
@@ -674,7 +865,8 @@ fn select_important_symbols(
                 } else {
                     node.why.clone()
                 },
-                score: node.score - (node.distance as i32 * 4),
+                score: node.score - (node.distance as i32 * 4) + node.best_path_priority / 6
+                    - (node.best_path_cost as i32 / 14),
                 confidence: confidence_label(node.score),
                 noise_reason: noise_reason(sym),
                 snippet: build_snippet(sym),
@@ -776,6 +968,7 @@ fn build_path_narrative(symbols: &[ImportantSymbol], shortest_path: Option<&[Val
 fn build_shortest_path(
     symbols: &[ImportantSymbol],
     edges: &[TraceEdge],
+    query: &str,
     source_hint: Option<&str>,
     sink_hint: Option<&str>,
 ) -> Vec<Value> {
@@ -783,7 +976,8 @@ fn build_shortest_path(
         .iter()
         .map(|symbol| (symbol.id.as_str(), symbol))
         .collect();
-    let start = select_path_endpoint(symbols, source_hint, true)
+    let start = select_query_biased_start(symbols, query, source_hint)
+        .or_else(|| select_path_endpoint(symbols, source_hint, true))
         .or_else(|| {
             symbols
                 .iter()
@@ -791,6 +985,7 @@ fn build_shortest_path(
         })
         .or_else(|| symbols.first());
     let goal = select_path_endpoint(symbols, sink_hint, false)
+        .or_else(|| select_query_biased_goal(symbols, query, sink_hint))
         .or_else(|| {
             symbols
                 .iter()
@@ -911,6 +1106,98 @@ fn build_shortest_path(
     }
     path.reverse();
     path
+}
+
+fn select_query_biased_start<'a>(
+    symbols: &'a [ImportantSymbol],
+    query: &str,
+    source_hint: Option<&str>,
+) -> Option<&'a ImportantSymbol> {
+    if source_hint.is_some() || !is_config_oriented_query(query) {
+        return None;
+    }
+    symbols
+        .iter()
+        .filter_map(|symbol| {
+            let score = config_biased_symbol_score(symbol);
+            (score > 0).then_some((score, symbol))
+        })
+        .max_by(|(left_score, left_symbol), (right_score, right_symbol)| {
+            left_score
+                .cmp(right_score)
+                .then(left_symbol.score.cmp(&right_symbol.score))
+        })
+        .map(|(_, symbol)| symbol)
+}
+
+fn select_query_biased_goal<'a>(
+    symbols: &'a [ImportantSymbol],
+    query: &str,
+    sink_hint: Option<&str>,
+) -> Option<&'a ImportantSymbol> {
+    if sink_hint.is_some() || !is_config_oriented_query(query) {
+        return None;
+    }
+    symbols
+        .iter()
+        .filter_map(|symbol| {
+            let score = effect_biased_symbol_score(symbol);
+            (score > 0).then_some((score, symbol))
+        })
+        .max_by(|(left_score, left_symbol), (right_score, right_symbol)| {
+            left_score
+                .cmp(right_score)
+                .then(left_symbol.score.cmp(&right_symbol.score))
+        })
+        .map(|(_, symbol)| symbol)
+}
+
+fn is_config_oriented_query(query: &str) -> bool {
+    let query_lower = query.to_ascii_lowercase();
+    query_lower.contains("config")
+        || query_lower.contains("setting")
+        || query_lower.contains("env")
+        || query_lower.contains("option")
+}
+
+fn config_biased_symbol_score(symbol: &ImportantSymbol) -> i32 {
+    let file = symbol.file.to_ascii_lowercase();
+    let qualified = symbol.qualified.to_ascii_lowercase();
+    let name = symbol.name.to_ascii_lowercase();
+    let mut score = 0;
+    if file.contains("config") || file.contains("settings") || file.contains("env") {
+        score += 30;
+    }
+    if file.contains("bootstrap") || file.contains("init") {
+        score += 22;
+    }
+    if name.contains("config") || name.contains("setting") || name.contains("env") {
+        score += 18;
+    }
+    if qualified.contains("config") || qualified.contains("setting") || qualified.contains("env") {
+        score += 14;
+    }
+    score
+}
+
+fn effect_biased_symbol_score(symbol: &ImportantSymbol) -> i32 {
+    let file = symbol.file.to_ascii_lowercase();
+    let qualified = symbol.qualified.to_ascii_lowercase();
+    let name = symbol.name.to_ascii_lowercase();
+    let mut score = 0;
+    if symbol.category == "output" {
+        score += 30;
+    }
+    if file.contains("handler") || file.contains("route") || file.contains("http") {
+        score += 18;
+    }
+    if name.contains("handle") || name.contains("route") || name.contains("serve") {
+        score += 14;
+    }
+    if qualified.contains("handler") || qualified.contains("route") || qualified.contains("serve") {
+        score += 10;
+    }
+    score
 }
 
 fn select_path_endpoint<'a>(
@@ -1036,6 +1323,26 @@ mod tests {
         }
     }
 
+    fn make_trace_node(
+        symbol_id: &str,
+        score: i32,
+        category: &'static str,
+        distance: usize,
+        best_path_cost: u32,
+        best_path_priority: i32,
+    ) -> TraceNode {
+        TraceNode {
+            symbol_id: symbol_id.to_string(),
+            score,
+            category,
+            why: format!("{symbol_id} is relevant"),
+            distance,
+            evidence_hits: 1,
+            best_path_cost,
+            best_path_priority,
+        }
+    }
+
     fn make_trace_edge(
         from_id: &str,
         to_id: &str,
@@ -1054,6 +1361,16 @@ mod tests {
             priority: metrics.priority,
             path_cost: metrics.path_cost,
         }
+    }
+
+    fn make_seed_candidate(name: &str, file: &str, path_role: &str) -> Value {
+        json!({
+            "id": name,
+            "name": name,
+            "qualified": name,
+            "file": file,
+            "path_role": path_role,
+        })
     }
 
     #[test]
@@ -1089,7 +1406,7 @@ mod tests {
             ),
         ];
 
-        let path = build_shortest_path(&symbols, &edges, None, None);
+        let path = build_shortest_path(&symbols, &edges, "trace flow", None, None);
         let path_ids: Vec<&str> = path
             .iter()
             .filter_map(|step| step["symbol_id"].as_str())
@@ -1113,13 +1430,159 @@ mod tests {
             make_trace_edge("branch", "leaf", EdgeRelation::Calls, "leaf();", 0.98),
         ];
 
-        let path = build_shortest_path(&symbols, &edges, Some("branch"), Some("leaf"));
+        let path =
+            build_shortest_path(&symbols, &edges, "trace flow", Some("branch"), Some("leaf"));
         let path_ids: Vec<&str> = path
             .iter()
             .filter_map(|step| step["symbol_id"].as_str())
             .collect();
 
         assert_eq!(path_ids, vec!["branch", "leaf"]);
+    }
+
+    #[test]
+    fn test_build_shortest_path_biases_config_queries_toward_config_start() {
+        let symbols = vec![
+            make_important_symbol("entry", "entry", "entry", true),
+            ImportantSymbol {
+                id: "config_loader".to_string(),
+                name: "config_loader".to_string(),
+                qualified: "config_loader".to_string(),
+                kind: "function".to_string(),
+                language: "rust".to_string(),
+                file: "config/settings.rs".to_string(),
+                line_start: 1,
+                line_end: 1,
+                signature: Some("fn config_loader()".to_string()),
+                category: "orchestration",
+                why: "config loader is relevant".to_string(),
+                score: 110,
+                confidence: "high",
+                noise_reason: None,
+                snippet: None,
+                verified_by_source: true,
+                hot_path: false,
+            },
+            make_important_symbol("handler", "handler", "output", true),
+        ];
+        let edges = vec![make_trace_edge(
+            "config_loader",
+            "handler",
+            EdgeRelation::Calls,
+            "handler();",
+            0.98,
+        )];
+
+        let path = build_shortest_path(&symbols, &edges, "config to effect", None, None);
+        let path_ids: Vec<&str> = path
+            .iter()
+            .filter_map(|step| step["symbol_id"].as_str())
+            .collect();
+
+        assert_eq!(path_ids, vec!["config_loader", "handler"]);
+    }
+
+    #[test]
+    fn test_rerank_seed_candidates_prefers_entrypoints_for_startup_query() {
+        let project = std::path::Path::new("/tmp/trace-seed-startup");
+        let profile = RepoProfile {
+            archetype: crate::index::repo_profile::RepoArchetype::Cli,
+            file_roles: HashMap::from([
+                (
+                    "main.rs".to_string(),
+                    crate::index::repo_profile::PathRole::Entrypoint,
+                ),
+                (
+                    "config/settings.rs".to_string(),
+                    crate::index::repo_profile::PathRole::Config,
+                ),
+            ]),
+            role_counts: HashMap::from([
+                (crate::index::repo_profile::PathRole::Entrypoint, 1),
+                (crate::index::repo_profile::PathRole::Config, 1),
+            ]),
+            entrypoints: vec!["main.rs".to_string()],
+        };
+        let mut results = vec![
+            make_seed_candidate("load_settings", "config/settings.rs", "config"),
+            make_seed_candidate("main", "main.rs", "entrypoint"),
+        ];
+
+        rerank_seed_candidates(&mut results, project, "startup flow", Some(&profile));
+
+        assert_eq!(results[0]["name"], json!("main"));
+    }
+
+    #[test]
+    fn test_rerank_seed_candidates_prefers_recent_symbol_context() {
+        let project = std::path::Path::new("/tmp/trace-seed-session");
+        crate::session::record_symbol(
+            project,
+            "handler_bootstrap",
+            Some(std::path::Path::new("handlers/http.rs")),
+        );
+        let profile = RepoProfile {
+            archetype: crate::index::repo_profile::RepoArchetype::Service,
+            file_roles: HashMap::from([
+                (
+                    "handlers/http.rs".to_string(),
+                    crate::index::repo_profile::PathRole::Handler,
+                ),
+                (
+                    "handlers/router.rs".to_string(),
+                    crate::index::repo_profile::PathRole::Handler,
+                ),
+            ]),
+            role_counts: HashMap::from([(crate::index::repo_profile::PathRole::Handler, 2)]),
+            entrypoints: vec![],
+        };
+        let mut results = vec![
+            make_seed_candidate("handler_bootstrap", "handlers/http.rs", "handler"),
+            make_seed_candidate("route_request", "handlers/router.rs", "handler"),
+        ];
+
+        rerank_seed_candidates(&mut results, project, "request flow", Some(&profile));
+
+        assert_eq!(results[0]["name"], json!("handler_bootstrap"));
+    }
+
+    #[test]
+    fn test_select_important_symbols_prefers_higher_priority_paths() {
+        let mut index = SymbolIndex::new();
+        index.insert(make_symbol("entry", "entry", "entry", "entry.rs", 1, 0, 12));
+        index.insert(make_symbol(
+            "strong_mid",
+            "strong_mid",
+            "strong_mid",
+            "strong.rs",
+            1,
+            0,
+            17,
+        ));
+        index.insert(make_symbol(
+            "weak_mid", "weak_mid", "weak_mid", "weak.rs", 1, 0, 15,
+        ));
+        let index = Arc::new(index);
+
+        let nodes = HashMap::from([
+            (
+                "entry".to_string(),
+                make_trace_node("entry", 100, "entry", 0, 0, 0),
+            ),
+            (
+                "strong_mid".to_string(),
+                make_trace_node("strong_mid", 82, "orchestration", 1, 18, 48),
+            ),
+            (
+                "weak_mid".to_string(),
+                make_trace_node("weak_mid", 82, "orchestration", 1, 52, 10),
+            ),
+        ]);
+
+        let important = select_important_symbols(&index, &nodes, 3);
+        let ids: Vec<&str> = important.iter().map(|item| item.id.as_str()).collect();
+
+        assert_eq!(ids, vec!["entry", "strong_mid", "weak_mid"]);
     }
 
     #[tokio::test]

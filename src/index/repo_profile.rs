@@ -433,6 +433,41 @@ pub fn summarize_role_counts(profile: Option<&RepoProfile>) -> HashMap<String, u
         .unwrap_or_default()
 }
 
+pub fn compact_repo_map(profile: Option<&RepoProfile>) -> serde_json::Value {
+    let Some(profile) = profile else {
+        return serde_json::json!({
+            "archetype": archetype_label(RepoArchetype::Unknown),
+            "role_counts": HashMap::<String, usize>::new(),
+            "entrypoints": Vec::<String>::new(),
+            "top_roles": Vec::<serde_json::Value>::new(),
+        });
+    };
+
+    let mut top_roles: Vec<(PathRole, usize)> = profile
+        .role_counts
+        .iter()
+        .map(|(role, count)| (*role, *count))
+        .collect();
+    top_roles.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| role_label(a.0).cmp(role_label(b.0)))
+    });
+    top_roles.truncate(4);
+
+    serde_json::json!({
+        "archetype": archetype_label(profile.archetype),
+        "role_counts": summarize_role_counts(Some(profile)),
+        "entrypoints": profile.entrypoints,
+        "top_roles": top_roles
+            .into_iter()
+            .map(|(role, count)| serde_json::json!({
+                "role": role_label(role),
+                "count": count,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
 pub fn role_by_path(
     project_path: &Path,
     file_path: &Path,
@@ -515,5 +550,20 @@ mod tests {
             profile.file_roles.get("lib.rs").copied(),
             Some(PathRole::Library)
         );
+    }
+
+    #[test]
+    fn test_compact_repo_map_summarizes_top_roles() {
+        let mut index = SymbolIndex::new();
+        index.insert(make_symbol("main.rs", "main"));
+        index.insert(make_symbol("config/settings.rs", "settings"));
+        index.insert(make_symbol("handlers/http.rs", "serve"));
+
+        let profile = build_repo_profile(Path::new("/tmp/project"), &index);
+        let summary = compact_repo_map(Some(&profile));
+
+        assert_eq!(summary["archetype"], serde_json::json!("cli"));
+        assert!(summary["role_counts"]["entrypoint"].as_u64().unwrap_or(0) >= 1);
+        assert!(!summary["top_roles"].as_array().unwrap().is_empty());
     }
 }

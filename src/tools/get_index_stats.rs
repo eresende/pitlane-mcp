@@ -6,7 +6,7 @@ use crate::embed::store::EmbedStore;
 use crate::embed::EmbedConfig;
 use crate::index::format::index_dir;
 use crate::index::format::load_project_meta;
-use crate::index::repo_profile::{archetype_label, summarize_role_counts};
+use crate::index::repo_profile::{archetype_label, compact_repo_map, summarize_role_counts};
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering};
@@ -104,6 +104,7 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
                 "entrypoints": profile.entrypoints.clone(),
             }),
         );
+        result.insert("repo_map".into(), compact_repo_map(Some(profile)));
     }
 
     let steering = build_steering(
@@ -167,6 +168,8 @@ mod tests {
         assert!(result["by_kind"]["function"].as_u64().unwrap() > 0);
         assert!(result["by_kind"]["struct"].as_u64().unwrap() > 0);
         assert_eq!(result["repo_profile"]["archetype"], json!("library"));
+        assert_eq!(result["repo_map"]["archetype"], json!("library"));
+        assert!(result["repo_map"]["top_roles"].is_array());
 
         // Embedding fields: env vars not set → disabled, no progress fields
         assert_eq!(result["embeddings"].as_str().unwrap(), "disabled");
