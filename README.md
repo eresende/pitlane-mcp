@@ -167,6 +167,14 @@ Recommended flow:
 
 Avoid shell `grep`, globbing, or broad file reads when the MCP tools can answer the question directly.
 
+Session-aware note:
+
+- Composite navigation responses may include `session_state` explaining whether the top target was already seen, whether an unseen nearby alternative was promoted, and whether follow-up steering was biased toward expansion instead of reread.
+- Composite reads returned by `read_code_unit` include `read_state.status`:
+  - `new` — first read of this logical target in the current session
+  - `unchanged` — same target, same content as the previous read; expand instead of rereading
+  - `changed` — same target, changed content since the previous read; use the refreshed payload before expanding
+
 ### `ensure_project_ready`
 
 Preferred one-call startup for MCP clients and harnesses.
@@ -253,6 +261,14 @@ Resolve an ambiguous query into the most likely symbol, file, or content lookup 
 
 Use this when you are not sure whether the target is a symbol, file, text fragment, or repo subtree. The response returns the best candidates plus steering metadata with the recommended next tool and target, so the agent does not have to branch across multiple discovery calls.
 
+`locate_code` may also return `session_state` when session-aware reranking matters. This includes:
+
+- `top_target_seen` — whether the current top candidate was already seen in the active session
+- `novelty_bias_applied` — whether a nearby unseen candidate was promoted over an already-seen stronger exact match
+- `top_target` — normalized target payload for the current top candidate
+- `nearby_alternative` — the next nearby candidate when available
+- `guidance` — short explanation of the session-aware reranking decision
+
 ### `read_code_unit`
 
 Read the smallest useful code unit once the target is known.
@@ -264,6 +280,21 @@ Read the smallest useful code unit once the target is known.
 
 Use this instead of manually deciding between `get_symbol`, `get_file_outline`, and `get_lines`. It reads either a symbol body or a file slice depending on which target information you already have.
 
+`read_code_unit` normalizes repeated-read and diff-aware signals across the underlying read tools. Responses include a `read_state` object with:
+
+- `read_kind` — `symbol`, `line_slice`, or `file_outline`
+- `status` — `new`, `unchanged`, or `changed`
+- `target_seen` — whether this logical target was read earlier in the session
+- `content_seen` / `repeat_read` — whether the exact same content was already returned
+- `changed_since_last_read` — whether the same logical target changed since the previous read
+- `guidance` — how the agent should respond to that state
+
+Preferred agent behavior:
+
+- `new` — continue with the fresh payload
+- `unchanged` — expand to usages, related symbols, or nearby slices instead of rereading
+- `changed` — use the refreshed payload before expanding further
+
 ### `trace_path`
 
 Trace a likely path across the navigation graph for explicit path questions.
@@ -273,6 +304,8 @@ Trace a likely path across the navigation graph for explicit path questions.
 ```
 
 Use this when the question is source-to-sink, config-to-effect, or shortest-path oriented. Compared with `trace_execution_path`, this is the more explicit graph-native path tool.
+
+`trace_path` may return `session_state.top_target_seen` when the strongest expansion node was already in session context. In that case the steering may switch from `read_code_unit` to an expansion tool such as `find_usages`.
 
 ### `analyze_impact`
 
@@ -284,6 +317,8 @@ Estimate the blast radius of a symbol, file, or concept.
 
 Use this before edits or refactors when you want ranked impacted symbols and files plus concrete follow-up verification targets.
 
+Like `trace_path`, `analyze_impact` may return `session_state.top_target_seen` when the highest-ranked impact target was already seen in the current session. The steering then prefers expansion around that node instead of another direct reread.
+
 ### `navigate_code`
 
 Umbrella navigation tool that routes to locate, read, trace, or impact analysis.
@@ -293,6 +328,11 @@ Umbrella navigation tool that routes to locate, read, trace, or impact analysis.
 ```
 
 Use this when the prompt is underspecified and you want the server to choose the best next navigation primitive without forcing the agent to branch manually.
+
+When `navigate_code` routes to `read_code_unit`, it preserves the underlying `read_state` and applies session-aware follow-up:
+
+- unchanged reread => steer toward expansion instead of another read
+- changed reread => keep focus on the refreshed payload and mark `session_state.target_changed = true`
 
 ### `get_symbol`
 

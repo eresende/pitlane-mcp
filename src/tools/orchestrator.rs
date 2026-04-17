@@ -857,10 +857,20 @@ pub async fn navigate_code(params: NavigateCodeParams) -> anyhow::Result<Value> 
 }
 
 fn apply_navigation_followup(response: &mut Value) {
-    let repeat_read = response["read_state"]["repeat_read"]
-        .as_bool()
-        .unwrap_or(false);
-    if !repeat_read {
+    let status = response["read_state"]["status"].as_str().unwrap_or("new");
+    if status == "new" {
+        return;
+    }
+
+    if status == "changed" {
+        response["session_state"] = json!({
+            "top_target_seen": true,
+            "target_changed": true,
+            "guidance": "The explicit read target changed since the last read in this session. Use the refreshed payload before expanding further.",
+        });
+        response["read_state"]["guidance"] = json!(
+            "This target changed since the last read in the current session. Use the refreshed payload before expanding to usages or neighboring code."
+        );
         return;
     }
 
@@ -897,6 +907,11 @@ fn apply_navigation_followup(response: &mut Value) {
     response["read_state"]["guidance"] = json!(
         "This target is already in session context. Expand to usages, related symbols, or a neighboring slice instead of rereading unchanged content."
     );
+    response["session_state"] = json!({
+        "top_target_seen": true,
+        "target_changed": false,
+        "guidance": "The explicit read target is unchanged since the last read in this session. Expand instead of rereading it again.",
+    });
 }
 
 #[derive(Clone)]
@@ -2986,6 +3001,69 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("already in session context"));
+    }
+
+    #[tokio::test]
+    async fn test_navigate_code_changed_read_keeps_focus_on_refreshed_payload() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let first = navigate_code(NavigateCodeParams {
+            project: project.clone(),
+            query: "lines".to_string(),
+            intent: None,
+            symbol_id: None,
+            file_path: Some("lib.rs".to_string()),
+            line_start: Some(1),
+            line_end: Some(2),
+            include_context: None,
+            signature_only: None,
+            source: None,
+            sink: None,
+            kind: None,
+            language: None,
+            scope: None,
+            limit: Some(5),
+            max_symbols: Some(5),
+            max_depth: Some(2),
+            depth: Some(2),
+        })
+        .await
+        .unwrap();
+        std::fs::write(&file_path, "line1\nchanged\nline3\n").unwrap();
+        let second = navigate_code(NavigateCodeParams {
+            project,
+            query: "lines".to_string(),
+            intent: None,
+            symbol_id: None,
+            file_path: Some("lib.rs".to_string()),
+            line_start: Some(1),
+            line_end: Some(2),
+            include_context: None,
+            signature_only: None,
+            source: None,
+            sink: None,
+            kind: None,
+            language: None,
+            scope: None,
+            limit: Some(5),
+            max_symbols: Some(5),
+            max_depth: Some(2),
+            depth: Some(2),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first["read_state"]["status"], json!("new"));
+        assert_eq!(second["read_state"]["status"], json!("changed"));
+        assert_eq!(second["session_state"]["target_changed"], json!(true));
+        assert!(second["read_state"]["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("Use the refreshed payload"));
+        assert!(second.get("steering").is_none() || second["steering"].is_null());
     }
 
     #[tokio::test]

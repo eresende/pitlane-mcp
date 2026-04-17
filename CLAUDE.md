@@ -23,6 +23,11 @@ Use `pitlane-mcp` for code lookup whenever it is available.
 10. Use `get_index_stats` or `get_project_outline(summary=true)` to orient yourself in unfamiliar repos. Prefer `get_index_stats` first.
 11. Use `find_usages` before refactoring a public symbol.
 12. Fall back to direct file reads only when editing or when full-file context is genuinely required.
+13. Treat `read_code_unit` as the preferred diff-aware read surface. Use its `read_state.status` field to decide whether to reuse the payload, expand, or reread:
+   `new` means first read in this session
+   `unchanged` means the same target was reread with identical content, so expand instead of rereading again
+   `changed` means the same target changed since the previous read, so use the refreshed payload before expanding
+14. When `locate_code`, `trace_path`, `analyze_impact`, or `navigate_code` return `session_state`, use it to understand whether the top target was already seen and whether the server intentionally promoted an unseen nearby alternative.
 
 # Search Strategy
 
@@ -38,6 +43,7 @@ Use `pitlane-mcp` for code lookup whenever it is available.
 10. After finding a promising symbol, use `read_code_unit` or `get_symbol` and use the returned references or steering hints before launching more searches.
 11. For struct, class, interface, and trait symbols, `get_symbol` returns signature-only by default. Pass `signature_only=false` when you need the full body and references.
 12. Do not use shell `grep`, globbing, or direct file-content search for code lookup when `pitlane-mcp` can answer the question.
+13. If `locate_code` reports `session_state.novelty_bias_applied = true`, prefer the promoted unseen candidate before falling back to the older already-seen exact match.
 
 # Execution-Path Questions
 

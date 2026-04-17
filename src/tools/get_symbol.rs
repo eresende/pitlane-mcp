@@ -228,6 +228,16 @@ mod tests {
         index.symbols.keys().next().unwrap().clone()
     }
 
+    fn symbol_id_by_name(project: &str, name: &str) -> String {
+        let index = load_project_index(project).unwrap();
+        index
+            .symbols
+            .values()
+            .find(|symbol| symbol.name == name)
+            .map(|symbol| symbol.id.clone())
+            .unwrap_or_else(|| panic!("symbol {name} not found"))
+    }
+
     /// signature_only returns the signature field and no source body.
     #[tokio::test]
     async fn test_signature_only_omits_source() {
@@ -300,6 +310,43 @@ mod tests {
 
         assert_eq!(first["content_seen"].as_bool(), Some(false));
         assert_eq!(second["content_seen"].as_bool(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_full_symbol_read_marks_changed_content_for_same_target() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, b"pub fn hello() { old(); }\npub fn old() {}").unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = symbol_id_by_name(&project, "hello");
+
+        let first = get_symbol(GetSymbolParams {
+            project: project.clone(),
+            symbol_id: symbol_id.clone(),
+            include_context: None,
+            signature_only: Some(false),
+        })
+        .await
+        .unwrap();
+
+        std::fs::write(&file, b"pub fn hello() { newer(); }\npub fn newer() {}").unwrap();
+        let project = setup_project(&dir).await;
+        let second = get_symbol(GetSymbolParams {
+            project,
+            symbol_id,
+            include_context: None,
+            signature_only: Some(false),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first["content_changed"].as_bool(), Some(false));
+        assert_eq!(second["target_seen"].as_bool(), Some(true));
+        assert_eq!(second["content_changed"].as_bool(), Some(true));
+        assert!(second["steering"]["why_this_matched"]
+            .as_str()
+            .unwrap()
+            .contains("changed since the previous read"));
     }
 
     /// signature_only captures the doc comment stored in the index.
