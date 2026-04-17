@@ -91,6 +91,7 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
     if query.is_empty() {
         return Err(anyhow::anyhow!("query must not be empty"));
     }
+    let canonical = resolve_project_path(&params.project)?;
 
     let route = choose_locate_route(&params.intent, &query);
     let limit = params.limit.unwrap_or(5).clamp(1, 8);
@@ -120,6 +121,9 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         }
     }
 
+    let novelty_bias = promote_nearby_unseen_locate_candidate(&mut results, &canonical);
+    let locate_session_state = build_locate_session_state(&results, &canonical, novelty_bias);
+
     let next_tool = if results.is_empty() {
         match route_used.as_str() {
             "search_files" => "search_symbols",
@@ -148,10 +152,18 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
     } else {
         build_steering(
             0.88,
-            format!(
-                "{} routed the query to the most likely code lookup path.",
-                route_used
-            ),
+            {
+                let mut why = format!(
+                    "{} routed the query to the most likely code lookup path.",
+                    route_used
+                );
+                if novelty_bias {
+                    why.push_str(
+                        " The top session-seen candidate was deprioritized in favor of a nearby unseen alternative in the same subsystem.",
+                    );
+                }
+                why
+            },
             next_tool,
             candidate_target(&results[0]),
             take_fallback_candidates(&results),
@@ -165,7 +177,9 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         "results": results,
         "count": results.len(),
     });
-    let canonical = resolve_project_path(&params.project)?;
+    if let Some(state) = locate_session_state {
+        response["session_state"] = state;
+    }
     session::record_query(&canonical, &params.query);
     session::record_files(
         &canonical,
@@ -191,17 +205,127 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
     Ok(response)
 }
 
+fn build_locate_session_state(
+    results: &[Value],
+    project_path: &Path,
+    novelty_bias: bool,
+) -> Option<Value> {
+    let top = results.first()?;
+    let top_seen = locate_candidate_seen(project_path, top);
+    let top_target = candidate_target(top);
+    let fallback = results.get(1).map(candidate_target);
+
+    Some(json!({
+        "top_target_seen": top_seen,
+        "novelty_bias_applied": novelty_bias,
+        "top_target": top_target,
+        "nearby_alternative": fallback,
+        "guidance": if novelty_bias {
+            "A nearby unseen candidate was promoted because the strongest exact match was already in the current session."
+        } else if top_seen {
+            "The top discovery candidate is already in session context. Prefer expansion before rereading it."
+        } else {
+            "The top discovery candidate is new in the current session."
+        },
+    }))
+}
+
+fn promote_nearby_unseen_locate_candidate(results: &mut [Value], project_path: &Path) -> bool {
+    if results.len() < 2 {
+        return false;
+    }
+    if !locate_candidate_seen(project_path, &results[0]) {
+        return false;
+    }
+
+    let anchor = results[0].clone();
+    let mut best_index = None;
+    let mut best_score = i32::MIN;
+    for (idx, candidate) in results.iter().enumerate().skip(1) {
+        if locate_candidate_seen(project_path, candidate) {
+            continue;
+        }
+        let score = locate_candidate_novelty_score(project_path, candidate, &anchor);
+        if score > best_score {
+            best_score = score;
+            best_index = Some(idx);
+        }
+    }
+
+    let Some(best_index) = best_index else {
+        return false;
+    };
+    if best_score < 8 {
+        return false;
+    }
+
+    results[..=best_index].rotate_right(1);
+    true
+}
+
+fn locate_candidate_seen(project_path: &Path, candidate: &Value) -> bool {
+    let file = candidate["file"].as_str().unwrap_or("");
+    if let Some(symbol_id) = candidate["id"].as_str() {
+        return session::has_seen_symbol(project_path, symbol_id);
+    }
+    if file.is_empty() {
+        return false;
+    }
+    session::has_seen_file(project_path, Path::new(file))
+}
+
+fn locate_candidate_novelty_score(project_path: &Path, candidate: &Value, anchor: &Value) -> i32 {
+    let file = candidate["file"].as_str().unwrap_or("");
+    let candidate_dir = Path::new(file)
+        .parent()
+        .map(|dir| dir.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| ".".to_string());
+    let anchor_file = anchor["file"].as_str().unwrap_or("");
+    let anchor_dir = Path::new(anchor_file)
+        .parent()
+        .map(|dir| dir.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| ".".to_string());
+    let mut score = 0;
+
+    if !candidate_dir.is_empty() && candidate_dir == anchor_dir {
+        score += 10;
+    }
+    if candidate["path_role"].as_str().unwrap_or("") == anchor["path_role"].as_str().unwrap_or("") {
+        score += 6;
+    }
+    score += session::directory_boost(project_path, Path::new(&candidate_dir));
+    if let Some(symbol_id) = candidate["id"].as_str() {
+        if session::symbol_boost(project_path, symbol_id, Some(Path::new(file))) == 0 {
+            score += 4;
+        }
+    } else if session::file_boost(project_path, Path::new(file)) == 0 {
+        score += 3;
+    }
+
+    score
+}
+
 pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value> {
     let canonical = resolve_project_path(&params.project)?;
 
     if let Some(symbol_id) = params.symbol_id {
-        let response = get_symbol(GetSymbolParams {
+        let mut response = get_symbol(GetSymbolParams {
             project: params.project,
             symbol_id,
             include_context: params.include_context,
             signature_only: params.signature_only,
         })
         .await?;
+        let content_seen = response["content_seen"].as_bool();
+        let target_seen = response["target_seen"].as_bool();
+        let content_changed = response["content_changed"].as_bool();
+        attach_read_state(
+            &mut response,
+            "symbol",
+            content_seen,
+            target_seen,
+            content_changed,
+        );
         return Ok(response);
     }
 
@@ -220,6 +344,17 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
             line_end,
         })
         .await?;
+        let mut response = response;
+        let content_seen = response["content_seen"].as_bool();
+        let target_seen = response["target_seen"].as_bool();
+        let content_changed = response["content_changed"].as_bool();
+        attach_read_state(
+            &mut response,
+            "line_slice",
+            content_seen,
+            target_seen,
+            content_changed,
+        );
         session::record_file(&canonical, Path::new(&file_path_for_record));
         return Ok(response);
     }
@@ -248,9 +383,53 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
             take_fallback_candidates(&outline_symbols),
         ),
     );
+    let content_seen = response["content_seen"].as_bool();
+    let target_seen = response["target_seen"].as_bool();
+    let content_changed = response["content_changed"].as_bool();
+    attach_read_state(
+        &mut response,
+        "file_outline",
+        content_seen,
+        target_seen,
+        content_changed,
+    );
     session::record_file(&canonical, Path::new(&file_path));
 
     Ok(response)
+}
+
+fn attach_read_state(
+    response: &mut Value,
+    read_kind: &str,
+    content_seen: Option<bool>,
+    target_seen: Option<bool>,
+    content_changed: Option<bool>,
+) {
+    let repeated = content_seen.unwrap_or(false);
+    let target_seen = target_seen.unwrap_or(repeated);
+    let changed = content_changed.unwrap_or(false);
+    let status = if repeated {
+        "unchanged"
+    } else if changed {
+        "changed"
+    } else {
+        "new"
+    };
+    response["read_state"] = json!({
+        "read_kind": read_kind,
+        "content_seen": repeated,
+        "target_seen": target_seen,
+        "changed_since_last_read": changed,
+        "repeat_read": repeated,
+        "status": status,
+        "guidance": if repeated {
+            "This code unit was already returned in this session. Prefer expanding to related symbols, usages, or neighboring slices instead of rereading unchanged content."
+        } else if changed {
+            "This code unit changed since the previous read in this session. Prefer using this updated payload before expanding further."
+        } else {
+            "This code unit is new in the current session. Reuse this payload before issuing another read for the same target."
+        },
+    });
 }
 
 pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
@@ -288,6 +467,10 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
     if let Some(sink) = sink_hint {
         response["sink_hint"] = json!(sink);
     }
+    let trace_followup = response["important_symbols"]
+        .as_array()
+        .and_then(|items| items.first())
+        .map(|top| expansion_followup_state(&canonical, top));
     session::record_query(&canonical, &query);
     session::record_files(
         &canonical,
@@ -309,6 +492,15 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
                 Some((id, file))
             }),
     );
+    if let Some((already_seen, target)) = trace_followup {
+        apply_expansion_followup(
+            &mut response,
+            already_seen,
+            "find_usages",
+            target,
+            "The strongest path node is already in the current session, so expand around it instead of rereading the same implementation.",
+        );
+    }
     Ok(response)
 }
 
@@ -485,6 +677,10 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
             "Weighted graph traversal identified the most likely blast-radius targets."
         },
     });
+    let impact_followup = response["impact_symbols"]
+        .as_array()
+        .and_then(|items| items.first())
+        .map(|top| expansion_followup_state(&canonical, top));
     session::record_query(&canonical, query);
     session::record_files(
         &canonical,
@@ -507,7 +703,69 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
             }),
     );
     attach_steering(&mut response, steering);
+    if let Some((already_seen, target)) = impact_followup {
+        apply_expansion_followup(
+            &mut response,
+            already_seen,
+            "find_usages",
+            target,
+            "The highest-ranked blast-radius target is already in the current session, so expand through usages or neighboring impact nodes instead of rereading it.",
+        );
+    }
     Ok(response)
+}
+
+fn expansion_followup_state(project_path: &Path, candidate: &Value) -> (bool, Value) {
+    let file = candidate["file"].as_str().unwrap_or("");
+    let already_seen = candidate["id"]
+        .as_str()
+        .map(|symbol_id| session::has_seen_symbol(project_path, symbol_id))
+        .unwrap_or_else(|| {
+            if file.is_empty() {
+                false
+            } else {
+                session::has_seen_file(project_path, Path::new(file))
+            }
+        });
+    let target = if let Some(symbol_id) = candidate["id"].as_str() {
+        json!({
+            "symbol_id": symbol_id,
+            "name": candidate["name"],
+            "file": candidate["file"],
+        })
+    } else {
+        json!({
+            "file_path": candidate["file"],
+            "name": candidate["name"],
+        })
+    };
+    (already_seen, target)
+}
+
+fn apply_expansion_followup(
+    response: &mut Value,
+    already_seen: bool,
+    next_tool: &str,
+    target: Value,
+    why: &str,
+) {
+    response["session_state"] = json!({
+        "top_target_seen": already_seen,
+        "guidance": if already_seen {
+            "The top-ranked expansion target is already in session context."
+        } else {
+            "The top-ranked expansion target is new in the current session."
+        },
+    });
+    if !already_seen {
+        return;
+    }
+
+    if let Some(steering) = response.get_mut("steering").and_then(Value::as_object_mut) {
+        steering.insert("why_this_matched".to_string(), json!(why));
+        steering.insert("recommended_next_tool".to_string(), json!(next_tool));
+        steering.insert("recommended_target".to_string(), target);
+    }
 }
 
 pub async fn navigate_code(params: NavigateCodeParams) -> anyhow::Result<Value> {
@@ -594,7 +852,51 @@ pub async fn navigate_code(params: NavigateCodeParams) -> anyhow::Result<Value> 
             );
         }
     }
+    apply_navigation_followup(&mut response);
     Ok(response)
+}
+
+fn apply_navigation_followup(response: &mut Value) {
+    let repeat_read = response["read_state"]["repeat_read"]
+        .as_bool()
+        .unwrap_or(false);
+    if !repeat_read {
+        return;
+    }
+
+    let read_kind = response["read_state"]["read_kind"]
+        .as_str()
+        .unwrap_or("code_unit");
+    let next_tool = match read_kind {
+        "symbol" => "find_usages",
+        "line_slice" => "locate_code",
+        "file_outline" => "locate_code",
+        _ => "locate_code",
+    };
+    let recommended_target = match read_kind {
+        "symbol" => json!({
+            "symbol_id": response["id"],
+            "name": response["name"],
+            "file": response["file"],
+        }),
+        _ => json!({
+            "file_path": response["file"],
+            "query": response["name"].as_str().unwrap_or("related symbol"),
+        }),
+    };
+
+    if let Some(steering) = response.get_mut("steering").and_then(Value::as_object_mut) {
+        steering.insert(
+            "why_this_matched".to_string(),
+            json!("The explicit read target was resolved, but this code unit was already returned in the current session."),
+        );
+        steering.insert("recommended_next_tool".to_string(), json!(next_tool));
+        steering.insert("recommended_target".to_string(), recommended_target);
+    }
+
+    response["read_state"]["guidance"] = json!(
+        "This target is already in session context. Expand to usages, related symbols, or a neighboring slice instead of rereading unchanged content."
+    );
 }
 
 #[derive(Clone)]
@@ -2134,6 +2436,43 @@ mod tests {
     }
 
     #[test]
+    fn test_build_locate_session_state_reports_novelty_bias() {
+        let project = std::path::Path::new("/tmp/orchestrator-locate-session-state");
+        crate::session::record_symbol(
+            project,
+            "known_handler",
+            Some(std::path::Path::new("handlers/http.rs")),
+        );
+        let mut results = vec![
+            json!({
+                "kind": "symbol",
+                "id": "known_handler",
+                "name": "known_handler",
+                "file": "handlers/http.rs",
+                "path_role": "handler",
+            }),
+            json!({
+                "kind": "symbol",
+                "id": "fresh_handler",
+                "name": "fresh_handler",
+                "file": "handlers/router.rs",
+                "path_role": "handler",
+            }),
+        ];
+        let novelty_bias = promote_nearby_unseen_locate_candidate(&mut results, project);
+
+        let state = build_locate_session_state(&results, project, novelty_bias).unwrap();
+
+        assert_eq!(state["novelty_bias_applied"], json!(true));
+        assert_eq!(state["top_target_seen"], json!(false));
+        assert_eq!(state["top_target"]["symbol_id"], json!("fresh_handler"));
+        assert!(state["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("nearby unseen candidate"));
+    }
+
+    #[test]
     fn test_rerank_locate_symbol_results_prefers_entrypoints_for_startup_queries() {
         let project = std::path::Path::new("/tmp/orchestrator-rerank-startup");
         let profile = RepoProfile {
@@ -2301,6 +2640,44 @@ mod tests {
         assert_eq!(results[0]["dir"], json!("handlers"));
     }
 
+    #[test]
+    fn test_promote_nearby_unseen_locate_candidate_prefers_unseen_sibling() {
+        let project = std::path::Path::new("/tmp/orchestrator-locate-novelty");
+        crate::session::record_symbol(
+            project,
+            "known_handler",
+            Some(std::path::Path::new("handlers/http.rs")),
+        );
+        let mut results = vec![
+            json!({
+                "kind": "symbol",
+                "id": "known_handler",
+                "name": "known_handler",
+                "file": "handlers/http.rs",
+                "path_role": "handler",
+            }),
+            json!({
+                "kind": "symbol",
+                "id": "fresh_handler",
+                "name": "fresh_handler",
+                "file": "handlers/router.rs",
+                "path_role": "handler",
+            }),
+            json!({
+                "kind": "symbol",
+                "id": "other_config",
+                "name": "other_config",
+                "file": "config/settings.rs",
+                "path_role": "config",
+            }),
+        ];
+
+        let promoted = promote_nearby_unseen_locate_candidate(&mut results, project);
+
+        assert!(promoted);
+        assert_eq!(results[0]["name"], json!("fresh_handler"));
+    }
+
     #[tokio::test]
     async fn test_read_code_unit_returns_outline_for_file() {
         let dir = TempDir::new().unwrap();
@@ -2321,12 +2698,122 @@ mod tests {
 
         assert_eq!(result["file"].as_str().unwrap(), "lib.rs");
         assert_eq!(result["symbols"].as_array().unwrap().len(), 1);
+        assert_eq!(result["read_state"]["read_kind"], json!("file_outline"));
+        assert_eq!(result["read_state"]["repeat_read"], json!(false));
         assert_eq!(
             result["steering"]["recommended_next_tool"]
                 .as_str()
                 .unwrap(),
             "locate_code"
         );
+    }
+
+    #[tokio::test]
+    async fn test_read_code_unit_marks_repeated_outline_reads() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        let project = setup_project(&dir).await;
+
+        let first = read_code_unit(ReadCodeUnitParams {
+            project: project.clone(),
+            symbol_id: None,
+            file_path: Some("lib.rs".to_string()),
+            line_start: None,
+            line_end: None,
+            include_context: None,
+            signature_only: None,
+        })
+        .await
+        .unwrap();
+        let second = read_code_unit(ReadCodeUnitParams {
+            project,
+            symbol_id: None,
+            file_path: Some("lib.rs".to_string()),
+            line_start: None,
+            line_end: None,
+            include_context: None,
+            signature_only: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first["read_state"]["repeat_read"], json!(false));
+        assert_eq!(second["read_state"]["repeat_read"], json!(true));
+        assert_eq!(second["read_state"]["content_seen"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_read_code_unit_propagates_symbol_repeat_state() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = symbol_id_by_name(&project, "hello");
+
+        let first = read_code_unit(ReadCodeUnitParams {
+            project: project.clone(),
+            symbol_id: Some(symbol_id.clone()),
+            file_path: None,
+            line_start: None,
+            line_end: None,
+            include_context: None,
+            signature_only: Some(false),
+        })
+        .await
+        .unwrap();
+        let second = read_code_unit(ReadCodeUnitParams {
+            project,
+            symbol_id: Some(symbol_id),
+            file_path: None,
+            line_start: None,
+            line_end: None,
+            include_context: None,
+            signature_only: Some(false),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first["read_state"]["read_kind"], json!("symbol"));
+        assert_eq!(first["read_state"]["repeat_read"], json!(false));
+        assert_eq!(second["read_state"]["repeat_read"], json!(true));
+        assert_eq!(second["read_state"]["status"], json!("unchanged"));
+    }
+
+    #[tokio::test]
+    async fn test_read_code_unit_marks_changed_line_slice_reads() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        std::fs::write(&file_path, "line1\nline2\nline3\n").unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let first = read_code_unit(ReadCodeUnitParams {
+            project: project.clone(),
+            symbol_id: None,
+            file_path: Some("lib.rs".to_string()),
+            line_start: Some(1),
+            line_end: Some(2),
+            include_context: None,
+            signature_only: None,
+        })
+        .await
+        .unwrap();
+        std::fs::write(&file_path, "line1\nchanged\nline3\n").unwrap();
+        let second = read_code_unit(ReadCodeUnitParams {
+            project,
+            symbol_id: None,
+            file_path: Some("lib.rs".to_string()),
+            line_start: Some(1),
+            line_end: Some(2),
+            include_context: None,
+            signature_only: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first["read_state"]["status"], json!("new"));
+        assert_eq!(second["read_state"]["target_seen"], json!(true));
+        assert_eq!(second["read_state"]["repeat_read"], json!(false));
+        assert_eq!(second["read_state"]["changed_since_last_read"], json!(true));
+        assert_eq!(second["read_state"]["status"], json!("changed"));
     }
 
     #[tokio::test]
@@ -2435,6 +2922,142 @@ mod tests {
             "read_code_unit"
         );
         assert_eq!(result["file"].as_str().unwrap(), "lib.rs");
+    }
+
+    #[tokio::test]
+    async fn test_navigate_code_repeat_read_prefers_expansion_over_reread() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        let project = setup_project(&dir).await;
+        let symbol_id = symbol_id_by_name(&project, "hello");
+
+        let first = navigate_code(NavigateCodeParams {
+            project: project.clone(),
+            query: "hello".to_string(),
+            intent: None,
+            symbol_id: Some(symbol_id.clone()),
+            file_path: None,
+            line_start: None,
+            line_end: None,
+            include_context: None,
+            signature_only: Some(false),
+            source: None,
+            sink: None,
+            kind: None,
+            language: None,
+            scope: None,
+            limit: Some(5),
+            max_symbols: Some(5),
+            max_depth: Some(2),
+            depth: Some(2),
+        })
+        .await
+        .unwrap();
+        let second = navigate_code(NavigateCodeParams {
+            project,
+            query: "hello".to_string(),
+            intent: None,
+            symbol_id: Some(symbol_id),
+            file_path: None,
+            line_start: None,
+            line_end: None,
+            include_context: None,
+            signature_only: Some(false),
+            source: None,
+            sink: None,
+            kind: None,
+            language: None,
+            scope: None,
+            limit: Some(5),
+            max_symbols: Some(5),
+            max_depth: Some(2),
+            depth: Some(2),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first["read_state"]["repeat_read"], json!(false));
+        assert_eq!(second["read_state"]["repeat_read"], json!(true));
+        assert_eq!(
+            second["steering"]["recommended_next_tool"],
+            json!("find_usages")
+        );
+        assert!(second["read_state"]["guidance"]
+            .as_str()
+            .unwrap()
+            .contains("already in session context"));
+    }
+
+    #[tokio::test]
+    async fn test_trace_path_repeat_target_prefers_expansion_followup() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn leaf() {}\npub fn branch() { leaf(); }\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+        let branch_id = symbol_id_by_name(&project, "branch");
+        crate::session::record_symbol(
+            std::path::Path::new(&project),
+            &branch_id,
+            Some(std::path::Path::new("lib.rs")),
+        );
+
+        let result = trace_path(TracePathParams {
+            project,
+            query: "branch flow".to_string(),
+            source: Some("branch".to_string()),
+            sink: Some("leaf".to_string()),
+            language: None,
+            file: None,
+            max_symbols: Some(5),
+            max_depth: Some(2),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["session_state"]["top_target_seen"], json!(true));
+        assert_eq!(
+            result["steering"]["recommended_next_tool"],
+            json!("find_usages")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_repeat_target_prefers_expansion_followup() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn leaf() {}\npub fn branch() { leaf(); }\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+        let branch_id = symbol_id_by_name(&project, "branch");
+        let leaf_id = symbol_id_by_name(&project, "leaf");
+        crate::session::record_symbol(
+            std::path::Path::new(&project),
+            &branch_id,
+            Some(std::path::Path::new("lib.rs")),
+        );
+
+        let result = analyze_impact(AnalyzeImpactParams {
+            project,
+            query: None,
+            symbol_id: Some(leaf_id),
+            file_path: None,
+            scope: None,
+            depth: Some(2),
+            limit: Some(5),
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["session_state"]["top_target_seen"], json!(true));
+        assert_eq!(
+            result["steering"]["recommended_next_tool"],
+            json!("find_usages")
+        );
     }
 
     #[tokio::test]

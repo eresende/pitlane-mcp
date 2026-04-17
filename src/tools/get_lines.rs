@@ -46,7 +46,7 @@ pub async fn get_lines(params: GetLinesParams) -> anyhow::Result<Value> {
     let to = effective_end.min(total_lines) as usize;
 
     let source = lines[from..to].join("\n");
-    let content_seen = session::record_content(
+    let observation = session::observe_content(
         &project_path,
         "lines",
         &format!("{}:{}-{}", params.file_path, params.line_start, to as u32),
@@ -59,7 +59,9 @@ pub async fn get_lines(params: GetLinesParams) -> anyhow::Result<Value> {
         "line_end": to as u32,   // actual end after clamping
         "total_file_lines": total_lines,
         "source": source,
-        "content_seen": content_seen,
+        "content_seen": observation.content_seen,
+        "target_seen": observation.target_seen,
+        "content_changed": observation.changed_since_last_read,
     });
 
     if truncated {
@@ -128,6 +130,38 @@ mod tests {
 
         assert_eq!(first["content_seen"].as_bool(), Some(false));
         assert_eq!(second["content_seen"].as_bool(), Some(true));
+        assert_eq!(second["content_changed"].as_bool(), Some(false));
+    }
+
+    #[tokio::test]
+    async fn test_get_lines_marks_changed_content_for_same_target() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        std::fs::write(&file_path, "line1\nline2\nline3").unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let first = get_lines(GetLinesParams {
+            project: project.clone(),
+            file_path: "lib.rs".to_string(),
+            line_start: 1,
+            line_end: 2,
+        })
+        .await
+        .unwrap();
+        std::fs::write(&file_path, "line1\nchanged\nline3").unwrap();
+        let second = get_lines(GetLinesParams {
+            project,
+            file_path: "lib.rs".to_string(),
+            line_start: 1,
+            line_end: 2,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(first["content_changed"].as_bool(), Some(false));
+        assert_eq!(second["target_seen"].as_bool(), Some(true));
+        assert_eq!(second["content_seen"].as_bool(), Some(false));
+        assert_eq!(second["content_changed"].as_bool(), Some(true));
     }
 
     #[tokio::test]

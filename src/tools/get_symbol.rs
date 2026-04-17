@@ -48,8 +48,8 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             sym.signature.as_deref().unwrap_or(""),
             sym.doc.as_deref().unwrap_or("")
         );
-        let content_seen =
-            session::record_content(Path::new(&canonical_project), "symbol", &sym.id, &content);
+        let observation =
+            session::observe_content(Path::new(&canonical_project), "symbol", &sym.id, &content);
         let mut response = json!({
             "id": sym.id,
             "name": sym.name,
@@ -61,14 +61,25 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             "line_end": sym.line_end,
             "signature": sym.signature,
             "doc": sym.doc,
-            "content_seen": content_seen,
+            "content_seen": observation.content_seen,
+            "target_seen": observation.target_seen,
+            "content_changed": observation.changed_since_last_read,
         });
         attach_steering(
             &mut response,
             build_steering(
-                if content_seen { 0.72 } else { 0.84 },
-                if content_seen {
+                if observation.content_seen {
+                    0.72
+                } else if observation.changed_since_last_read {
+                    0.8
+                } else {
+                    0.84
+                },
+                if observation.content_seen {
                     "The symbol shape and documentation were already returned in this session, so this is a repeat read."
+                        .to_string()
+                } else if observation.changed_since_last_read {
+                    "The symbol shape was reread and changed since the previous read in this session."
                         .to_string()
                 } else {
                     "The symbol shape and documentation were returned without reading the full body."
@@ -125,6 +136,12 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
     refs.truncate(MAX_REFERENCES);
     let steering_refs = refs.clone();
     let has_references = !steering_refs.is_empty();
+    let observation = session::observe_content(
+        Path::new(&canonical_project),
+        "symbol",
+        &sym.id,
+        &source_text,
+    );
     let mut response = json!({
         "id": sym.id,
         "name": sym.name,
@@ -137,21 +154,21 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         "source": source_text,
         "signature": sym.signature,
         "doc": sym.doc,
-        "content_seen": session::record_content(
-            Path::new(&canonical_project),
-            "symbol",
-            &sym.id,
-            &source_text,
-        ),
+        "content_seen": observation.content_seen,
+        "target_seen": observation.target_seen,
+        "content_changed": observation.changed_since_last_read,
         "references": refs,
         "references_truncated": references_truncated,
     });
     let content_seen = response["content_seen"].as_bool().unwrap_or(false);
+    let content_changed = response["content_changed"].as_bool().unwrap_or(false);
     attach_steering(
         &mut response,
         build_steering(
             if content_seen {
                 0.76
+            } else if content_changed {
+                0.82
             } else if references_truncated {
                 0.86
             } else if has_references {
@@ -161,6 +178,9 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             },
             if content_seen {
                 "The symbol body was already returned in this session, so this read is a repeat."
+                    .to_string()
+            } else if content_changed {
+                "The symbol body changed since the previous read in this session, so this reread contains new content."
                     .to_string()
             } else {
                 "The symbol body was read and direct identifier references were extracted for local expansion."

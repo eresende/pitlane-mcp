@@ -68,13 +68,15 @@ pub async fn get_file_outline(params: GetFileOutlineParams) -> anyhow::Result<Va
         "symbols": symbols,
         "count": symbols.len(),
     });
-    let content_seen = session::record_content(
+    let observation = session::observe_content(
         &project_path,
         "outline",
         &params.file_path,
         &serde_json::to_string(&response["symbols"]).unwrap_or_default(),
     );
-    response["content_seen"] = json!(content_seen);
+    response["content_seen"] = json!(observation.content_seen);
+    response["target_seen"] = json!(observation.target_seen);
+    response["content_changed"] = json!(observation.changed_since_last_read);
 
     Ok(response)
 }
@@ -159,5 +161,6 @@ mod tests {
 
         assert_eq!(first["content_seen"].as_bool(), Some(false));
         assert_eq!(second["content_seen"].as_bool(), Some(true));
+        assert_eq!(second["content_changed"].as_bool(), Some(false));
     }
 }

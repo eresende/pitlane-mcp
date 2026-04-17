@@ -15,6 +15,13 @@ struct ProjectSessionState {
     recent_dirs: HashMap<String, u64>,
     recent_queries: VecDeque<(String, u64)>,
     recent_content: HashMap<String, u64>,
+    recent_target_content: HashMap<String, (String, u64)>,
+}
+
+pub struct ContentObservation {
+    pub content_seen: bool,
+    pub target_seen: bool,
+    pub changed_since_last_read: bool,
 }
 
 static SESSION: LazyLock<RwLock<HashMap<PathBuf, ProjectSessionState>>> =
@@ -110,15 +117,48 @@ pub fn record_symbols(project: &Path, symbols: impl IntoIterator<Item = (String,
 }
 
 pub fn record_content(project: &Path, namespace: &str, identity: &str, content: &str) -> bool {
+    observe_content(project, namespace, identity, content).content_seen
+}
+
+pub fn observe_content(
+    project: &Path,
+    namespace: &str,
+    identity: &str,
+    content: &str,
+) -> ContentObservation {
     let tick = next_tick();
     let key = content_key(namespace, identity, content);
-    let mut seen_before = false;
+    let target_key = format!("{namespace}:{identity}");
+    let digest = blake3::hash(content.as_bytes()).to_hex().to_string();
+    let mut observation = ContentObservation {
+        content_seen: false,
+        target_seen: false,
+        changed_since_last_read: false,
+    };
     with_state_mut(project, |state| {
-        seen_before = state.recent_content.contains_key(&key);
+        observation.content_seen = state.recent_content.contains_key(&key);
+        if let Some((previous_digest, _)) = state.recent_target_content.get(&target_key) {
+            observation.target_seen = true;
+            observation.changed_since_last_read = previous_digest != &digest;
+        }
         state.recent_content.insert(key, tick);
+        state
+            .recent_target_content
+            .insert(target_key, (digest, tick));
         prune_recent(state);
     });
-    seen_before
+    observation
+}
+
+pub fn has_seen_file(project: &Path, file: &Path) -> bool {
+    let file = normalise(file);
+    with_state(project, |state| state.recent_files.contains_key(&file))
+}
+
+pub fn has_seen_symbol(project: &Path, symbol_id: &str) -> bool {
+    with_state(project, |state| {
+        state.recent_symbols.contains_key(symbol_id)
+    })
 }
 
 pub fn file_boost(project: &Path, file: &Path) -> i32 {
@@ -285,6 +325,18 @@ fn prune_recent(state: &mut ProjectSessionState) {
             .take(MAX_RECENT_ITEMS)
             .collect::<HashMap<_, _>>();
     }
+    if state.recent_target_content.len() > MAX_RECENT_ITEMS {
+        let mut entries: Vec<(String, (String, u64))> = state
+            .recent_target_content
+            .iter()
+            .map(|(k, (digest, tick))| (k.clone(), (digest.clone(), *tick)))
+            .collect();
+        entries.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+        state.recent_target_content = entries
+            .into_iter()
+            .take(MAX_RECENT_ITEMS)
+            .collect::<HashMap<_, _>>();
+    }
 }
 
 fn content_key(namespace: &str, identity: &str, content: &str) -> String {
@@ -296,37 +348,69 @@ fn content_key(namespace: &str, identity: &str, content: &str) -> String {
 mod tests {
     use super::*;
 
+    fn unique_project(prefix: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!("/tmp/{prefix}-{}", next_tick()))
+    }
+
     #[test]
     fn test_file_boost_prefers_recent_file_and_dir() {
-        let project = Path::new("/tmp/session-test");
+        let mut state = ProjectSessionState::default();
         let file = Path::new("src/tools/search.rs");
-        record_file(project, file);
-        assert!(file_boost(project, file) > 0);
-        assert!(file_boost(project, Path::new("src/tools/other.rs")) > 0);
+        state.recent_files.insert(normalise(file), 10);
+        state.recent_dirs.insert("src/tools".to_string(), 10);
+
+        assert!(file_boost_from_state(&state, file, 11) > 0);
+        assert!(file_boost_from_state(&state, Path::new("src/tools/other.rs"), 11) > 0);
     }
 
     #[test]
     fn test_symbol_boost_prefers_recent_symbol() {
-        let project = Path::new("/tmp/session-test-symbol");
-        record_symbol(project, "abc", Some(Path::new("src/lib.rs")));
-        assert!(symbol_boost(project, "abc", Some(Path::new("src/lib.rs"))) > 0);
+        let project = unique_project("session-test-symbol");
+        record_symbol(&project, "abc", Some(Path::new("src/lib.rs")));
+        assert!(symbol_boost(&project, "abc", Some(Path::new("src/lib.rs"))) > 0);
     }
 
     #[test]
     fn test_directory_boost_prefers_recent_directory() {
-        let project = Path::new("/tmp/session-test-dir");
-        record_file(project, Path::new("src/tools/search.rs"));
-        assert!(directory_boost(project, Path::new("src/tools")) > 0);
-        assert!(directory_boost(project, Path::new("src")) > 0);
+        let mut state = ProjectSessionState::default();
+        state.recent_dirs.insert("src/tools".to_string(), 10);
+
+        assert!(directory_boost_from_state(&state, Path::new("src/tools"), 11) > 0);
+        assert!(directory_boost_from_state(&state, Path::new("src"), 11) > 0);
     }
 
     #[test]
     fn test_record_content_reports_repeated_reads() {
-        let project = Path::new("/tmp/session-test-content");
-        let first = record_content(project, "symbol", "abc", "fn alpha() {}");
-        let second = record_content(project, "symbol", "abc", "fn alpha() {}");
+        let project = unique_project("session-test-content");
+        let first = record_content(&project, "symbol", "abc", "fn alpha() {}");
+        let second = record_content(&project, "symbol", "abc", "fn alpha() {}");
 
         assert!(!first);
         assert!(second);
+    }
+
+    #[test]
+    fn test_observe_content_reports_changed_target() {
+        let project = unique_project("session-test-diff");
+        let first = observe_content(&project, "symbol", "abc", "fn alpha() {}");
+        let second = observe_content(&project, "symbol", "abc", "fn beta() {}");
+
+        assert!(!first.content_seen);
+        assert!(!first.target_seen);
+        assert!(!first.changed_since_last_read);
+        assert!(!second.content_seen);
+        assert!(second.target_seen);
+        assert!(second.changed_since_last_read);
+    }
+
+    #[test]
+    fn test_has_seen_symbol_and_file_track_exact_targets() {
+        let project = unique_project("session-test-seen");
+        record_symbol(&project, "abc", Some(Path::new("src/lib.rs")));
+
+        assert!(has_seen_symbol(&project, "abc"));
+        assert!(!has_seen_symbol(&project, "def"));
+        assert!(has_seen_file(&project, Path::new("src/lib.rs")));
+        assert!(!has_seen_file(&project, Path::new("src/other.rs")));
     }
 }
