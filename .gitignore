@@ -3,6 +3,11 @@
 
 # Benchmark test corpora (cloned by bench/setup.sh)
 /bench/repos/
+/bench/harness/.venv/
+/bench/harness/out_*/
+
+# Benchmark run results
+/result/
 
 # Claude Code local settings
 .claude/
@@ -18,3 +23,16 @@
 
 # proptest cache directory
 proptest-regressions/
+
+# hypothesis example database
+.hypothesis/
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
