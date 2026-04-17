@@ -1,48 +1,17 @@
 #!/usr/bin/env python3
-"""CLI entry point for the real-world benchmark framework.
-
-Usage:
-    python bench_runner.py \\
-        --repo /path/to/repo \\
-        --prompts prompts.ripgrep.jsonl \\
-        --model qwen3:8b \\
-        --out results/ripgrep-qwen3 \\
-        --runs 3 \\
-        --mode both \\
-        --backend ollama
-"""
+"""Compatibility wrapper for the canonical benchmark runner."""
 
 from __future__ import annotations
 
 import argparse
-import logging
-import shutil
-import sys
 
-# Configure logging to stderr with timestamps
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s  %(levelname)-7s  %(message)s",
-    datefmt="%H:%M:%S",
-    stream=sys.stderr,
-)
-
-
-def _check_pitlane_on_path() -> None:
-    """Raise SystemExit if pitlane-mcp is not found on PATH."""
-    if shutil.which("pitlane-mcp") is None:
-        print(
-            "ERROR: pitlane-mcp not found on PATH.\n"
-            "Install it from https://github.com/eresende/pitlane-mcp",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+from bench.harness.run import main as _run_main
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="bench_runner",
-        description="Run the pitlane-mcp real-world benchmark.",
+        description="Run the pitlane benchmark harness.",
     )
     parser.add_argument("--repo", required=True, help="Path to the target repository.")
     parser.add_argument("--prompts", required=True, help="Path to the JSONL prompt set.")
@@ -89,56 +58,59 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="context_window",
         help="Context window size in tokens (default: 8192).",
     )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip instances that already have per-instance artifacts.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rerun instances even if artifacts already exist.",
+    )
+    parser.add_argument(
+        "--prompt-id",
+        dest="prompt_ids",
+        action="append",
+        default=[],
+        help="Run only the specified prompt id. Repeat to select multiple prompts.",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    # Validate pitlane-mcp on PATH for modes that need it
-    if args.mode in ("mcp", "both"):
-        _check_pitlane_on_path()
-
-    # Build backend
-    if args.backend == "ollama":
-        from bench.harness.framework.backends import OllamaBackend
-        backend = OllamaBackend(
-            model=args.model,
-            temperature=args.temperature,
-            num_ctx=args.context_window,
-        )
-    else:
-        from bench.harness.framework.backends import OpenRouterBackend
-        backend = OpenRouterBackend(
-            model=args.model,
-            temperature=args.temperature,
-        )
-
-    # Build executors
-    from bench.harness.framework.mcp_executor import MCPExecutor
-    from bench.harness.framework.executors import BaselineExecutor
-
-    mcp_executor = MCPExecutor()
-    baseline_executor = BaselineExecutor()
-
-    # Build and run BenchmarkRunner
-    from bench.harness.framework.benchmark_runner import BenchmarkRunner
-
-    runner = BenchmarkRunner(
-        repo_path=args.repo,
-        prompt_set_path=args.prompts,
-        model_name=args.model,
-        output_dir=args.out,
-        runs_per_prompt=args.runs,
-        mode=args.mode,
-        max_iterations=args.max_iterations,
-        timeout_seconds=args.timeout,
-        temperature=args.temperature,
-        context_window=args.context_window,
-    )
-
-    runner.run(backend, mcp_executor, baseline_executor)
+    args = _build_parser().parse_args(argv)
+    forwarded = [
+        "--repo",
+        args.repo,
+        "--prompts",
+        args.prompts,
+        "--model",
+        args.model,
+        "--out",
+        args.out,
+        "--runs",
+        str(args.runs),
+        "--mode",
+        args.mode,
+        "--backend",
+        args.backend,
+        "--max-iterations",
+        str(args.max_iterations),
+        "--timeout",
+        str(args.timeout),
+        "--temperature",
+        str(args.temperature),
+        "--context-window",
+        str(args.context_window),
+    ]
+    if args.resume:
+        forwarded.append("--resume")
+    if args.force:
+        forwarded.append("--force")
+    for prompt_id in args.prompt_ids:
+        forwarded.extend(["--prompt-id", prompt_id])
+    _run_main(forwarded)
 
 
 if __name__ == "__main__":

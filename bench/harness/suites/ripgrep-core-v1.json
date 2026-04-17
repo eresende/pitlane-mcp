@@ -1,0 +1,24 @@
+{
+  "schema_version": "1",
+  "suite_id": "ripgrep-core-v1",
+  "repo": {
+    "path": "../../repos/ripgrep"
+  },
+  "prompts": {
+    "path": "../prompts.ripgrep.jsonl"
+  },
+  "defaults": {
+    "runs": 3,
+    "max_iterations": 25,
+    "timeout_seconds": 300,
+    "mode": "both"
+  },
+  "scorer": {
+    "version": "v1"
+  },
+  "tags": [
+    "symbol_grounding",
+    "trace",
+    "architecture"
+  ]
+}

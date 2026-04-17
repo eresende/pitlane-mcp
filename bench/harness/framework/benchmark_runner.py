@@ -30,6 +30,8 @@ from bench.harness.framework.models import (
 from bench.harness.framework.output_writer import OutputWriter
 from bench.harness.framework.prompt_loader import load_prompts
 from bench.harness.framework.quality_scorer import QualityScorer
+from bench.harness.manifest import build_run_manifest
+from bench.harness.resume import instance_is_complete, load_instance_artifacts
 
 if TYPE_CHECKING:
     from bench.harness.framework.backends import ModelBackend
@@ -203,6 +205,13 @@ class BenchmarkRunner:
         timeout_seconds: float = 300.0,
         temperature: float = 0.0,
         context_window: int = 8192,
+        runtime_type: str = "local",
+        suite_id: str = "adhoc",
+        suite_manifest_path: str | None = None,
+        scorer_version: str = "v1",
+        resume: bool = False,
+        force: bool = False,
+        prompt_ids: list[str] | None = None,
     ) -> None:
         self.repo_path = repo_path
         self.prompt_set_path = prompt_set_path
@@ -214,6 +223,13 @@ class BenchmarkRunner:
         self.timeout_seconds = timeout_seconds
         self.temperature = temperature
         self.context_window = context_window
+        self.runtime_type = runtime_type
+        self.suite_id = suite_id
+        self.suite_manifest_path = suite_manifest_path
+        self.scorer_version = scorer_version
+        self.resume = resume
+        self.force = force
+        self.prompt_ids = list(prompt_ids or [])
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -264,7 +280,12 @@ class BenchmarkRunner:
 
         # Load prompts
         prompts = load_prompts(self.prompt_set_path)
+        if self.prompt_ids:
+            selected = set(self.prompt_ids)
+            prompts = [prompt for prompt in prompts if prompt.id in selected]
         log.info("Loaded %d prompts from %s", len(prompts), self.prompt_set_path)
+        if self.prompt_ids:
+            log.info("Prompt filter active: %d selected prompt ids", len(self.prompt_ids))
 
         config = BenchmarkConfig(
             model_name=self.model_name,
@@ -292,6 +313,27 @@ class BenchmarkRunner:
             timestamp=datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
         writer.write_config(config)
+        writer.write_run_manifest(
+            build_run_manifest(
+                suite_id=self.suite_id,
+                suite_manifest_path=self.suite_manifest_path,
+                repo_path=self.repo_path,
+                prompt_set_path=self.prompt_set_path,
+                model_name=self.model_name,
+                backend_type=config.backend_type,
+                runtime_type=self.runtime_type,
+                mode=self.mode,
+                runs_per_prompt=self.runs_per_prompt,
+                max_iterations=self.max_iterations,
+                timeout_seconds=self.timeout_seconds,
+                temperature=self.temperature,
+                context_window=self.context_window,
+                scorer_version=self.scorer_version,
+                prompt_filter=self.prompt_ids,
+                resume_enabled=self.resume,
+                force_enabled=self.force,
+            )
+        )
 
         # Determine which modes to run
         if self.mode == "both":
@@ -339,6 +381,30 @@ class BenchmarkRunner:
                 executor = mcp_executor if run_mode == "mcp" else baseline_executor
 
                 for run_idx in range(self.runs_per_prompt):
+                    if self.resume and not self.force and instance_is_complete(
+                        self.output_dir,
+                        prompt_row.id,
+                        run_mode,
+                        run_idx,
+                    ):
+                        result, quality = load_instance_artifacts(
+                            self.output_dir,
+                            prompt_row.id,
+                            run_mode,
+                            run_idx,
+                        )
+                        log.info(
+                            "  ↷ %s run %d/%d skipped via --resume",
+                            run_mode,
+                            run_idx + 1,
+                            self.runs_per_prompt,
+                        )
+                        all_results.append(result)
+                        all_qualities.append(quality)
+                        if quality is not None:
+                            summary[prompt_row.id][run_mode].append(quality.quality_score)
+                        continue
+
                     log.info("  → %s run %d/%d ...", run_mode, run_idx + 1, self.runs_per_prompt)
                     t0 = time.perf_counter()
                     result: RunResult
@@ -418,6 +484,8 @@ class BenchmarkRunner:
                 pass
 
         log.info("Writing CSV summary and claim report...")
+
+        writer.write_results_jsonl(all_results)
 
         # Write CSV summary
         writer.write_csv_summary(all_results, all_qualities)

@@ -12,15 +12,25 @@ Requirements: 4.2, 5.1, 9.1, 12.2
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from bench.harness.bench_runner import _build_parser
+from bench.harness.manifest import build_run_manifest, load_suite_manifest
+from bench.harness.resume import instance_dir
+from bench.harness.framework.benchmark_runner import BenchmarkRunner
 from bench.harness.framework.claim_report import ClaimReport
 from bench.harness.framework.executors import BaselineExecutor
 from bench.harness.framework.mcp_executor import MCPExecutor, PITLANE_TOOL_NAMES
-from bench.harness.framework.models import ToolDef
+from bench.harness.framework.models import (
+    ChatResponse,
+    Message,
+    ModelMetadata,
+    TokenUsage,
+    ToolDef,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +123,9 @@ class TestCLIArgumentParsing:
         assert args.timeout == 300.0
         assert args.temperature == 0.0
         assert args.context_window == 8192
+        assert args.resume is False
+        assert args.force is False
+        assert args.prompt_ids == []
 
     def test_optional_args_override(self):
         """Optional args can be overridden from the command line."""
@@ -134,6 +147,197 @@ class TestCLIArgumentParsing:
         assert args.timeout == 60.0
         assert args.temperature == 0.7
         assert args.context_window == 4096
+
+    def test_resume_force_and_prompt_filters(self):
+        """Resume flags and prompt filters parse cleanly."""
+        parser = _build_parser()
+        args = parser.parse_args([
+            "--repo", "/r",
+            "--prompts", "p.jsonl",
+            "--model", "m",
+            "--out", "o",
+            "--resume",
+            "--force",
+            "--prompt-id", "prompt-1",
+            "--prompt-id", "prompt-2",
+        ])
+        assert args.resume is True
+        assert args.force is True
+        assert args.prompt_ids == ["prompt-1", "prompt-2"]
+
+
+class TestPatchSetOneHelpers:
+    """Tests for suite loading, manifest construction, and per-instance paths."""
+
+    def test_load_suite_manifest_ripgrep(self):
+        """The ripgrep suite manifest should load and expose pinned local inputs."""
+        suite, suite_path = load_suite_manifest("bench/harness/suites/ripgrep-core-v1.json")
+        assert suite.suite_id == "ripgrep-core-v1"
+        assert suite.defaults.runs == 3
+        assert suite.defaults.max_iterations == 25
+        assert suite.defaults.timeout_seconds == 300
+        assert suite_path.name == "ripgrep-core-v1.json"
+
+    def test_build_run_manifest_hashes_prompt_set(self, tmp_path: Path):
+        """Run manifests should capture immutable prompt-set identity and flags."""
+        prompts = tmp_path / "prompts.jsonl"
+        prompts.write_text('{"id":"p1","category":"general","prompt":"hi"}\n', encoding="utf-8")
+
+        manifest = build_run_manifest(
+            suite_id="adhoc-prompts",
+            repo_path=str(tmp_path),
+            prompt_set_path=str(prompts),
+            model_name="mock-model",
+            backend_type="ollama",
+            runtime_type="local",
+            mode="mcp",
+            runs_per_prompt=2,
+            max_iterations=5,
+            timeout_seconds=30.0,
+            temperature=0.1,
+            context_window=4096,
+            prompt_filter=["p1"],
+            resume_enabled=True,
+            force_enabled=False,
+        )
+
+        assert manifest.schema_version == "1"
+        assert manifest.suite_id == "adhoc-prompts"
+        assert manifest.prompt_set_path == str(prompts.resolve())
+        assert len(manifest.prompt_set_sha256) == 64
+        assert manifest.prompt_filter == ["p1"]
+        assert manifest.resume_enabled is True
+        assert manifest.force_enabled is False
+        assert manifest.runtime_type == "local"
+
+    def test_instance_dir_uses_stable_safe_slug(self, tmp_path: Path):
+        """Instance directories should be deterministic and path-safe."""
+        artifact_dir = instance_dir(tmp_path, "feature/path prompt", "mcp", 2)
+        expected = tmp_path / "raw" / artifact_dir.parts[-3] / "mcp" / "run_2"
+        assert artifact_dir == expected
+        assert "/" not in artifact_dir.parts[-3]
+        assert artifact_dir.parts[-2] == "mcp"
+
+
+class _NullExecutor:
+    def startup(self, repo_path: str) -> None:
+        self.repo_path = repo_path
+
+    def shutdown(self) -> None:
+        pass
+
+    def get_tool_definitions(self) -> list[ToolDef]:
+        return []
+
+    def execute(self, tool_name: str, arguments: dict):  # noqa: ANN001
+        raise AssertionError(f"Unexpected tool execution: {tool_name} {arguments}")
+
+    def total_response_bytes(self) -> int:
+        return 0
+
+
+class _StaticBackend:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls = 0
+
+    def chat(self, messages, tools):  # noqa: ANN001
+        self.calls += 1
+        if self.fail:
+            raise AssertionError("backend should not have been called")
+        return ChatResponse(
+            message=Message(role="assistant", content="grounded answer"),
+            usage=TokenUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+        )
+
+    def metadata(self) -> ModelMetadata:
+        return ModelMetadata(
+            name="mock-model",
+            provider="mock",
+            parameter_count=None,
+            context_window=4096,
+        )
+
+
+class TestBenchmarkRunnerResume:
+    """Patch Set 1 resume/force behavior."""
+
+    def _write_prompts(self, tmp_path: Path) -> Path:
+        prompts = tmp_path / "prompts.jsonl"
+        prompts.write_text(
+            '{"id":"prompt-1","category":"general","prompt":"Explain the flow"}\n',
+            encoding="utf-8",
+        )
+        return prompts
+
+    def test_resume_skips_completed_instance(self, tmp_path: Path):
+        """A resumed run should reuse existing instance artifacts."""
+        prompts = self._write_prompts(tmp_path)
+        out_dir = tmp_path / "out"
+        first_backend = _StaticBackend()
+        runner = BenchmarkRunner(
+            repo_path=str(tmp_path),
+            prompt_set_path=str(prompts),
+            model_name="mock-model",
+            output_dir=str(out_dir),
+            runs_per_prompt=1,
+            mode="baseline",
+            max_iterations=2,
+            timeout_seconds=10.0,
+        )
+        runner.run(first_backend, _NullExecutor(), _NullExecutor())
+        assert first_backend.calls == 1
+
+        resumed_backend = _StaticBackend(fail=True)
+        resumed_runner = BenchmarkRunner(
+            repo_path=str(tmp_path),
+            prompt_set_path=str(prompts),
+            model_name="mock-model",
+            output_dir=str(out_dir),
+            runs_per_prompt=1,
+            mode="baseline",
+            max_iterations=2,
+            timeout_seconds=10.0,
+            resume=True,
+        )
+        resumed_runner.run(resumed_backend, _NullExecutor(), _NullExecutor())
+
+        assert resumed_backend.calls == 0
+        results_lines = (out_dir / "results.jsonl").read_text(encoding="utf-8").splitlines()
+        assert len(results_lines) == 1
+        assert (out_dir / "run_manifest.json").exists()
+
+    def test_force_reruns_completed_instance(self, tmp_path: Path):
+        """Force should ignore existing instance artifacts and rerun."""
+        prompts = self._write_prompts(tmp_path)
+        out_dir = tmp_path / "out"
+        initial_runner = BenchmarkRunner(
+            repo_path=str(tmp_path),
+            prompt_set_path=str(prompts),
+            model_name="mock-model",
+            output_dir=str(out_dir),
+            runs_per_prompt=1,
+            mode="baseline",
+            max_iterations=2,
+            timeout_seconds=10.0,
+        )
+        initial_runner.run(_StaticBackend(), _NullExecutor(), _NullExecutor())
+
+        forced_backend = _StaticBackend()
+        forced_runner = BenchmarkRunner(
+            repo_path=str(tmp_path),
+            prompt_set_path=str(prompts),
+            model_name="mock-model",
+            output_dir=str(out_dir),
+            runs_per_prompt=1,
+            mode="baseline",
+            max_iterations=2,
+            timeout_seconds=10.0,
+            resume=True,
+            force=True,
+        )
+        forced_runner.run(forced_backend, _NullExecutor(), _NullExecutor())
+        assert forced_backend.calls == 1
 
 
 # ---------------------------------------------------------------------------

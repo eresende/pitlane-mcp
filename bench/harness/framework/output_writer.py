@@ -2,10 +2,13 @@
 
 Produces:
   config.json          — full BenchmarkConfig serialized
+  run_manifest.json    — immutable run identity
   results.jsonl        — one JSON object per RunResult
   results.csv          — flattened summary CSV
   claim_report.md      — Markdown claim report
-  raw/<prompt_id>/<mode>/run_<n>/
+  raw/<prompt_slug>/<mode>/run_<n>/
+      result.json
+      quality.json
       conversation.json
       tool_calls.json
 """
@@ -19,6 +22,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from bench.harness.resume import instance_dir
 from bench.harness.framework.models import (
     BenchmarkConfig,
     Message,
@@ -27,6 +31,7 @@ from bench.harness.framework.models import (
     ToolCallRecord,
     TokenUsage,
 )
+from bench.harness.schemas import RunManifest
 
 
 # ---------------------------------------------------------------------------
@@ -78,6 +83,10 @@ def _run_result_to_dict(result: RunResult) -> dict:
         "wall_clock_seconds": result.wall_clock_seconds,
         "error": result.error,
     }
+
+
+def _quality_record_to_dict(quality: QualityRecord) -> dict:
+    return dataclasses.asdict(quality)
 
 
 def _run_result_to_flat_dict(
@@ -157,27 +166,44 @@ class OutputWriter:
             encoding="utf-8",
         )
 
+    def write_run_manifest(self, manifest: RunManifest) -> None:
+        """Write run_manifest.json with the immutable benchmark identity."""
+        manifest_path = self._out / "run_manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     def write_run(
         self,
         result: RunResult,
         quality: QualityRecord | None = None,
     ) -> None:
-        """Append one line to results.jsonl and write raw output directory."""
+        """Append one line to results.jsonl and write per-instance artifacts."""
         # Append to results.jsonl
         jsonl_path = self._out / "results.jsonl"
         row = _run_result_to_dict(result)
         with jsonl_path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-        # Write raw directory
-        raw_dir = (
-            self._out
-            / "raw"
-            / result.prompt_id
-            / result.mode
-            / f"run_{result.run_index}"
-        )
+        raw_dir = instance_dir(self._out, result.prompt_id, result.mode, result.run_index)
         raw_dir.mkdir(parents=True, exist_ok=True)
+
+        result_path = raw_dir / "result.json"
+        result_path.write_text(
+            json.dumps(row, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        quality_path = raw_dir / "quality.json"
+        if quality is None:
+            if quality_path.exists():
+                quality_path.unlink()
+        else:
+            quality_path.write_text(
+                json.dumps(_quality_record_to_dict(quality), indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
 
         conversation_path = raw_dir / "conversation.json"
         conversation_path.write_text(
@@ -198,6 +224,13 @@ class OutputWriter:
             ),
             encoding="utf-8",
         )
+
+    def write_results_jsonl(self, results: list[RunResult]) -> None:
+        """Rewrite results.jsonl from the current authoritative run list."""
+        jsonl_path = self._out / "results.jsonl"
+        with jsonl_path.open("w", encoding="utf-8") as f:
+            for result in results:
+                f.write(json.dumps(_run_result_to_dict(result), ensure_ascii=False) + "\n")
 
     def write_csv_summary(
         self,

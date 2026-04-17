@@ -1059,6 +1059,7 @@ from bench.harness.framework.models import (
     TokenUsage as _TokenUsage,
     Message as _Message,
 )
+from bench.harness.resume import instance_dir
 
 _run_status = st.sampled_from(["completed", "max_iterations", "timeout", "error"])
 _mode_strategy = st.sampled_from(["mcp", "baseline"])
@@ -1121,7 +1122,7 @@ def test_output_format_correctness(results: list[RunResult]) -> None:
     """For any list of RunResult objects, the output writer should produce:
     - results.jsonl where each line is valid JSON with all run fields
     - results.csv that is valid CSV with correct headers
-    - raw/<prompt_id>/<mode>/run_<n>/ directories for each run
+    - raw/<prompt_slug>/<mode>/run_<n>/ directories for each run
     """
     with tempfile.TemporaryDirectory() as tmp_dir:
         writer = OutputWriter(tmp_dir)
@@ -1129,6 +1130,7 @@ def test_output_format_correctness(results: list[RunResult]) -> None:
         # Write each run
         for result in results:
             writer.write_run(result)
+        writer.write_results_jsonl(results)
 
         # Write CSV summary (no quality records)
         writer.write_csv_summary(results, [None] * len(results))
@@ -1168,10 +1170,11 @@ def test_output_format_correctness(results: list[RunResult]) -> None:
 
         # --- Validate raw directories ---
         for result in results:
-            raw_dir = (
-                out / "raw" / result.prompt_id / result.mode / f"run_{result.run_index}"
-            )
+            raw_dir = instance_dir(out, result.prompt_id, result.mode, result.run_index)
             assert raw_dir.exists(), f"Raw dir missing: {raw_dir}"
+            assert (raw_dir / "result.json").exists(), (
+                f"result.json missing in {raw_dir}"
+            )
             assert (raw_dir / "conversation.json").exists(), (
                 f"conversation.json missing in {raw_dir}"
             )
