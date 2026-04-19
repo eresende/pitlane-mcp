@@ -75,6 +75,22 @@ def grade_run(run_dir: str | Path, *, scorer_name: str = "default") -> tuple[lis
     writer.write_csv_summary(results, qualities)
     report = ClaimReport()
     writer.write_claim_report(report.generate(results, qualities, prompts, config))
+
+    # Generate tool-mix analysis for with-mcp runs.
+    from bench.harness.framework.tool_mix import analyze_tool_mix_batch, format_tool_mix_report
+    tool_mix_summaries = analyze_tool_mix_batch(results)
+    if tool_mix_summaries:
+        tool_mix_path = run_path / "tool_mix.json"
+        tool_mix_path.write_text(
+            json.dumps([s.to_dict() for s in tool_mix_summaries], indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        tool_mix_report_path = run_path / "tool_mix_report.md"
+        tool_mix_report_path.write_text(
+            format_tool_mix_report(tool_mix_summaries),
+            encoding="utf-8",
+        )
+
     return results, qualities
 
 

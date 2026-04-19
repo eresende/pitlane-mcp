@@ -26,6 +26,11 @@ use crate::tools::trace_execution_path::{trace_execution_path, TraceExecutionPat
 
 const READ_CODE_UNIT_FILE_OUTLINE_LIMIT: usize = 12;
 
+/// Maximum number of source lines returned for a single symbol body via
+/// `read_code_unit(symbol_id=...)`.  Larger bodies are truncated and the
+/// response includes a `body_truncated` flag plus guidance to narrow the read.
+const READ_CODE_UNIT_SYMBOL_BODY_LINE_LIMIT: usize = 120;
+
 pub struct LocateCodeParams {
     pub project: String,
     pub query: String,
@@ -95,25 +100,46 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
     }
     let canonical = resolve_project_path(&params.project)?;
 
-    let route = choose_locate_route(&params.intent, &query);
+    // Load profile for query normalization and reranking.
+    let profile = load_project_meta(&canonical)
+        .ok()
+        .map(|meta| meta.repo_profile);
+
+    // Normalize vague queries before routing.
+    let normalized = normalize_locate_query(&query, profile.as_ref());
+    let effective_query = normalized.as_deref().unwrap_or(&query);
+
+    let route = choose_locate_route(&params.intent, effective_query);
     let limit = params.limit.unwrap_or(5).clamp(1, 8);
     let mut route_used = route.as_str().to_string();
+
+    // Build a params copy with the effective (possibly normalized) query.
+    let effective_params = LocateCodeParams {
+        project: params.project.clone(),
+        query: effective_query.to_string(),
+        intent: params.intent.clone(),
+        kind: params.kind.clone(),
+        language: params.language.clone(),
+        scope: params.scope.clone(),
+        limit: params.limit,
+    };
+
     let mut results = match route {
-        LocateRoute::Project => locate_project(&params, limit).await?,
-        LocateRoute::Files => locate_files(&params, limit).await?,
-        LocateRoute::Content => locate_content(&params, limit).await?,
-        LocateRoute::Symbols { ref mode } => locate_symbols(&params, limit, mode.as_str()).await?,
+        LocateRoute::Project => locate_project(&effective_params, limit).await?,
+        LocateRoute::Files => locate_files(&effective_params, limit).await?,
+        LocateRoute::Content => locate_content(&effective_params, limit).await?,
+        LocateRoute::Symbols { ref mode } => locate_symbols(&effective_params, limit, mode.as_str()).await?,
     };
 
     if results.is_empty() {
-        if let Some(fallback) = fallback_locate_route(&route, &params.query) {
+        if let Some(fallback) = fallback_locate_route(&route, effective_query) {
             let fallback_route = fallback.as_str().to_string();
             let fallback_results = match fallback {
-                LocateRoute::Project => locate_project(&params, limit).await?,
-                LocateRoute::Files => locate_files(&params, limit).await?,
-                LocateRoute::Content => locate_content(&params, limit).await?,
+                LocateRoute::Project => locate_project(&effective_params, limit).await?,
+                LocateRoute::Files => locate_files(&effective_params, limit).await?,
+                LocateRoute::Content => locate_content(&effective_params, limit).await?,
                 LocateRoute::Symbols { ref mode } => {
-                    locate_symbols(&params, limit, mode.as_str()).await?
+                    locate_symbols(&effective_params, limit, mode.as_str()).await?
                 }
             };
             if !fallback_results.is_empty() {
@@ -149,10 +175,18 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
     };
 
     let steering = if results.is_empty() {
+        let sharper = suggest_sharper_query(&query, &route_used, profile.as_ref());
         build_steering(
             0.2,
-            "The router did not recover a strong code unit, so this is a weak discovery result."
-                .to_string(),
+            if let Some(ref suggestion) = sharper {
+                format!(
+                    "The router did not recover a strong code unit. {}",
+                    suggestion
+                )
+            } else {
+                "The router did not recover a strong code unit, so this is a weak discovery result."
+                    .to_string()
+            },
             next_tool,
             json!({ "query": query, "route_used": route_used }),
             take_fallback_candidates(&results),
@@ -165,11 +199,21 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
                     "{} routed the query to the most likely code lookup path.",
                     route_used
                 );
+                if normalized.is_some() {
+                    why.push_str(&format!(
+                        " The original query \"{}\" was normalized to \"{}\" for better discovery.",
+                        query, effective_query
+                    ));
+                }
                 if novelty_bias {
                     why.push_str(
                         " The top session-seen candidate was deprioritized in favor of a nearby unseen alternative in the same subsystem.",
                     );
                 }
+                // Discourage generic tool escapes when we found results.
+                why.push_str(
+                    " Use read_code_unit or locate_code to drill into these results. Do not escape to generic file reads, directory listings, or shell commands.",
+                );
                 why
             },
             next_tool,
@@ -185,6 +229,42 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         "results": results,
         "count": results.len(),
     });
+    if normalized.is_some() {
+        response["normalized_query"] = json!(effective_query);
+    }
+
+    // Add explicit recommended_action with the exact read_code_unit call
+    // for the top result. This prevents the model from escaping to generic
+    // file reads when it has a perfectly good symbol_id to use.
+    if !results.is_empty() {
+        let top = &results[0];
+        if let Some(symbol_id) = top["id"].as_str() {
+            if top["kind"].as_str() == Some("symbol") {
+                response["recommended_action"] = json!({
+                    "tool": "read_code_unit",
+                    "arguments": {
+                        "symbol_id": symbol_id,
+                    },
+                    "reason": format!(
+                        "Read the implementation of {} to inspect its body. Do NOT use generic file read tools.",
+                        top["name"].as_str().unwrap_or(symbol_id)
+                    ),
+                });
+            }
+        } else if let Some(file) = top["file"].as_str() {
+            response["recommended_action"] = json!({
+                "tool": "read_code_unit",
+                "arguments": {
+                    "file_path": file,
+                },
+                "reason": format!(
+                    "Read the outline of {} to discover its symbols. Do NOT use generic file read tools.",
+                    file
+                ),
+            });
+        }
+    }
+
     if let Some(state) = locate_session_state {
         response["session_state"] = state;
     }
@@ -324,6 +404,34 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
             signature_only: params.signature_only,
         })
         .await?;
+
+        // Cap large symbol bodies to reduce token waste.
+        let body_truncated = if let Some(source) = response["source"].as_str() {
+            let line_count = source.lines().count();
+            if line_count > READ_CODE_UNIT_SYMBOL_BODY_LINE_LIMIT {
+                let truncated: String = source
+                    .lines()
+                    .take(READ_CODE_UNIT_SYMBOL_BODY_LINE_LIMIT)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                response["source"] = json!(truncated);
+                response["body_truncated"] = json!(true);
+                response["body_total_lines"] = json!(line_count);
+                response["body_returned_lines"] = json!(READ_CODE_UNIT_SYMBOL_BODY_LINE_LIMIT);
+                response["guidance"] = json!({
+                    "next_step": format!(
+                        "This symbol body was truncated from {} to {} lines. Use read_code_unit with file_path and line_start/line_end to read specific sections, or use locate_code to find a narrower symbol within this file.",
+                        line_count, READ_CODE_UNIT_SYMBOL_BODY_LINE_LIMIT
+                    )
+                });
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         let content_seen = response["content_seen"].as_bool();
         let target_seen = response["target_seen"].as_bool();
         let content_changed = response["content_changed"].as_bool();
@@ -334,6 +442,23 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
             target_seen,
             content_changed,
         );
+
+        // If body was truncated, override the steering to discourage broad reads.
+        if body_truncated {
+            let file = response["file"].as_str().unwrap_or("").to_string();
+            attach_steering(
+                &mut response,
+                build_steering(
+                    0.78,
+                    "The symbol body was truncated to reduce context size. Use locate_code with the file path and a narrower query to find specific members, or use read_code_unit with line ranges. Do not escape to generic file reads."
+                        .to_string(),
+                    "locate_code",
+                    json!({ "file_path": file }),
+                    Vec::new(),
+                ),
+            );
+        }
+
         return Ok(response);
     }
 
@@ -342,6 +467,20 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
             "read_code_unit requires symbol_id or file_path"
         ));
     };
+
+    // Reject directory-ish paths that lack a file extension.
+    // Benchmark traces showed agents passing paths like "crates/core/flags"
+    // which is not the intended usage pattern.
+    let file_path_obj = Path::new(&file_path);
+    if file_path_obj.extension().is_none() && !file_path.contains('.') {
+        let resolved = canonical.join(&file_path);
+        if resolved.is_dir() {
+            return Err(anyhow::anyhow!(
+                "read_code_unit file_path \"{}\" appears to be a directory, not a file. Use locate_code with intent=\"file\" and a query to find files within this directory.",
+                file_path
+            ));
+        }
+    }
 
     if let (Some(line_start), Some(line_end)) = (params.line_start, params.line_end) {
         let file_path_for_record = file_path.clone();
@@ -399,10 +538,10 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
         build_steering(
             0.76,
             if truncated {
-                "A compact file outline was returned; inspect one of the returned symbols or narrow discovery before expanding further."
+                "A compact file outline was returned; inspect one of the returned symbols or narrow discovery before expanding further. Do not escape to generic file reads or directory listings."
                     .to_string()
             } else {
-                "File structure was returned; inspect a symbol next if you need implementation detail."
+                "File structure was returned; inspect a symbol next if you need implementation detail. Use read_code_unit with a symbol_id or locate_code to narrow. Do not escape to generic file reads."
                     .to_string()
             },
             "locate_code",
@@ -527,6 +666,54 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
     if let Some(sink) = sink_hint {
         response["sink_hint"] = json!(sink);
     }
+
+    let important_symbols = response["important_symbols"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
+
+    // When trace returns weak or empty results, provide concrete fallback guidance.
+    if important_symbols == 0 {
+        let profile = load_project_meta(&canonical)
+            .ok()
+            .map(|meta| meta.repo_profile);
+        let mut fallback_hint = String::from(
+            "trace_path did not find a strong execution chain for this query.",
+        );
+        if let Some(ref profile) = profile {
+            let entrypoints = profile_entrypoints(Some(profile));
+            if let Some(first) = entrypoints.first() {
+                fallback_hint.push_str(&format!(
+                    " Try starting from the entrypoint file: read_code_unit(file_path=\"{}\").",
+                    first
+                ));
+            }
+        }
+        fallback_hint.push_str(
+            " Use locate_code with a more specific symbol or subsystem name instead.",
+        );
+        response["guidance"] = json!({ "next_step": fallback_hint });
+    } else {
+        // Add explicit recommended_action for the top important symbol.
+        if let Some(top) = response["important_symbols"]
+            .as_array()
+            .and_then(|items| items.first())
+        {
+            if let Some(symbol_id) = top["id"].as_str() {
+                response["recommended_action"] = json!({
+                    "tool": "read_code_unit",
+                    "arguments": {
+                        "symbol_id": symbol_id,
+                    },
+                    "reason": format!(
+                        "Read the implementation of {} to inspect the execution path. Do NOT use generic file read tools.",
+                        top["name"].as_str().unwrap_or(symbol_id)
+                    ),
+                });
+            }
+        }
+    }
+
     let trace_followup = response["important_symbols"]
         .as_array()
         .and_then(|items| items.first())
@@ -558,7 +745,7 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
             already_seen,
             "find_usages",
             target,
-            "The strongest path node is already in the current session, so expand around it instead of rereading the same implementation.",
+            "The strongest path node is already in the current session, so expand around it instead of rereading the same implementation. Do not escape to generic file reads or directory listings.",
         );
     }
     Ok(response)
@@ -1051,6 +1238,160 @@ impl NavigationRoute {
     }
 }
 
+/// Normalize vague natural-language queries into sharper discovery intents.
+///
+/// Many agent queries use colloquial phrases like "main function", "entry point",
+/// "args clap", or "directory traversal walker" that don't map well to symbol
+/// names or file paths.  This function rewrites them into queries that the
+/// downstream search primitives handle more effectively.
+fn normalize_locate_query(query: &str, profile: Option<&RepoProfile>) -> Option<String> {
+    let lower = query.trim().to_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+
+    // Single-word or exact-symbol queries don't need normalization.
+    if words.len() <= 1 && looks_like_exact_symbol(query) {
+        return None;
+    }
+
+    // Entrypoint / main function patterns
+    if matches!(
+        lower.as_str(),
+        "main function"
+            | "main fn"
+            | "entry point"
+            | "entrypoint"
+            | "program entry"
+            | "app entry"
+            | "application entry"
+            | "start function"
+    ) {
+        if let Some(profile) = profile {
+            let entrypoints = profile_entrypoints(Some(profile));
+            if let Some(first) = entrypoints.first() {
+                return Some(first.clone());
+            }
+        }
+        return Some("main".to_string());
+    }
+
+    // CLI / argument parsing patterns
+    if lower.contains("args") && (lower.contains("clap") || lower.contains("pars"))
+        || lower == "cli arguments"
+        || lower == "cli args"
+        || lower == "argument parsing"
+        || lower == "flag parsing"
+        || lower == "command line"
+        || lower == "command-line flag parsing"
+        || lower.contains("command-line") && lower.contains("pars")
+        || lower.contains("flag") && lower.contains("pars")
+        || lower.contains("argument") && lower.contains("pars")
+        || lower == "runtime configuration"
+        || (lower.contains("runtime") && lower.contains("config"))
+    {
+        return Some("flags args parse config".to_string());
+    }
+
+    // Directory traversal / walker patterns
+    if (lower.contains("directory") || lower.contains("dir"))
+        && (lower.contains("travers") || lower.contains("walk") || lower.contains("iter"))
+    {
+        return Some("walk directory builder".to_string());
+    }
+
+    // Printer / output patterns
+    if lower == "printer print results"
+        || lower == "print results"
+        || lower == "output printer"
+        || lower == "result printer"
+    {
+        return Some("Printer".to_string());
+    }
+
+    // Ignore / gitignore handling patterns
+    if lower == "ignore handling"
+        || lower == "ignore logic"
+        || lower == "gitignore"
+        || lower == "ignore rules"
+        || lower == "file ignore"
+    {
+        return Some("Ignore matched".to_string());
+    }
+
+    // Config / settings patterns
+    if lower == "configuration"
+        || lower == "config handling"
+        || lower == "settings"
+        || lower == "config flow"
+    {
+        return Some("Config".to_string());
+    }
+
+    None
+}
+
+/// Build a concrete query-sharpening suggestion for weak `locate_code` results.
+///
+/// Instead of generic "try again" advice, this returns one specific sharper
+/// query the model can use immediately.
+fn suggest_sharper_query(
+    query: &str,
+    route_used: &str,
+    profile: Option<&RepoProfile>,
+) -> Option<String> {
+    let lower = query.trim().to_lowercase();
+
+    // If the query was already normalized and still failed, suggest a different angle.
+    if lower.contains("main") || lower.contains("entry") {
+        if let Some(profile) = profile {
+            let entrypoints = profile_entrypoints(Some(profile));
+            if let Some(first) = entrypoints.first() {
+                return Some(format!(
+                    "Try reading the entrypoint file directly: read_code_unit(file_path=\"{}\")",
+                    first
+                ));
+            }
+        }
+        return Some(
+            "Try locate_code with intent=\"file\" and query matching the main source file"
+                .to_string(),
+        );
+    }
+
+    if lower.contains("config") || lower.contains("setting") || lower.contains("flag") {
+        return Some(
+            "Try locate_code with a concrete config struct or flag type name from the codebase"
+                .to_string(),
+        );
+    }
+
+    if lower.contains("ignore") || lower.contains("gitignore") {
+        return Some(
+            "Try locate_code with query=\"Ignore\" or query=\"gitignore_matched\" for the ignore subsystem"
+                .to_string(),
+        );
+    }
+
+    if lower.contains("walk") || lower.contains("travers") || lower.contains("directory") {
+        return Some(
+            "Try locate_code with query=\"WalkBuilder\" or query=\"WalkParallel\" for directory traversal"
+                .to_string(),
+        );
+    }
+
+    // Generic fallback based on route
+    match route_used {
+        "search_symbols" => Some(
+            "Try a more specific symbol name or use search_content with a known code snippet"
+                .to_string(),
+        ),
+        "search_files" => Some(
+            "Try locate_code with intent=\"symbol\" and a concrete type or function name"
+                .to_string(),
+        ),
+        _ => None,
+    }
+}
+
 fn choose_locate_route(intent: &Option<String>, query: &str) -> LocateRoute {
     let intent_lower = intent.as_deref().unwrap_or("").to_lowercase();
     let query_lower = query.to_lowercase();
@@ -1145,8 +1486,40 @@ fn looks_like_path(query: &str) -> bool {
 }
 
 fn looks_like_text_snippet(query: &str) -> bool {
+    // A text snippet is actual code or log text, not a concept query.
+    // Multi-word concept queries like "command-line flag parsing" should route
+    // to symbol search (semantic or bm25), not content search.
+    let has_code_signals = query.contains('\"')
+        || query.contains('\'')
+        || query.contains("=>")
+        || query.contains("->")
+        || query.contains("::")
+        || query.contains("()")
+        || query.contains('{')
+        || query.contains('}')
+        || query.contains(';');
+
+    if has_code_signals {
+        return true;
+    }
+
+    // Only treat as text snippet if it's long enough to be a real code fragment
+    // (5+ words) AND contains no obvious concept/subsystem keywords.
     let words = query.split_whitespace().count();
-    words >= 3 || query.contains('\"') || query.contains('\'') || query.contains("=>")
+    if words >= 5 {
+        let lower = query.to_lowercase();
+        // If it reads like a concept query, don't treat as text snippet.
+        let concept_words = [
+            "function", "method", "class", "struct", "module", "handler",
+            "config", "parse", "build", "create", "implement", "logic",
+            "handling", "execution", "path", "flow", "search", "find",
+            "where", "how", "what", "which", "the", "this",
+        ];
+        let has_concept = concept_words.iter().any(|w| lower.contains(w));
+        return !has_concept;
+    }
+
+    false
 }
 
 fn prefers_semantic_discovery(query: &str) -> bool {
@@ -1175,6 +1548,11 @@ fn looks_broad_repo_query(query: &str) -> bool {
             | "repo layout"
             | "project layout"
             | "codebase overview"
+            | "architecture"
+            | "project structure"
+            | "repo structure"
+            | "codebase"
+            | "codebase structure"
     )
 }
 
@@ -1455,6 +1833,9 @@ async fn locate_symbols(
     } else {
         mode
     };
+
+    // Try the primary search mode. If semantic search fails (e.g. embedding
+    // server is down), fall back to bm25 instead of propagating the error.
     let result = search_symbols(SearchSymbolsParams {
         project: params.project.clone(),
         query: params.query.clone(),
@@ -1466,7 +1847,27 @@ async fn locate_symbols(
         mode: Some(query_mode.to_string()),
         embed_config: semantic_cfg.clone(),
     })
-    .await?;
+    .await;
+
+    let result = match result {
+        Ok(r) => r,
+        Err(_) if query_mode == "semantic" => {
+            // Semantic search failed; fall back to bm25 silently.
+            search_symbols(SearchSymbolsParams {
+                project: params.project.clone(),
+                query: params.query.clone(),
+                kind: params.kind.clone(),
+                language: params.language.clone(),
+                file: params.scope.clone(),
+                limit: Some(limit),
+                offset: Some(0),
+                mode: Some("bm25".to_string()),
+                embed_config: None,
+            })
+            .await?
+        }
+        Err(e) => return Err(e),
+    };
 
     let mut results = result["results"]
         .as_array()

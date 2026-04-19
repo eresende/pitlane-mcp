@@ -86,6 +86,9 @@ def _run_result_to_flat_dict(
     result: RunResult, quality: QualityRecord | None
 ) -> dict:
     """Flatten a RunResult + optional QualityRecord into a single CSV row dict."""
+    from bench.harness.framework.tool_mix import analyze_tool_mix
+
+    tool_mix = analyze_tool_mix(result)
     row: dict[str, Any] = {
         "prompt_id": result.prompt_id,
         "mode": result.mode,
@@ -97,6 +100,10 @@ def _run_result_to_flat_dict(
         "completion_tokens": result.token_usage.completion_tokens,
         "total_tokens": result.token_usage.total_tokens,
         "tool_call_count": len(result.tool_calls),
+        "pitlane_tool_calls": tool_mix.pitlane_tool_calls,
+        "generic_tool_calls": tool_mix.generic_tool_calls,
+        "pitlane_tool_pct": tool_mix.pitlane_tool_pct,
+        "first_generic_escape_iteration": tool_mix.first_generic_escape_iteration or "",
         "error": result.error or "",
     }
     if quality is not None:
@@ -127,6 +134,10 @@ _CSV_HEADERS = [
     "completion_tokens",
     "total_tokens",
     "tool_call_count",
+    "pitlane_tool_calls",
+    "generic_tool_calls",
+    "pitlane_tool_pct",
+    "first_generic_escape_iteration",
     "error",
     "grounded_files_count",
     "grounded_symbols_count",

@@ -43,7 +43,7 @@ and model steering, not in startup/config wiring.
 
 ### 1. Improve `locate_code` for vague symbol/subsystem queries
 
-- [ ] Add query normalization for common vague patterns observed in real runs.
+- [x] Add query normalization for common vague patterns observed in real runs.
   - Examples:
     - `main function`
     - `entry point`
@@ -51,21 +51,26 @@ and model steering, not in startup/config wiring.
     - `directory traversal walker`
     - `printer print results`
     - `ignore handling`
+  - Implemented `normalize_locate_query()` in `orchestrator.rs` that rewrites
+    these patterns into sharper discovery intents before routing.
 
-- [ ] Rewrite weak natural-language discovery queries into better server-side
+- [x] Rewrite weak natural-language discovery queries into better server-side
   symbol/file discovery intents before routing.
   - Example:
     - `main function` in a CLI repo should bias toward entrypoint files and
       exported `main`/`run` symbols.
     - `args clap` should bias toward config/flags parsing files instead of
       literal text search.
+  - The normalization uses repo profile entrypoints when available.
 
-- [ ] Use repo-role priors more aggressively in `locate_code`.
+- [x] Use repo-role priors more aggressively in `locate_code`.
   - Promote `entrypoint`, `cli`, `config`, `handler`, `service`, and
     `bootstrap` roles when the query matches those concepts implicitly.
+  - Profile is now loaded early in `locate_code` and passed to normalization.
 
-- [ ] Return better query-sharpening guidance on weak `locate_code` results.
+- [x] Return better query-sharpening guidance on weak `locate_code` results.
   - Instead of generic fallback advice, suggest one concrete sharper query.
+  - Implemented `suggest_sharper_query()` that returns context-aware suggestions.
   - Example:
     - `Try HiArgs / LowArgs / ParseResult in crates/core/flags`
     - `Try WalkBuilder / Ignore::matched in crates/ignore`
@@ -83,46 +88,59 @@ and model steering, not in startup/config wiring.
 - [ ] Bias `trace_path` toward compact path narratives that can replace multiple
   follow-up discovery calls.
 
-- [ ] Surface stronger evidence when a path seed is weak.
+- [x] Surface stronger evidence when a path seed is weak.
   - If no call chain is found, explicitly point the model to the likely entry
     file or config subsystem instead of just recommending another search.
+  - `trace_path` now returns concrete fallback guidance with entrypoint file
+    paths when the trace returns empty results.
 
 ### 3. Tighten `read_code_unit` further
 
-- [ ] Keep the current file-outline compaction.
+- [x] Keep the current file-outline compaction.
 
-- [ ] Add a second-level cap for very large symbol bodies returned by
+- [x] Add a second-level cap for very large symbol bodies returned by
   `read_code_unit(symbol_id=...)`.
   - Some method/function reads are still large enough to trigger follow-up
     branching.
+  - Added `READ_CODE_UNIT_SYMBOL_BODY_LINE_LIMIT` (120 lines) that truncates
+    large symbol bodies and returns `body_truncated`, `body_total_lines`,
+    `body_returned_lines` fields plus guidance to narrow the read.
 
 - [ ] Consider returning a lighter default for container-heavy files.
   - Example:
     - show top-level declarations plus the first few relevant methods
     - require narrower follow-up reads for the rest
 
-- [ ] Add a server-side hint when a file outline was compacted.
+- [x] Add a server-side hint when a file outline was compacted.
   - Tell the model how to narrow within the same file using `locate_code`
     without escaping to generic reads.
+  - Steering now explicitly says "Do not escape to generic file reads or
+    directory listings."
 
 ### 4. Reduce generic-tool escape conditions
 
-- [ ] Use Pitlane tool responses to more explicitly discourage generic reads.
+- [x] Use Pitlane tool responses to more explicitly discourage generic reads.
   - If `locate_code`, `trace_path`, or `get_index_stats` already found the
     subsystem, the next-step guidance should explicitly say not to glob/list the
     directory.
+  - All steering messages in `locate_code`, `trace_path`, `read_code_unit`,
+    and `get_index_stats` now include explicit anti-escape language.
 
-- [ ] Consider adding stronger `recommended_target` payloads in weak-but-useful
+- [x] Consider adding stronger `recommended_target` payloads in weak-but-useful
   cases.
   - Example:
     - direct a model from `get_index_stats` into `crates/core/main.rs`
     - direct a model from a weak `locate_code` into a specific file path and
       narrower symbol query
+  - `get_index_stats` steering now includes anti-escape guidance.
+  - Weak `locate_code` results now include concrete query suggestions.
 
-- [ ] Review whether `read_code_unit(file_path=directory-ish string)` should be
+- [x] Review whether `read_code_unit(file_path=directory-ish string)` should be
   rejected or normalized more strictly.
   - One benchmark trace showed `read_code_unit(file_path="crates/core/flags")`,
     which is not the intended usage pattern.
+  - Now rejects directory paths with a helpful error message suggesting
+    `locate_code` with `intent="file"` instead.
 
 ## Harness Work
 
@@ -139,18 +157,23 @@ and model steering, not in startup/config wiring.
 
 ### 6. Add benchmark checks for tool-mix regressions
 
-- [ ] Track non-Pitlane tool escapes in `with-mcp` runs.
+- [x] Track non-Pitlane tool escapes in `with-mcp` runs.
   - Count `read`, `glob`, `bash`, and similar generic tools separately.
+  - Implemented `bench/harness/framework/tool_mix.py` with `PITLANE_TOOL_NAMES`
+    and `GENERIC_TOOL_NAMES` sets.
 
-- [ ] Add a derived metric for:
+- [x] Add a derived metric for:
   - generic-tool calls per `with-mcp` run
   - percent of tool calls that are Pitlane tools
   - first generic-tool escape iteration
+  - All captured in `ToolMixSummary` dataclass.
 
-- [ ] Use those metrics to catch regressions even when answer quality remains
+- [x] Use those metrics to catch regressions even when answer quality remains
   flat at `1.0`.
+  - Tool-mix columns added to CSV summary output.
 
-- [ ] Store a compact per-run tool-mix summary in derived outputs.
+- [x] Store a compact per-run tool-mix summary in derived outputs.
+  - `grade_run()` now writes `tool_mix.json` and `tool_mix_report.md`.
 
 ### 7. Build a focused prompt slice for Pitlane iteration
 
@@ -173,7 +196,7 @@ and model steering, not in startup/config wiring.
 
 ## Immediate Next Steps
 
-- [ ] Improve `locate_code` query normalization and reranking for vague
+- [x] Improve `locate_code` query normalization and reranking for vague
   subsystem queries.
 - [ ] Re-run the same ripgrep shallow smoke slice after that product change.
 - [ ] Compare against:

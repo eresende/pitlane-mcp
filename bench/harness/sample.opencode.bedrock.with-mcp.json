@@ -24,10 +24,10 @@
         "/home/eresende/projects/pitlane-mcp/target/debug/pitlane-mcp"
       ],
       "environment": {
-        "PITLANE_EMBED_URL": "http://127.0.0.1:1234/v1/embeddings",
-        "PITLANE_EMBED_MODEL": "nomic-embed-text-v1.5",
-        "PITLANE_EMBED_BATCH_SIZE": "256",
-        "PITLANE_EMBED_TIMEOUT": "120"
+        "PITLANE_EMBED_URL": "http://localhost:11434/api/embed",
+        "PITLANE_EMBED_MODEL": "nomic-embed-text",
+        "PITLANE_EMBED_BATCH_SIZE": "32",
+        "PITLANE_EMBED_TIMEOUT": "256"
       }
     }
   }
