@@ -3,9 +3,9 @@
 Produces:
   config.json          — full BenchmarkConfig serialized
   run_manifest.json    — immutable run identity
-  results.jsonl        — one JSON object per RunResult
-  results.csv          — flattened summary CSV
-  claim_report.md      — Markdown claim report
+  results.jsonl        — derived aggregate of persisted RunResult artifacts
+  results.csv          — derived flattened summary CSV
+  claim_report.md      — derived Markdown claim report
   raw/<prompt_slug>/<mode>/run_<n>/
       result.json
       quality.json
@@ -23,14 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from bench.harness.resume import instance_dir
-from bench.harness.framework.models import (
-    BenchmarkConfig,
-    Message,
-    QualityRecord,
-    RunResult,
-    ToolCallRecord,
-    TokenUsage,
-)
+from bench.harness.framework.models import BenchmarkConfig, Message, QualityRecord, RunResult, ToolCallRecord, TokenUsage
 from bench.harness.schemas import RunManifest
 
 
@@ -174,17 +167,9 @@ class OutputWriter:
             encoding="utf-8",
         )
 
-    def write_run(
-        self,
-        result: RunResult,
-        quality: QualityRecord | None = None,
-    ) -> None:
-        """Append one line to results.jsonl and write per-instance artifacts."""
-        # Append to results.jsonl
-        jsonl_path = self._out / "results.jsonl"
+    def write_run(self, result: RunResult) -> None:
+        """Write execution artifacts for one benchmark instance."""
         row = _run_result_to_dict(result)
-        with jsonl_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
         raw_dir = instance_dir(self._out, result.prompt_id, result.mode, result.run_index)
         raw_dir.mkdir(parents=True, exist_ok=True)
@@ -194,16 +179,6 @@ class OutputWriter:
             json.dumps(row, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-
-        quality_path = raw_dir / "quality.json"
-        if quality is None:
-            if quality_path.exists():
-                quality_path.unlink()
-        else:
-            quality_path.write_text(
-                json.dumps(_quality_record_to_dict(quality), indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
 
         conversation_path = raw_dir / "conversation.json"
         conversation_path.write_text(
@@ -222,6 +197,26 @@ class OutputWriter:
                 indent=2,
                 ensure_ascii=False,
             ),
+            encoding="utf-8",
+        )
+
+    def write_quality(
+        self,
+        prompt_id: str,
+        mode: str,
+        run_index: int,
+        quality: QualityRecord | None,
+    ) -> None:
+        """Write or clear the grading artifact for one benchmark instance."""
+        raw_dir = instance_dir(self._out, prompt_id, mode, run_index)
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        quality_path = raw_dir / "quality.json"
+        if quality is None:
+            if quality_path.exists():
+                quality_path.unlink()
+            return
+        quality_path.write_text(
+            json.dumps(_quality_record_to_dict(quality), indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
 

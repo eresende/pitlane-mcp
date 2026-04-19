@@ -21,17 +21,14 @@ from typing import TYPE_CHECKING
 log = logging.getLogger("bench")
 
 from bench.harness.framework.agentic_loop import AgenticLoop
-from bench.harness.framework.claim_report import ClaimReport
 from bench.harness.framework.models import (
     BenchmarkConfig,
-    QualityRecord,
     RunResult,
 )
 from bench.harness.framework.output_writer import OutputWriter
 from bench.harness.framework.prompt_loader import load_prompts
-from bench.harness.framework.quality_scorer import QualityScorer
 from bench.harness.manifest import build_run_manifest
-from bench.harness.resume import instance_is_complete, load_instance_artifacts
+from bench.harness.resume import instance_is_complete, load_all_instance_artifacts, load_instance_artifacts
 
 if TYPE_CHECKING:
     from bench.harness.framework.backends import ModelBackend
@@ -241,7 +238,7 @@ class BenchmarkRunner:
         mcp_executor: "ToolExecutor",
         baseline_executor: "ToolExecutor",
     ) -> None:
-        """Execute the full benchmark and write all outputs.
+        """Execute the full benchmark and write raw execution artifacts.
 
         Args:
             backend: LLM backend (OllamaBackend or OpenRouterBackend).
@@ -363,17 +360,9 @@ class BenchmarkRunner:
                 print(f"[WARN] Baseline executor startup failed: {exc}", file=sys.stderr)
 
         loop = AgenticLoop()
-        scorer = QualityScorer()
-
-        all_results: list[RunResult] = []
-        all_qualities: list[QualityRecord | None] = []
-
-        # Per-prompt summary data: prompt_id → {mode → [quality_score]}
-        summary: dict[str, dict[str, list[float]]] = {}
 
         total_prompts = len(prompts)
         for prompt_idx, prompt_row in enumerate(prompts, start=1):
-            summary[prompt_row.id] = {"mcp": [], "baseline": []}
             log.info("[%d/%d] prompt: %s  (category: %s)",
                      prompt_idx, total_prompts, prompt_row.id, prompt_row.category)
 
@@ -399,16 +388,11 @@ class BenchmarkRunner:
                             run_idx + 1,
                             self.runs_per_prompt,
                         )
-                        all_results.append(result)
-                        all_qualities.append(quality)
-                        if quality is not None:
-                            summary[prompt_row.id][run_mode].append(quality.quality_score)
                         continue
 
                     log.info("  → %s run %d/%d ...", run_mode, run_idx + 1, self.runs_per_prompt)
                     t0 = time.perf_counter()
                     result: RunResult
-                    quality: QualityRecord | None = None
 
                     try:
                         result = loop.run(
@@ -448,23 +432,7 @@ class BenchmarkRunner:
                             error=str(exc),
                         )
 
-                    # Score non-error runs
-                    if result.status != "error" and result.final_answer:
-                        try:
-                            quality = scorer.score(
-                                result.final_answer,
-                                self.repo_path,
-                                prompt_row.category,
-                            )
-                        except Exception as exc:  # noqa: BLE001
-                            quality = None
-
-                    writer.write_run(result, quality)
-                    all_results.append(result)
-                    all_qualities.append(quality)
-
-                    if quality is not None:
-                        summary[prompt_row.id][run_mode].append(quality.quality_score)
+                    writer.write_run(result)
 
         # Shutdown executors
         if "mcp" in modes:
@@ -483,21 +451,18 @@ class BenchmarkRunner:
             except Exception:  # noqa: BLE001
                 pass
 
-        log.info("Writing CSV summary and claim report...")
+        results, qualities = load_all_instance_artifacts(self.output_dir)
+        writer.write_results_jsonl(results)
+        log.info("Execution complete. Raw artifacts written to %s", self.output_dir)
 
-        writer.write_results_jsonl(all_results)
-
-        # Write CSV summary
-        writer.write_csv_summary(all_results, all_qualities)
-
-        # Generate and write ClaimReport
-        report = ClaimReport()
-        report_md = report.generate(all_results, all_qualities, prompts, config)
-        writer.write_claim_report(report_md)
-        log.info("Done. Results written to %s", self.output_dir)
-
-        # Print per-prompt comparison summary to stdout
-        self._print_summary(summary, modes)
+        # Keep the existing human-readable summary when grading artifacts already exist.
+        if any(quality is not None for quality in qualities):
+            summary: dict[str, dict[str, list[float]]] = {}
+            for result, quality in zip(results, qualities):
+                summary.setdefault(result.prompt_id, {"mcp": [], "baseline": []})
+                if quality is not None:
+                    summary[result.prompt_id][result.mode].append(quality.quality_score)
+            self._print_summary(summary, modes)
 
     # ------------------------------------------------------------------
     # Private helpers

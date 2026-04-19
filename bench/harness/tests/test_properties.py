@@ -1124,16 +1124,25 @@ def test_output_format_correctness(results: list[RunResult]) -> None:
     - results.csv that is valid CSV with correct headers
     - raw/<prompt_slug>/<mode>/run_<n>/ directories for each run
     """
+    unique_results: list[RunResult] = []
+    seen_keys: set[tuple[str, str, int]] = set()
+    for result in results:
+        key = (result.prompt_id, result.mode, result.run_index)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        unique_results.append(result)
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         writer = OutputWriter(tmp_dir)
 
         # Write each run
-        for result in results:
+        for result in unique_results:
             writer.write_run(result)
-        writer.write_results_jsonl(results)
+        writer.write_results_jsonl(unique_results)
 
         # Write CSV summary (no quality records)
-        writer.write_csv_summary(results, [None] * len(results))
+        writer.write_csv_summary(unique_results, [None] * len(unique_results))
 
         out = Path(tmp_dir)
 
@@ -1141,10 +1150,10 @@ def test_output_format_correctness(results: list[RunResult]) -> None:
         jsonl_path = out / "results.jsonl"
         assert jsonl_path.exists(), "results.jsonl should exist"
         lines = jsonl_path.read_text(encoding="utf-8").strip().split("\n")
-        assert len(lines) == len(results), (
-            f"Expected {len(results)} lines in results.jsonl, got {len(lines)}"
+        assert len(lines) == len(unique_results), (
+            f"Expected {len(unique_results)} lines in results.jsonl, got {len(lines)}"
         )
-        for i, (line, result) in enumerate(zip(lines, results)):
+        for i, (line, result) in enumerate(zip(lines, unique_results)):
             obj = json.loads(line)  # must be valid JSON
             assert obj["prompt_id"] == result.prompt_id, f"Line {i}: prompt_id mismatch"
             assert obj["mode"] == result.mode, f"Line {i}: mode mismatch"
@@ -1164,12 +1173,12 @@ def test_output_format_correctness(results: list[RunResult]) -> None:
             for header in _CSV_HEADERS:
                 assert header in reader.fieldnames, f"CSV missing header: {header}"
             csv_rows = list(reader)
-        assert len(csv_rows) == len(results), (
-            f"Expected {len(results)} CSV rows, got {len(csv_rows)}"
+        assert len(csv_rows) == len(unique_results), (
+            f"Expected {len(unique_results)} CSV rows, got {len(csv_rows)}"
         )
 
         # --- Validate raw directories ---
-        for result in results:
+        for result in unique_results:
             raw_dir = instance_dir(out, result.prompt_id, result.mode, result.run_index)
             assert raw_dir.exists(), f"Raw dir missing: {raw_dir}"
             assert (raw_dir / "result.json").exists(), (

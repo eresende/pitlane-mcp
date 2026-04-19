@@ -5,11 +5,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
 
+from bench.harness.grade import grade_run
 from bench.harness.manifest import resolve_suite_paths
+from bench.harness.runtimes.base import RuntimeRequest
+from bench.harness.runtimes.local_agentic import LocalAgenticRuntime
+from bench.harness.runtimes.opencode import OpenCodeRuntime, add_opencode_arguments
 
 
 def _check_pitlane_on_path() -> None:
@@ -20,6 +25,55 @@ def _check_pitlane_on_path() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+def _build_backend_factory(backend_type: str):
+    if backend_type == "ollama":
+        from bench.harness.framework.backends import OllamaBackend
+
+        def factory(request: RuntimeRequest) -> OllamaBackend:
+            return OllamaBackend(
+                model=request.model_name,
+                temperature=request.temperature,
+                num_ctx=request.context_window,
+            )
+
+        return factory
+
+    if backend_type == "openrouter":
+        from bench.harness.framework.backends import OpenRouterBackend
+
+        def factory(request: RuntimeRequest) -> OpenRouterBackend:
+            return OpenRouterBackend(
+                model=request.model_name,
+                temperature=request.temperature,
+            )
+
+        return factory
+
+    if backend_type == "lmstudio":
+        from bench.harness.framework.backends import LMStudioBackend
+
+        def factory(request: RuntimeRequest) -> LMStudioBackend:
+            return LMStudioBackend(
+                model=request.model_name,
+                base_url=os.environ.get("LMSTUDIO_BASE_URL", "http://127.0.0.1:1234/v1"),
+                temperature=request.temperature,
+                max_tokens=request.context_window,
+            )
+
+        return factory
+
+    raise ValueError(f"Unsupported backend: {backend_type}")
+
+
+def create_runtime(runtime_type: str, backend_type: str):
+    """Return a runtime adapter for the requested execution mode."""
+    if runtime_type == "local":
+        return LocalAgenticRuntime(_build_backend_factory(backend_type))
+    if runtime_type == "opencode":
+        return OpenCodeRuntime()
+    raise ValueError(f"Unsupported runtime: {runtime_type}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -46,13 +100,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=["ollama", "openrouter"],
+        choices=["ollama", "openrouter", "lmstudio"],
         default="ollama",
         help="LLM backend to use (default: ollama).",
     )
     parser.add_argument(
         "--runtime",
-        choices=["local"],
+        choices=["local", "opencode"],
         default="local",
         help="Execution runtime (default: local).",
     )
@@ -99,7 +153,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Run only the specified prompt id. Repeat to select multiple prompts.",
     )
-    return parser
+    parser.add_argument(
+        "--skip-grade",
+        action="store_true",
+        help="Execute runs only and skip the grading phase.",
+    )
+    return add_opencode_arguments(parser)
 
 
 def _resolve_inputs(args: argparse.Namespace) -> tuple[str, str, str, str, str]:
@@ -156,30 +215,10 @@ def main(argv: list[str] | None = None) -> None:
         stream=sys.stderr,
     )
 
-    if args.mode in ("mcp", "both"):
+    if args.runtime == "local" and args.mode in ("mcp", "both"):
         _check_pitlane_on_path()
 
-    if args.backend == "ollama":
-        from bench.harness.framework.backends import OllamaBackend
-
-        backend = OllamaBackend(
-            model=args.model,
-            temperature=args.temperature,
-            num_ctx=args.context_window,
-        )
-    else:
-        from bench.harness.framework.backends import OpenRouterBackend
-
-        backend = OpenRouterBackend(
-            model=args.model,
-            temperature=args.temperature,
-        )
-
-    from bench.harness.framework.benchmark_runner import BenchmarkRunner
-    from bench.harness.framework.executors import BaselineExecutor
-    from bench.harness.framework.mcp_executor import MCPExecutor
-
-    runner = BenchmarkRunner(
+    request = RuntimeRequest(
         repo_path=args.repo,
         prompt_set_path=args.prompts,
         model_name=args.model,
@@ -197,8 +236,18 @@ def main(argv: list[str] | None = None) -> None:
         resume=args.resume,
         force=args.force,
         prompt_ids=args.prompt_ids,
+        backend_type=args.backend,
+        target_specs=args.target,
+        agent=args.agent,
+        title_prefix=args.title_prefix,
+        prompt_suffix=args.prompt_suffix,
+        runtime_extra_args=args.runtime_extra_args,
+        dry_run=args.dry_run,
     )
-    runner.run(backend, MCPExecutor(), BaselineExecutor())
+    runtime = create_runtime(args.runtime, args.backend)
+    runtime.run(request)
+    if not args.skip_grade and not args.dry_run:
+        grade_run(args.out)
 
 
 if __name__ == "__main__":

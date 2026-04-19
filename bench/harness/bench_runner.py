@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 
+from bench.harness.runtimes.opencode import add_opencode_arguments
 from bench.harness.run import main as _run_main
 
 
@@ -28,9 +29,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=["ollama", "openrouter"],
+        choices=["ollama", "openrouter", "lmstudio"],
         default="ollama",
         help="LLM backend to use (default: ollama).",
+    )
+    parser.add_argument(
+        "--runtime",
+        choices=["local", "opencode"],
+        default="local",
+        help="Execution runtime (default: local).",
     )
     parser.add_argument(
         "--max-iterations",
@@ -75,7 +82,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         help="Run only the specified prompt id. Repeat to select multiple prompts.",
     )
-    return parser
+    parser.add_argument(
+        "--skip-grade",
+        action="store_true",
+        help="Execute runs only and skip the grading phase.",
+    )
+    return add_opencode_arguments(parser)
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -95,6 +107,8 @@ def main(argv: list[str] | None = None) -> None:
         args.mode,
         "--backend",
         args.backend,
+        "--runtime",
+        args.runtime,
         "--max-iterations",
         str(args.max_iterations),
         "--timeout",
@@ -110,6 +124,20 @@ def main(argv: list[str] | None = None) -> None:
         forwarded.append("--force")
     for prompt_id in args.prompt_ids:
         forwarded.extend(["--prompt-id", prompt_id])
+    if args.skip_grade:
+        forwarded.append("--skip-grade")
+    for target in args.target:
+        forwarded.extend(["--target", target])
+    if args.agent:
+        forwarded.extend(["--agent", args.agent])
+    if args.title_prefix:
+        forwarded.extend(["--title-prefix", args.title_prefix])
+    if args.prompt_suffix:
+        forwarded.extend(["--prompt-suffix", args.prompt_suffix])
+    for extra_arg in args.runtime_extra_args:
+        forwarded.extend(["--extra-arg", extra_arg])
+    if args.dry_run:
+        forwarded.append("--dry-run")
     _run_main(forwarded)
 
 

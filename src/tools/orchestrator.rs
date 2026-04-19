@@ -24,6 +24,8 @@ use crate::tools::search_symbols::{search_symbols, SearchSymbolsParams};
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 use crate::tools::trace_execution_path::{trace_execution_path, TraceExecutionPathParams};
 
+const READ_CODE_UNIT_FILE_OUTLINE_LIMIT: usize = 12;
+
 pub struct LocateCodeParams {
     pub project: String,
     pub query: String,
@@ -128,13 +130,19 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         match route_used.as_str() {
             "search_files" => "search_symbols",
             "search_content" => "search_symbols",
-            "get_project_outline" => "search_files",
+            "get_project_outline" => "get_index_stats",
             _ => "search_symbols",
         }
     } else {
         match results[0]["kind"].as_str().unwrap_or("symbol") {
-            "repo_map" => "search_files",
-            "directory" => "search_files",
+            "repo_map" => {
+                if results[0]["primary_file"].is_string() {
+                    "read_code_unit"
+                } else {
+                    "get_project_outline"
+                }
+            }
+            "directory" => "get_project_outline",
             "file" | "content" => "read_code_unit",
             _ => "read_code_unit",
         }
@@ -371,16 +379,35 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
     })
     .await?;
     let outline_symbols = response["symbols"].as_array().cloned().unwrap_or_default();
+    let compact_symbols =
+        compact_outline_symbols(&outline_symbols, READ_CODE_UNIT_FILE_OUTLINE_LIMIT);
+    let truncated = compact_symbols.len() < outline_symbols.len();
+
+    response["symbols"] = json!(compact_symbols);
+    response["returned_count"] = json!(response["symbols"].as_array().map_or(0, Vec::len));
+    response["truncated"] = json!(truncated);
+    if truncated {
+        response["guidance"] = json!({
+            "next_step": "This file outline was compacted to the strongest symbols. Use locate_code with the file_path and a narrower query if you need additional members."
+        });
+    }
+
+    let steering_symbols = response["symbols"].as_array().cloned().unwrap_or_default();
 
     attach_steering(
         &mut response,
         build_steering(
             0.76,
-            "File structure was returned; inspect a symbol next if you need implementation detail."
-                .to_string(),
+            if truncated {
+                "A compact file outline was returned; inspect one of the returned symbols or narrow discovery before expanding further."
+                    .to_string()
+            } else {
+                "File structure was returned; inspect a symbol next if you need implementation detail."
+                    .to_string()
+            },
             "locate_code",
             json!({ "file_path": file_path }),
-            take_fallback_candidates(&outline_symbols),
+            take_fallback_candidates(&steering_symbols),
         ),
     );
     let content_seen = response["content_seen"].as_bool();
@@ -396,6 +423,39 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
     session::record_file(&canonical, Path::new(&file_path));
 
     Ok(response)
+}
+
+fn compact_outline_symbols(symbols: &[Value], limit: usize) -> Vec<Value> {
+    if symbols.len() <= limit {
+        return symbols.to_vec();
+    }
+
+    let mut ranked: Vec<(usize, usize, u64)> = symbols
+        .iter()
+        .enumerate()
+        .map(|(index, symbol)| {
+            let kind = symbol["kind"].as_str().unwrap_or_default();
+            let rank = match kind {
+                "mod" | "struct" | "enum" | "trait" | "class" | "function" | "const"
+                | "type_alias" => 0,
+                "impl" => 1,
+                "method" => 2,
+                _ => 3,
+            };
+            let line_start = symbol["line_start"].as_u64().unwrap_or(u64::MAX);
+            (index, rank, line_start)
+        })
+        .collect();
+
+    ranked.sort_by_key(|(_, rank, line_start)| (*rank, *line_start));
+
+    let mut selected: Vec<Value> = ranked
+        .into_iter()
+        .take(limit)
+        .map(|(index, _, _)| symbols[index].clone())
+        .collect();
+    selected.sort_by_key(|symbol| symbol["line_start"].as_u64().unwrap_or(u64::MAX));
+    selected
 }
 
 fn attach_read_state(
@@ -1160,11 +1220,23 @@ async fn locate_project(params: &LocateCodeParams, limit: usize) -> anyhow::Resu
 
     let mut results = Vec::new();
     if !result["repo_map"].is_null() {
+        let primary_file = result["architecture_anchors"]["primary_file"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| {
+                result["repo_map"]["entrypoints"]
+                    .as_array()
+                    .and_then(|entries| entries.first())
+                    .and_then(|entry| entry.as_str())
+                    .map(str::to_owned)
+            });
         results.push(json!({
             "kind": "repo_map",
             "name": "repo map",
             "file": "",
+            "primary_file": primary_file,
             "repo_map": result["repo_map"],
+            "architecture_anchors": result["architecture_anchors"],
             "source_tool": "get_project_outline",
         }));
     }
@@ -2203,10 +2275,17 @@ fn build_edge_provenance_summary(symbols: &[ImpactSymbol], files: &[ImpactFile])
 
 fn candidate_target(candidate: &Value) -> Value {
     if candidate["kind"].as_str() == Some("repo_map") {
-        json!({
-            "intent": "project",
-            "project_view": "repo_map",
-        })
+        if let Some(file_path) = candidate["primary_file"].as_str() {
+            json!({
+                "file_path": file_path,
+                "kind": "file",
+            })
+        } else {
+            json!({
+                "intent": "project",
+                "project_view": "repo_map",
+            })
+        }
     } else if candidate["kind"].as_str() == Some("file")
         || candidate["kind"].as_str() == Some("directory")
     {
@@ -2398,8 +2477,9 @@ mod tests {
             result["steering"]["recommended_next_tool"]
                 .as_str()
                 .unwrap(),
-            "search_files"
+            "read_code_unit"
         );
+        assert!(result["results"][0]["primary_file"].is_string());
         assert_eq!(
             result["results"][0]["repo_map"]["archetype"],
             serde_json::json!("cli")
@@ -2755,6 +2835,41 @@ mod tests {
         assert_eq!(first["read_state"]["repeat_read"], json!(false));
         assert_eq!(second["read_state"]["repeat_read"], json!(true));
         assert_eq!(second["read_state"]["content_seen"], json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_read_code_unit_compacts_large_file_outline() {
+        let dir = TempDir::new().unwrap();
+        let mut source = String::from("pub struct Root;\nimpl Root {\n");
+        for i in 0..32 {
+            source.push_str(&format!("    pub fn method_{i}(&self) {{}}\n"));
+        }
+        source.push_str("}\n");
+        std::fs::write(dir.path().join("lib.rs"), source).unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = read_code_unit(ReadCodeUnitParams {
+            project,
+            symbol_id: None,
+            file_path: Some("lib.rs".to_string()),
+            line_start: None,
+            line_end: None,
+            include_context: None,
+            signature_only: None,
+        })
+        .await
+        .unwrap();
+
+        let symbols = result["symbols"].as_array().unwrap();
+        assert!(symbols.len() <= READ_CODE_UNIT_FILE_OUTLINE_LIMIT);
+        assert_eq!(result["truncated"], json!(true));
+        assert_eq!(result["returned_count"], json!(symbols.len()));
+        assert!(result["count"].as_u64().unwrap() > symbols.len() as u64);
+        assert_eq!(
+            symbols[0]["kind"].as_str().unwrap(),
+            "struct",
+            "top-level declarations should be kept ahead of method-heavy noise"
+        );
     }
 
     #[tokio::test]

@@ -14,10 +14,13 @@ python bench_kiro.py \
 
 Outputs
 -------
+  Legacy compatibility outputs maintained by this script only:
   <out>/results.jsonl
   <out>/results.csv
   <out>/scores_template.csv
   <out>/raw/<prompt_id>/<agent>/run_<n>/stdout.txt
+
+This script is not part of the canonical bench.harness.run artifact contract.
 """
 
 from __future__ import annotations

@@ -57,6 +57,8 @@ class ChatResponse:
 
     message: Message
     usage: TokenUsage
+    finish_reason: str | None = None
+    reasoning_content: str | None = None
 
 
 @dataclass

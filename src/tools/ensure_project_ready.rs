@@ -48,9 +48,9 @@ pub async fn ensure_project_ready(params: EnsureProjectReadyParams) -> anyhow::R
         },
         "guidance": {
             "next_step": if embeddings_status == "running" {
-                "Project is indexed and ready for non-semantic tools. Use trace_execution_path, search_content, search_files, or non-semantic search_symbols now, or call wait_for_embeddings later if semantic search is required."
+                "Project is indexed and ready for non-semantic tools. Use locate_code for ambiguous discovery, trace_path for flow questions, read_code_unit to inspect a known target, or get_index_stats for repo orientation. Call wait_for_embeddings later only if semantic search is required."
             } else {
-                "Project is ready. Proceed directly to trace_execution_path, search_symbols, or search_content without extra startup calls."
+                "Project is ready. Use locate_code for ambiguous discovery, trace_path for flow questions, read_code_unit for focused inspection, or get_index_stats for repo orientation."
             },
             "avoid": "Avoid blocking startup on wait_for_embeddings unless your client explicitly needs semantic search to be ready."
         }
@@ -87,7 +87,7 @@ mod tests {
         assert_eq!(result["embeddings"]["status"], json!("disabled"));
         assert_eq!(
             result["guidance"]["next_step"],
-            json!("Project is ready. Proceed directly to trace_execution_path, search_symbols, or search_content without extra startup calls.")
+            json!("Project is ready. Use locate_code for ambiguous discovery, trace_path for flow questions, read_code_unit for focused inspection, or get_index_stats for repo orientation.")
         );
         assert_eq!(
             result["guidance"]["avoid"],

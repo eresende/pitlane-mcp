@@ -83,3 +83,24 @@ def load_instance_artifacts(
     quality = QualityRecord(**quality_payload) if quality_payload is not None else None
     return _run_result_from_dict(result_payload), quality
 
+
+def load_all_instance_artifacts(output_dir: str | Path) -> tuple[list[RunResult], list[QualityRecord | None]]:
+    """Load all per-instance artifacts in deterministic prompt/mode/run order."""
+    root = Path(output_dir) / "raw"
+    if not root.exists():
+        return [], []
+
+    collected: list[tuple[RunResult, QualityRecord | None]] = []
+    for result_path in sorted(root.glob("*/**/run_*/result.json")):
+        artifact_dir = result_path.parent
+        result_payload = json.loads(result_path.read_text(encoding="utf-8"))
+        quality_path = artifact_dir / "quality.json"
+        quality_payload = None
+        if quality_path.exists():
+            quality_payload = json.loads(quality_path.read_text(encoding="utf-8"))
+        result = _run_result_from_dict(result_payload)
+        quality = QualityRecord(**quality_payload) if quality_payload is not None else None
+        collected.append((result, quality))
+
+    collected.sort(key=lambda item: (item[0].prompt_id, item[0].mode, item[0].run_index))
+    return [result for result, _ in collected], [quality for _, quality in collected]

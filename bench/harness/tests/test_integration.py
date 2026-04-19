@@ -197,8 +197,8 @@ def test_mcp_executor_startup_and_tool_list():
         assert len(tools) > 0, "MCPExecutor should have tool definitions after startup"
 
         tool_names = {t.name for t in tools}
-        # At minimum, core tools should be present
-        for expected in ("search_symbols", "get_symbol", "search_content"):
+        # At minimum, the default public tier should be present
+        for expected in ("ensure_project_ready", "locate_code", "read_code_unit", "trace_path"):
             assert expected in tool_names, (
                 f"Expected tool {expected!r} in MCPExecutor tool list"
             )

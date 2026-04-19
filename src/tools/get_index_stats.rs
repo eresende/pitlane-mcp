@@ -6,7 +6,10 @@ use crate::embed::store::EmbedStore;
 use crate::embed::EmbedConfig;
 use crate::index::format::index_dir;
 use crate::index::format::load_project_meta;
-use crate::index::repo_profile::{archetype_label, compact_repo_map, summarize_role_counts};
+use crate::index::repo_profile::{
+    archetype_label, compact_repo_map, path_role_for_file, profile_entrypoints,
+    role_boost_for_path, role_label, summarize_role_counts,
+};
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering};
@@ -96,6 +99,7 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
         result.insert("embeddings_percent".into(), json!(pct));
     }
     if let Some(ref profile) = profile {
+        let architecture_anchors = build_architecture_anchors(&canonical, &index, Some(profile));
         result.insert(
             "repo_profile".into(),
             json!({
@@ -105,20 +109,138 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
             }),
         );
         result.insert("repo_map".into(), compact_repo_map(Some(profile)));
+        result.insert("architecture_anchors".into(), architecture_anchors);
     }
 
+    let recommended_target = result
+        .get("architecture_anchors")
+        .and_then(|anchors| anchors.get("primary_file"))
+        .filter(|value| !value.is_null())
+        .map(|file_path| {
+            json!({
+                "project": params.project,
+                "file_path": file_path,
+            })
+        })
+        .unwrap_or_else(|| json!({ "project": params.project }));
+
     let steering = build_steering(
-        0.58,
-        "This tool provides repo-scale orientation and index health rather than a specific code unit."
-            .to_string(),
-        "get_project_outline",
-        json!({ "project": params.project }),
+        if result.get("architecture_anchors").is_some() {
+            0.74
+        } else {
+            0.58
+        },
+        if result.get("architecture_anchors").is_some() {
+            "This tool identified the repo archetype and a small set of central files that anchor an architecture answer.".to_string()
+        } else {
+            "This tool provides repo-scale orientation and index health rather than a specific code unit."
+                .to_string()
+        },
+        if result.get("architecture_anchors").is_some() {
+            "read_code_unit"
+        } else {
+            "get_project_outline"
+        },
+        recommended_target,
         vec![],
     );
     let mut value = Value::Object(result);
     attach_steering(&mut value, steering);
 
     Ok(value)
+}
+
+fn build_architecture_anchors(
+    project_path: &std::path::Path,
+    index: &crate::index::SymbolIndex,
+    profile: Option<&crate::index::repo_profile::RepoProfile>,
+) -> Value {
+    let mut files = index
+        .by_file
+        .iter()
+        .map(|(file_path, symbol_ids)| {
+            let rel = file_path
+                .strip_prefix(project_path)
+                .unwrap_or(file_path.as_path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            let role = path_role_for_file(project_path, file_path, profile);
+            let symbol_count = symbol_ids.len();
+            let score =
+                role_boost_for_path(project_path, file_path, profile, "architecture package map")
+                    + symbol_count.min(12) as i32
+                    + if profile_entrypoints(profile)
+                        .iter()
+                        .any(|entry| entry == &rel)
+                    {
+                        8
+                    } else {
+                        0
+                    };
+            json!({
+                "file": rel,
+                "role": role_label(role),
+                "symbol_count": symbol_count,
+                "score": score,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    files.sort_by(|left, right| {
+        right["score"]
+            .as_i64()
+            .unwrap_or_default()
+            .cmp(&left["score"].as_i64().unwrap_or_default())
+            .then_with(|| {
+                right["symbol_count"]
+                    .as_u64()
+                    .unwrap_or_default()
+                    .cmp(&left["symbol_count"].as_u64().unwrap_or_default())
+            })
+            .then_with(|| {
+                left["file"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .cmp(right["file"].as_str().unwrap_or_default())
+            })
+    });
+    files.truncate(5);
+
+    let primary_file = files
+        .first()
+        .and_then(|item| item["file"].as_str())
+        .map(str::to_owned);
+    let workspace_roots = top_level_roots(index, project_path);
+
+    json!({
+        "primary_file": primary_file,
+        "central_files": files,
+        "workspace_roots": workspace_roots,
+    })
+}
+
+fn top_level_roots(
+    index: &crate::index::SymbolIndex,
+    project_path: &std::path::Path,
+) -> Vec<String> {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for file_path in index.by_file.keys() {
+        let rel = file_path
+            .strip_prefix(project_path)
+            .unwrap_or(file_path.as_path());
+        let root = rel
+            .components()
+            .next()
+            .map(|component| component.as_os_str().to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !root.is_empty() {
+            *counts.entry(root).or_insert(0) += 1;
+        }
+    }
+    let mut items = counts.into_iter().collect::<Vec<_>>();
+    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    items.truncate(6);
+    items.into_iter().map(|(root, _)| root).collect()
 }
 
 #[cfg(test)]
@@ -170,6 +292,12 @@ mod tests {
         assert_eq!(result["repo_profile"]["archetype"], json!("library"));
         assert_eq!(result["repo_map"]["archetype"], json!("library"));
         assert!(result["repo_map"]["top_roles"].is_array());
+        assert!(result["architecture_anchors"]["central_files"].is_array());
+        assert_eq!(
+            result["steering"]["recommended_next_tool"],
+            json!("read_code_unit")
+        );
+        assert!(result["architecture_anchors"]["primary_file"].is_string());
 
         // Embedding fields: env vars not set → disabled, no progress fields
         assert_eq!(result["embeddings"].as_str().unwrap(), "disabled");

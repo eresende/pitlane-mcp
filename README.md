@@ -14,13 +14,72 @@ AI coding agents default to reading whole files. With pitlane-mcp, they fetch on
 
 Recent `bench/harness` runs on the ripgrep prompt set also show a consistent quality win over a non-MCP baseline. In matched 19-prompt runs, MCP improved average quality from `0.115` to `0.326` on a local AMD Radeon RX 6800 XT / Ryzen 9 9950X system and from `0.143` to `0.277` on an AWS NVIDIA A10G / AMD EPYC 7R32 instance. See [bench/harness/RIPGREP_BENCHMARK_2026-04-12.md](bench/harness/RIPGREP_BENCHMARK_2026-04-12.md) for the full comparison, system specs, and caveats.
 
+## Benchmark Harness
+
+The canonical benchmark entrypoint is now:
+
+```bash
+python -m bench.harness.run
+```
+
+For a suite-based local run:
+
+```bash
+python -m bench.harness.run \
+  --suite bench/harness/suites/ripgrep-core-v1.json \
+  --model qwen3:8b \
+  --backend ollama \
+  --out results/ripgrep-qwen3-1 \
+  --max-iterations 1 \
+  --runs 1 \
+  --resume
+```
+
+LM Studio can also be used as a local backend through its OpenAI-compatible server:
+
+```bash
+LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1 \
+python -m bench.harness.run \
+  --repo bench/repos/ripgrep \
+  --prompts bench/harness/prompts.ripgrep.jsonl \
+  --model google/gemma-3-4b \
+  --backend lmstudio \
+  --out results/ripgrep-lmstudio-1 \
+  --max-iterations 1 \
+  --runs 1
+```
+
+If LM Studio shows intermittent stuck `processing` states with some models, the harness now applies a backend-specific 2-second inter-request cooldown by default. Override it with `LMSTUDIO_COOLDOWN_SECONDS` if needed.
+
+Patch Set 1 added:
+
+- immutable `run_manifest.json` per benchmark invocation
+- per-instance artifacts under `raw/<prompt_slug>/<mode>/run_<n>/`
+- resumable runs with `--resume`
+- explicit reruns with `--force`
+
+Patch Set 2 added a real execution/grading split:
+
+- `python -m bench.harness.run ...` executes first, then grades by default
+- `python -m bench.harness.run ... --skip-grade` writes raw execution artifacts only
+- `python -m bench.harness.grade --run <output_dir>` regrades persisted run artifacts without rerunning model calls
+
+Patch Set 3 folds the OpenCode runtime into the same canonical artifact contract:
+
+- both `local` and `opencode` runtimes write the same per-instance `result.json` artifacts
+- execution writes canonical `results.jsonl` for both runtimes
+- grading regenerates `quality.json`, `results.csv`, and `claim_report.md` from persisted artifacts for both runtimes
+- `--dry-run` skips grading so placeholder OpenCode runs do not produce misleading derived summaries
+
+`bench_runner.py` still works as a compatibility wrapper, but new automation should target `bench.harness.run`. The harness refactor plan lives in [bench/harness/ROADMAP.md](bench/harness/ROADMAP.md), and detailed harness usage is documented in [bench/harness/README.md](bench/harness/README.md).
+
 ## Features
 
 - **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, Svelte (embedded `<script>` / `<script lang="ts">` blocks only), C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, Solidity, and Bash source into structured symbols
 - **BM25 full-text search** — tantivy-backed ranked search over name, qualified name, signature, and doc fields with a custom camelCase tokenizer (`LowerInstruction` → `["lower", "instruction"]`); falls back to exact substring match if the index isn't ready
 - **Intent-aware composite tools** — `locate_code`, `read_code_unit`, `trace_path`, `analyze_impact`, and `navigate_code` reduce tool thrash and broad file reads
 - **Graph-aware navigation tools** — evidence-backed callers, callees, path tracing, and impact analysis without whole-repo back-and-forth
-- **MCP tools spanning startup, discovery, retrieval, and impact analysis**
+- **Small default MCP surface** — default clients see only startup, discovery, reading, tracing, impact, orientation, and one text-search escape hatch
 - **Incremental re-indexing** — background watcher re-parses only changed files
 - **Disk-persisted index** — binary format, loads in milliseconds on subsequent calls
 - **Smart exclusions** — automatically skips `.venv`, `node_modules`, `target`, `__pycache__`, `dist`, `.next`, and other dependency/build trees at any depth
@@ -106,6 +165,10 @@ Add to your `opencode.json` or `opencode.jsonc`:
 }
 ```
 
+For benchmark harness runs through OpenCode, the repo includes ready-to-use sample configs under `bench/harness/`, including Bedrock-backed `with-mcp` and `no-mcp` targets. See `bench/harness/README.md` for the validated Bedrock/OpenCode smoke-test command and target files.
+That harness path also injects a stricter MCP benchmark system prompt so `with-mcp` runs favor one navigation step plus a few focused reads instead of broad mixed-tool exploration.
+By default, `pitlane-mcp` advertises only the agent-facing tool tier. Set `PITLANE_MCP_TOOL_TIER=all` to expose the full advanced primitive surface.
+
 ### VS Code / Kiro IDE
 
 Add to your MCP settings (`.kiro/settings/mcp.json` or `.vscode/mcp.json`):
@@ -128,44 +191,32 @@ Add to your MCP settings (`.kiro/settings/mcp.json` or `.vscode/mcp.json`):
 
 ### Tool Hierarchy
 
-Use the tools by intent, not by implementation detail:
+Use the tools by intent, not by implementation detail.
 
-- **Startup**
-  - `ensure_project_ready` — preferred one-call startup; indexes the repo and waits for embeddings only when needed
-  - `index_project` + `wait_for_embeddings` — lower-level primitives when you need explicit control
-- **Intent-aware navigation**
-  - `navigate_code` — umbrella entrypoint when the intent is still fuzzy
-  - `locate_code` — route an ambiguous query to the best symbol, file, or content lookup
-  - `read_code_unit` — read the smallest useful code unit once the target is known
-- **Discovery**
-  - `search_symbols` — find symbols by name or intent
-  - `search_content` — find literal text, regex fragments, import paths, log strings, or macros when you do not know the symbol boundary
-  - `search_files` — find repository files by file name, path fragment, or glob pattern
-  - `trace_execution_path` — answer behavior/path questions with a compact set of files, symbols, and edges
-  - `trace_path` — answer explicit path questions such as source-to-sink, config-to-effect, and shortest-path traces
-- **Retrieval**
-  - `get_symbol` — fetch one implementation by symbol ID
-  - `get_file_outline` — inspect a file's symbol structure before choosing what to read
-  - `get_lines` — fetch a specific non-symbol block by line range
-- **Orientation**
-  - `get_index_stats` — cheap aggregate repo overview
-  - `get_project_outline` — directory/file tree overview when structure matters
-- **Graph / Impact**
-  - `find_callees` — direct outgoing references
-  - `find_callers` — direct incoming references
-  - `analyze_impact` — ranked blast-radius analysis from a symbol, file, or concept
-  - `find_usages` — all call sites / name-based usages
-- **Maintenance**
-  - `watch_project` — keep the index current while a repo is changing
-  - `get_usage_stats` — inspect token-efficiency stats for `get_symbol`
+Default public tier:
+
+- `ensure_project_ready` — one-call startup
+- `locate_code` — ambiguous discovery
+- `read_code_unit` — smallest useful read
+- `trace_path` — flow and path questions
+- `analyze_impact` — blast radius before edits
+- `get_index_stats` — lightweight repo orientation
+- `search_content` — text-fragment escape hatch
+
+Advanced tier:
+
+- hidden from `tools/list` by default to reduce branching and tool thrash
+- exposed when you start the server with `PITLANE_MCP_TOOL_TIER=all`
+- includes primitives such as `search_symbols`, `search_files`, `get_symbol`, `get_file_outline`, `get_lines`, `get_project_outline`, `find_callers`, `find_callees`, `find_usages`, `trace_execution_path`, `navigate_code`, `watch_project`, `get_usage_stats`, `index_project`, and `wait_for_embeddings`
 
 Recommended flow:
 
 1. Call `ensure_project_ready`.
-2. If the intent is fuzzy, start with `navigate_code` or `locate_code`.
-3. Use `trace_execution_path` or `trace_path` for behavior, source-to-sink, config-to-effect, and execution-path questions.
-4. Switch to `read_code_unit` or `get_symbol` once you have the right target.
-5. Use `analyze_impact`, `find_callees`, `find_callers`, or `find_usages` only when you need graph or impact information.
+2. If the intent is fuzzy, start with `locate_code`.
+3. Use `trace_path` for behavior, source-to-sink, config-to-effect, and execution-path questions.
+4. Switch to `read_code_unit` once you have the right target.
+5. Use `analyze_impact` when you need blast-radius guidance before edits.
+6. Reach for advanced primitives only if you deliberately exposed them with `PITLANE_MCP_TOOL_TIER=all`.
 
 Avoid shell `grep`, globbing, or broad file reads when the MCP tools can answer the question directly.
 

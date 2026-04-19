@@ -19,19 +19,12 @@ from bench.harness.framework.models import ToolDef, ToolResult
 # Known pitlane-mcp tool names (used as fallback if tools/list fails)
 PITLANE_TOOL_NAMES = [
     "ensure_project_ready",
-    "search_symbols",
-    "get_symbol",
-    "find_usages",
-    "find_callers",
-    "find_callees",
-    "search_content",
-    "search_files",
-    "trace_execution_path",
-    "get_file_outline",
-    "get_project_outline",
-    "get_lines",
+    "locate_code",
+    "read_code_unit",
+    "trace_path",
+    "analyze_impact",
     "get_index_stats",
-    "get_usage_stats",
+    "search_content",
 ]
 
 

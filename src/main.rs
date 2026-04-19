@@ -1,11 +1,13 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use pitlane_mcp::embed::EmbedConfig;
 use pitlane_mcp::tools;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{Meta, ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router, Peer, RoleServer, ServerHandler,
+    model::{ListToolsResult, Meta, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool},
+    schemars,
+    service::RequestContext,
+    tool, tool_handler, tool_router, Peer, RoleServer, ServerHandler,
 };
 use serde::{Deserialize, Serialize};
 
@@ -355,12 +357,57 @@ pub struct WaitForEmbeddingsRequest {
     pub timeout_secs: Option<u64>,
 }
 
+#[cfg(test)]
+const DEFAULT_PUBLIC_TOOL_NAMES: &[&str] = &[
+    "ensure_project_ready",
+    "locate_code",
+    "read_code_unit",
+    "trace_path",
+    "analyze_impact",
+    "get_index_stats",
+    "search_content",
+];
+
+const ADVANCED_TOOL_NAMES: &[&str] = &[
+    "index_project",
+    "search_symbols",
+    "search_files",
+    "navigate_code",
+    "trace_execution_path",
+    "get_symbol",
+    "get_file_outline",
+    "get_lines",
+    "get_project_outline",
+    "find_callees",
+    "find_callers",
+    "find_usages",
+    "watch_project",
+    "get_usage_stats",
+    "wait_for_embeddings",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolExposureTier {
+    Default,
+    All,
+}
+
+impl ToolExposureTier {
+    fn from_env() -> Self {
+        match std::env::var("PITLANE_MCP_TOOL_TIER") {
+            Ok(value) if value.eq_ignore_ascii_case("all") => Self::All,
+            _ => Self::Default,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PitlaneMcp {
     watcher_registry: Arc<WatcherRegistry>,
     embed_config: Option<Arc<EmbedConfig>>,
-    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
+    public_tool_router: ToolRouter<Self>,
+    tool_exposure_tier: ToolExposureTier,
 }
 
 impl Default for PitlaneMcp {
@@ -373,10 +420,14 @@ impl PitlaneMcp {
     pub fn new() -> Self {
         let watcher_registry = Arc::new(WatcherRegistry::new());
         let embed_config = EmbedConfig::from_env().map(Arc::new);
+        let tool_router = Self::tool_router();
+        let public_tool_router = build_public_tool_router(tool_router.clone());
         Self {
             watcher_registry,
             embed_config,
-            tool_router: Self::tool_router(),
+            tool_router,
+            public_tool_router,
+            tool_exposure_tier: ToolExposureTier::from_env(),
         }
     }
 }
@@ -394,6 +445,13 @@ fn tool_meta(search_hint: &'static str) -> Meta {
         serde_json::Value::String(search_hint.to_string()),
     );
     meta
+}
+
+fn build_public_tool_router(mut tool_router: ToolRouter<PitlaneMcp>) -> ToolRouter<PitlaneMcp> {
+    for name in ADVANCED_TOOL_NAMES {
+        tool_router.remove_route(name);
+    }
+    tool_router
 }
 
 fn value_to_text(value: serde_json::Value) -> String {
@@ -420,7 +478,7 @@ fn err_to_text(e: anyhow::Error) -> String {
 #[tool_router]
 impl PitlaneMcp {
     #[tool(
-        description = "Parse and index a project's source files; subsequent calls are fast (cached). Returns symbol count, file count, and elapsed time. Also generates vector embeddings for semantic search (mode=\"semantic\") when PITLANE_EMBED_URL and PITLANE_EMBED_MODEL are configured — embeddings run in the background so the call returns as soon as the symbol index is ready. The response includes an \"embeddings\" field: \"running\" means generation is in progress — call wait_for_embeddings immediately to block until embeddings are ready before using mode=\"semantic\"; \"ok\" means embeddings are ready; \"disabled\" means no embed config was found. For normal startup, prefer ensure_project_ready instead of manually chaining index_project and wait_for_embeddings.",
+        description = "Advanced startup tool that parses and indexes a project. Prefer ensure_project_ready for normal use.",
         meta = tool_meta("index parse cache project"),
         annotations(
             read_only_hint = false,
@@ -451,7 +509,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Preferred one-call startup tool. Ensures a project's index is ready and reports embedding status without blocking on wait_for_embeddings. Use this instead of manually chaining index_project and wait_for_embeddings for normal startup, especially in clients that do not handle long-running startup waits well.",
+        description = "Prepare a repo for navigation and report indexing or embedding readiness. Use this once at startup.",
         meta = tool_meta("ready startup initialize index embeddings semantic setup"),
         annotations(
             read_only_hint = false,
@@ -484,7 +542,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Search indexed symbols by name or concept. Use mode=\"semantic\" first for behavior, architecture, or execution-path questions when you do not know the exact symbol name; phrase the query as intent, e.g. \"build regex matcher from CLI flags\". Use mode=\"exact\" or mode=\"bm25\" when you know the symbol name or a distinctive substring. Prefer this tool for symbol discovery, then call get_symbol on the best candidate. Responses include guidance about the next best inspection step so you can stop broad searching sooner. If you know a text snippet but not the symbol boundary, use search_content instead.",
+        description = "Advanced symbol lookup by exact name or intent. Prefer locate_code unless you already know the target is a symbol.",
         meta = tool_meta("search find symbol function method class type semantic"),
         annotations(
             read_only_hint = true,
@@ -512,7 +570,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Search file contents across the project's supported source files. Use this when you know a text snippet, macro name, type name, import path, log string, or regex fragment but do not yet know the symbol boundary. Supports literal or regex matching, file/language filters, and optional context lines. Prefer this over shell grep for code lookup. Responses include guidance for when to pivot back to get_symbol or search_symbols instead of repeating nearby text searches.",
+        description = "Search indexed source text for a known snippet, log string, import path, or regex fragment. Use this only when you know text but not the owning symbol.",
         meta = tool_meta("content text grep regex snippet string file search"),
         annotations(
             read_only_hint = true,
@@ -541,7 +599,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Search repository file paths by name, path fragment, fuzzy similarity, or glob. Use this when you know or expect a file name, test file, path suffix, or directory pattern but do not yet know the exact symbol or file contents. Prefer this over shell globbing or find for repo-local file discovery, then pivot to get_file_outline, search_content, or get_symbol once you have the path.",
+        description = "Advanced file-path lookup by name, path fragment, or glob. Prefer locate_code unless you already know the target is a file.",
         meta = tool_meta("files path filename glob tests search discover"),
         annotations(
             read_only_hint = true,
@@ -567,7 +625,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Smart code locator that routes ambiguous lookups to the most likely discovery primitive. Use this when you are not sure whether the target is a symbol, file, snippet, or repo subtree. The response normalizes the best candidates and tells you the next tool to call. Prefer this over choosing between search_symbols, search_files, search_content, or get_project_outline yourself.",
+        description = "Find the most likely code target for an ambiguous query such as a symbol, file, or snippet. Use this when you do not yet know which lower-level lookup fits.",
         meta = tool_meta("locate navigate discover symbol file snippet project"),
         annotations(
             read_only_hint = true,
@@ -593,7 +651,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Read the smallest useful code unit. Pass a symbol_id to fetch an implementation, or a file_path with an optional line range to fetch a file slice. This is the preferred confirmation step after locate_code.",
+        description = "Read the smallest useful code unit for a known target, such as a symbol, file outline, or line slice. Use this after discovery or tracing identifies what to inspect.",
         meta = tool_meta("read unit symbol file lines slice"),
         annotations(
             read_only_hint = true,
@@ -619,7 +677,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Trace a call or execution path from source to sink, or let the server infer the likely flow from a behavior question. Use this for path questions, entrypoint-to-effect tracing, and call-chain summaries. If you already know source or sink symbols, include them to strengthen the trace.",
+        description = "Trace a likely execution or data-flow path from a behavior question or source and sink hints. Use this for call chains, config-to-effect, and entrypoint-to-output questions.",
         meta = tool_meta("trace path flow call chain source sink execution"),
         annotations(
             read_only_hint = true,
@@ -646,7 +704,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Estimate the blast radius of a symbol, file, or concept. Returns ranked impacted symbols and files using caller and usage traversal, plus the best follow-up verification targets.",
+        description = "Estimate the blast radius of changing a symbol, file, or concept. Use this before edits or refactors.",
         meta = tool_meta("impact blast radius callers usages refactor change"),
         annotations(
             read_only_hint = true,
@@ -672,7 +730,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Umbrella navigation tool. Use this when you want the server to decide whether to locate, read, trace, or analyze impact. It returns the routed result plus the chosen navigation path, which reduces tool thrash when the intent is still fuzzy.",
+        description = "Advanced umbrella router across locate, read, trace, and impact. Prefer locate_code or trace_path unless you want the server to choose the workflow.",
         meta = tool_meta("navigate locate read trace impact route intent"),
         annotations(
             read_only_hint = true,
@@ -709,7 +767,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Trace a likely execution path for a behavior-level question in one step. Use this for requests like \"where is the main regex search path?\" or \"how does request handling flow?\" It performs symbol discovery, follows nearby callers/callees, and returns a compact set of important files, symbols, and edges spanning entry, orchestration, execution, and output layers. Prefer this over manually chaining many search_symbols/get_symbol calls for path questions.",
+        description = "Advanced behavior-level tracer for one-step execution-path discovery. Prefer trace_path for the default path-tracing surface.",
         meta = tool_meta("trace execution path architecture pipeline call graph flow"),
         annotations(
             read_only_hint = true,
@@ -740,7 +798,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Fetch the source of one symbol by its stable ID — more token-efficient than reading the whole file. Use search_symbols to discover the symbol first, then use get_symbol to inspect just that implementation. Full-source responses include a references field listing symbols directly used by this symbol (calls, type references), which is usually enough to trace the next step without more broad searching. Structs/classes/interfaces/traits default to signature-only (no body); pass signature_only=false to get full source and references.",
+        description = "Advanced symbol read by stable ID. Prefer read_code_unit for the default read surface.",
         meta = tool_meta("symbol implementation source code definition"),
         annotations(
             read_only_hint = true,
@@ -763,7 +821,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Explore a file's structure: lists all symbols with kinds and line numbers, without returning source code.",
+        description = "Advanced file-structure read without source text. Prefer read_code_unit unless you specifically need just the outline.",
         meta = tool_meta("file outline structure symbols"),
         annotations(
             read_only_hint = true,
@@ -784,7 +842,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Fetch a slice of a file by line range — use when you need a specific block that isn't a named symbol (e.g. a macro invocation, initializer table, or inline comment block). Returns source lines with total_file_lines so you can paginate. Capped at 500 lines per call; response includes truncated and next offset when the cap is hit.",
+        description = "Advanced line-range read for exact file slices. Prefer read_code_unit unless you already know the needed line span.",
         meta = tool_meta("lines file slice range source"),
         annotations(
             read_only_hint = true,
@@ -807,7 +865,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Orient yourself in a codebase: files grouped by directory with symbol counts per kind. For very large projects (>10k files), if the result exceeds token limits, retry with summary=true to get a lightweight directory-only view (just dir names with file/symbol counts). Use 'path' to drill into a specific subtree for full detail.",
+        description = "Advanced repo outline grouped by directory. Prefer get_index_stats or locate_code for default orientation.",
         meta = tool_meta("project overview codebase directory structure"),
         annotations(
             read_only_hint = true,
@@ -834,7 +892,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Return direct outgoing symbol references for one symbol. Use this to see what a function/method likely calls without reading the full file or doing a whole-repo search.",
+        description = "Advanced direct outgoing-reference view for one symbol. Prefer trace_path or analyze_impact for ranked graph navigation.",
         meta = tool_meta("callees outgoing calls dependencies symbol"),
         annotations(
             read_only_hint = true,
@@ -857,7 +915,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Return direct incoming symbol references for one symbol. Use this to see likely callers before making a local change.",
+        description = "Advanced direct incoming-reference view for one symbol. Prefer analyze_impact for ranked change analysis.",
         meta = tool_meta("callers incoming calls references impact symbol"),
         annotations(
             read_only_hint = true,
@@ -881,7 +939,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Find all call sites for a symbol before refactoring. Returns file, line, column, and surrounding snippet for each match.",
+        description = "Advanced usage listing for one symbol. Use this when you need raw call sites before refactoring.",
         meta = tool_meta("usages references callers refactor"),
         annotations(
             read_only_hint = true,
@@ -905,7 +963,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Call after index_project to keep the index current as files change. Pass stop=true to stop the watcher. Pass status_only=true to check whether a watcher is already running without starting or stopping it.",
+        description = "Advanced maintenance tool that keeps the index updated as files change. Use this only for long-lived sessions.",
         meta = tool_meta("watch monitor file changes live"),
         annotations(
             read_only_hint = false,
@@ -928,7 +986,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Return symbol counts by language and kind for an indexed project — lightweight orientation tool. Use instead of get_project_outline when you only need aggregate numbers, not the file tree. Also reports a snapshot of embedding progress via embeddings_stored, embeddings_total, and embeddings_percent fields. NOTE: do NOT poll this in a loop to wait for embeddings — use wait_for_embeddings instead, which blocks and streams a live progress bar until generation is complete.",
+        description = "Show lightweight repo orientation data such as indexed languages and symbol counts. Use this before broader repo exploration.",
         meta = tool_meta("stats symbols language kind count index"),
         annotations(
             read_only_hint = true,
@@ -948,7 +1006,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Return token-efficiency statistics for get_symbol calls — how many tokens were saved by signature-only responses. Pass project to filter to one repo; omit for global totals across all projects.",
+        description = "Advanced diagnostics for token savings from signature-only symbol reads.",
         meta = tool_meta("tokens saved statistics usage efficiency"),
         annotations(
             read_only_hint = true,
@@ -968,7 +1026,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Wait for embeddings after index_project returns embeddings=\"running\". Blocks until embedding generation is complete, streaming a live ASCII progress bar (e.g. \"Embeddings: [████████░░░░░░░░░░░░]  42.0%  213/535 symbols\") via MCP notifications on every poll tick. Returns immediately if embeddings are disabled or already done. Use this instead of polling get_index_stats manually. For the common one-call startup path, prefer ensure_project_ready. poll_interval_ms controls refresh rate (default 2000 ms); timeout_secs caps the total wait (default 300 s). Returns status=\"ok\" when complete, status=\"timeout\" if the cap is hit.",
+        description = "Advanced blocking wait for semantic-search embeddings. Prefer ensure_project_ready unless you explicitly need semantic readiness before continuing.",
         meta = tool_meta("embeddings progress wait semantic search ready"),
         annotations(
             read_only_hint = true,
@@ -998,19 +1056,38 @@ impl PitlaneMcp {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for PitlaneMcp {
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + '_ {
+        let tools = match self.tool_exposure_tier {
+            ToolExposureTier::Default => self.public_tool_router.list_all(),
+            ToolExposureTier::All => self.tool_router.list_all(),
+        };
+        std::future::ready(Ok(ListToolsResult {
+            tools,
+            next_cursor: None,
+            meta: None,
+        }))
+    }
+
+    fn get_tool(&self, name: &str) -> Option<Tool> {
+        match self.tool_exposure_tier {
+            ToolExposureTier::Default => self.public_tool_router.get(name).cloned(),
+            ToolExposureTier::All => self.tool_router.get(name).cloned(),
+        }
+    }
+
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_logging().build())
             .with_instructions(
-                "pitlane-mcp: AST-based code intelligence. \
-                Prefer ensure_project_ready first — it ensures indexing is done and reports embedding status without waiting. If unavailable in your client flow, call index_project first. \
-                Discovery: locate_code (server-routed lookup for ambiguous symbol/file/snippet/project queries), search_symbols (find symbols by name or intent), search_content (find literal text or regex snippets in source files), search_files (find repository files by name/path/glob), get_project_outline (repo overview). \
-                Reading: read_code_unit (fetch the smallest useful unit), get_symbol (fetch one implementation by ID), get_file_outline (file structure), get_lines (file slices). \
-                Navigation: trace_path (server-routed flow/path tracing), trace_execution_path (explicit behavior/path tracing), analyze_impact (blast-radius analysis). \
-                Analysis: find_callees (direct outgoing references), find_callers (direct incoming references), find_usages (all call sites for a symbol). \
-                Suggested flow: ensure_project_ready, then use navigate_code or locate_code when the right primitive is unclear; use read_code_unit to confirm a candidate; use trace_path for source-to-sink or call-chain questions; use analyze_impact for refactor/change analysis. Call wait_for_embeddings separately only when semantic search must be ready before continuing. \
-                Maintenance: watch_project (keep index current as files change).",
+                "pitlane-mcp: token-efficient code navigation. \
+                Default tool tier: ensure_project_ready, locate_code, read_code_unit, trace_path, analyze_impact, get_index_stats, and search_content. \
+                Suggested flow: start with ensure_project_ready; use locate_code for ambiguous discovery; use read_code_unit to inspect a chosen target; use trace_path for flow questions; use analyze_impact before edits; use get_index_stats for lightweight orientation; use search_content only when you know a text fragment. \
+                Advanced primitive tools are hidden from tools/list by default to reduce agent branching. Set PITLANE_MCP_TOOL_TIER=all to expose the full primitive surface.",
             )
     }
 }
@@ -1030,4 +1107,70 @@ async fn main() -> anyhow::Result<()> {
     let running = rmcp::serve_server(server, transport).await?;
     running.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tool_names(router: &ToolRouter<PitlaneMcp>) -> Vec<String> {
+        router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn default_public_tool_set_matches_expected_names() {
+        let public = build_public_tool_router(PitlaneMcp::tool_router());
+        let mut names = tool_names(&public);
+        names.sort();
+        let mut expected = DEFAULT_PUBLIC_TOOL_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+        expected.sort();
+
+        assert_eq!(names, expected);
+    }
+
+    #[test]
+    fn advanced_tools_are_hidden_from_default_public_router() {
+        let public = build_public_tool_router(PitlaneMcp::tool_router());
+        let names = tool_names(&public);
+
+        for advanced in ADVANCED_TOOL_NAMES {
+            assert!(
+                !names.iter().any(|name| name == advanced),
+                "advanced tool {advanced} should not be listed in the default tier"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_exposure_tier_defaults_to_default() {
+        let prev = std::env::var("PITLANE_MCP_TOOL_TIER").ok();
+        std::env::remove_var("PITLANE_MCP_TOOL_TIER");
+
+        assert_eq!(ToolExposureTier::from_env(), ToolExposureTier::Default);
+
+        match prev {
+            Some(value) => std::env::set_var("PITLANE_MCP_TOOL_TIER", value),
+            None => std::env::remove_var("PITLANE_MCP_TOOL_TIER"),
+        }
+    }
+
+    #[test]
+    fn tool_exposure_tier_all_enables_full_surface() {
+        let prev = std::env::var("PITLANE_MCP_TOOL_TIER").ok();
+        std::env::set_var("PITLANE_MCP_TOOL_TIER", "all");
+
+        assert_eq!(ToolExposureTier::from_env(), ToolExposureTier::All);
+
+        match prev {
+            Some(value) => std::env::set_var("PITLANE_MCP_TOOL_TIER", value),
+            None => std::env::remove_var("PITLANE_MCP_TOOL_TIER"),
+        }
+    }
 }
