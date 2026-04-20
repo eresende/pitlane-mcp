@@ -6,7 +6,7 @@ Usage
 -----
 python bench_kiro.py \
     --repo /path/to/ripgrep \
-    --prompts prompts.ripgrep.jsonl \
+    --prompts prompts/ripgrep.jsonl \
     --agent-mcp bench-with-mcp \
     --agent-no-mcp bench-no-mcp \
     --model glm-5 \

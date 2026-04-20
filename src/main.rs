@@ -126,6 +126,18 @@ pub struct TraceExecutionPathRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct InvestigateRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// The question to investigate — can be a behavior question, subsystem query, or execution-path question.
+    pub query: String,
+    /// Filter by language
+    pub language: Option<String>,
+    /// Restrict investigation to a subtree or file glob
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LocateCodeRequest {
     /// Project path previously indexed
     pub project: String,
@@ -360,6 +372,7 @@ pub struct WaitForEmbeddingsRequest {
 #[cfg(test)]
 const DEFAULT_PUBLIC_TOOL_NAMES: &[&str] = &[
     "ensure_project_ready",
+    "investigate",
     "locate_code",
     "read_code_unit",
     "trace_path",
@@ -625,6 +638,29 @@ impl PitlaneMcp {
     }
 
     #[tool(
+        description = "Investigate a code question in one call. Discovers relevant symbols, reads their source, and returns a prose answer with code inlined. Use this instead of multiple locate_code + read_code_unit calls when you need to understand a subsystem, execution path, or implementation.",
+        meta = tool_meta("investigate question answer code subsystem path flow"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn investigate(&self, Parameters(req): Parameters<InvestigateRequest>) -> String {
+        let params = tools::investigate::InvestigateParams {
+            project: req.project,
+            query: req.query,
+            language: req.language,
+            scope: req.scope,
+        };
+        match tools::investigate::investigate(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
         description = "Find the most likely code target for an ambiguous query such as a symbol, file, or snippet. Use this when you do not yet know which lower-level lookup fits.",
         meta = tool_meta("locate navigate discover symbol file snippet project"),
         annotations(
@@ -813,6 +849,7 @@ impl PitlaneMcp {
             symbol_id: req.symbol_id,
             include_context: req.include_context,
             signature_only: req.signature_only,
+            include_references: None,
         };
         match tools::get_symbol::get_symbol(params).await {
             Ok(v) => value_to_text(v),

@@ -10,7 +10,7 @@
       }
     }
   },
-  "model": "amazon-bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+  "model": "amazon-bedrock/zai.glm-4.7-flash",
   "permission": "allow",
   "compaction": {
     "auto": true,

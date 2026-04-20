@@ -15,7 +15,7 @@
 #   --key-name NAME        EC2 key pair name (required)
 #   --model MODEL          Ollama model to use (default: qwen3:14b)
 #   --repo REPO            Benchmark repo name under bench/repos/ (default: ripgrep)
-#   --prompts FILE         Prompts JSONL file (default: prompts.ripgrep.jsonl)
+#   --prompts FILE         Prompts JSONL file (default: prompts/ripgrep.jsonl)
 #   --out DIR              Output directory on the instance (default: /home/ubuntu/results)
 #   --spot                 Use spot instance (cheaper, may be interrupted)
 #   --no-terminate         Don't terminate instance after run (for debugging)
@@ -47,7 +47,7 @@ REGION="eu-west-1"
 KEY_NAME=""
 MODEL="qwen3:14b"
 BENCH_REPO="ripgrep"
-PROMPTS_FILE="prompts.ripgrep.jsonl"
+PROMPTS_FILE="prompts/ripgrep.jsonl"
 OUT_DIR="/home/ubuntu/results"
 USE_SPOT=false
 NO_TERMINATE=false

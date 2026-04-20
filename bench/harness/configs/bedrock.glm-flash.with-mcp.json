@@ -1,25 +1,16 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "enabled_providers": [
-    "openai"
+    "amazon-bedrock"
   ],
   "provider": {
-    "openai": {
+    "amazon-bedrock": {
       "options": {
-        "apiKey": "{env:OPENAI_API_KEY}"
-      },
-      "models": {
-        "gpt-5.4-nano": {
-          "options": {
-            "reasoningEffort": "low",
-            "textVerbosity": "low",
-            "reasoningSummary": "auto"
-          }
-        }
+        "region": "us-east-1"
       }
     }
   },
-  "model": "openai/gpt-5.4-nano",
+  "model": "amazon-bedrock/zai.glm-4.7-flash",
   "permission": "allow",
   "compaction": {
     "auto": true,
@@ -30,13 +21,13 @@
     "pitlane": {
       "type": "local",
       "command": [
-        "pitlane-mcp"
+        "/home/eresende/projects/pitlane-mcp/target/debug/pitlane-mcp"
       ],
       "environment": {
         "PITLANE_EMBED_URL": "http://localhost:11434/api/embed",
         "PITLANE_EMBED_MODEL": "nomic-embed-text",
-        "PITLANE_EMBED_BATCH_SIZE": "256",
-        "PITLANE_EMBED_TIMEOUT": "120"
+        "PITLANE_EMBED_BATCH_SIZE": "32",
+        "PITLANE_EMBED_TIMEOUT": "256"
       }
     }
   }

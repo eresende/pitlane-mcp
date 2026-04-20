@@ -5,7 +5,7 @@
     "path": "../../repos/ripgrep"
   },
   "prompts": {
-    "path": "../prompts.ripgrep.jsonl"
+    "path": "../prompts/ripgrep.jsonl"
   },
   "defaults": {
     "runs": 3,

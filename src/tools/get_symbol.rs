@@ -9,13 +9,14 @@ use crate::session;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
-const MAX_REFERENCES: usize = 25;
+const MAX_REFERENCES: usize = 8;
 
 pub struct GetSymbolParams {
     pub project: String,
     pub symbol_id: String,
     pub include_context: Option<bool>,
     pub signature_only: Option<bool>,
+    pub include_references: Option<bool>,
 }
 
 pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
@@ -48,6 +49,36 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             sym.signature.as_deref().unwrap_or(""),
             sym.doc.as_deref().unwrap_or("")
         );
+
+        // For container types, include a compact member list so the model
+        // knows what methods/fields exist without escaping to a file read.
+        let members: Vec<Value> = if class_like {
+            let prefix = format!("{}::", sym.name);
+            let mut found: Vec<Value> = index
+                .symbols
+                .values()
+                .filter(|s| {
+                    s.file == sym.file
+                        && s.id != sym.id
+                        && (s.qualified.starts_with(&prefix)
+                            || (s.line_start >= sym.line_start && s.line_end <= sym.line_end))
+                })
+                .map(|s| {
+                    json!({
+                        "id": s.id,
+                        "name": s.name,
+                        "kind": s.kind.to_string(),
+                        "signature": s.signature,
+                    })
+                })
+                .collect();
+            found.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            found.truncate(15);
+            found
+        } else {
+            Vec::new()
+        };
+
         let observation =
             session::observe_content(Path::new(&canonical_project), "symbol", &sym.id, &content);
         let mut response = json!({
@@ -55,7 +86,6 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             "name": sym.name,
             "qualified": sym.qualified,
             "kind": sym.kind.to_string(),
-            "language": sym.language.to_string(),
             "file": sym.file.to_string_lossy().replace('\\', "/"),
             "line_start": sym.line_start,
             "line_end": sym.line_end,
@@ -65,6 +95,10 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             "target_seen": observation.target_seen,
             "content_changed": observation.changed_since_last_read,
         });
+        if !members.is_empty() {
+            response["members"] = json!(members);
+            response["members_count"] = json!(members.len());
+        }
         attach_steering(
             &mut response,
             build_steering(
@@ -76,21 +110,14 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
                     0.84
                 },
                 if observation.content_seen {
-                    "The symbol shape and documentation were already returned in this session, so this is a repeat read."
-                        .to_string()
+                    "Repeat read. Expand to usages instead.".to_string()
                 } else if observation.changed_since_last_read {
-                    "The symbol shape was reread and changed since the previous read in this session."
-                        .to_string()
+                    "Changed since last read.".to_string()
                 } else {
-                    "The symbol shape and documentation were returned without reading the full body."
-                        .to_string()
+                    "Signature returned.".to_string()
                 },
                 "find_usages",
-                json!({
-                    "symbol_id": sym.id,
-                    "name": sym.name,
-                    "file": sym.file.to_string_lossy().replace('\\', "/"),
-                }),
+                json!({ "symbol_id": sym.id }),
                 Vec::new(),
             ),
         );
@@ -118,24 +145,24 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         full_source_bytes,
     );
 
-    let mut refs: Vec<Value> = collect_direct_references(&index, sym, Some(&source_text))
-        .into_iter()
-        .map(|reference| {
-            json!({
-                "id": reference.id,
-                "name": reference.name,
-                "kind": reference.kind,
-                "file": reference.file,
-                "line_start": reference.line_start,
-                "evidence": reference.evidence,
-                "confidence": reference.confidence,
+    let include_references = params.include_references.unwrap_or(false);
+    let (refs, references_truncated) = if include_references {
+        let mut refs: Vec<Value> = collect_direct_references(&index, sym, Some(&source_text))
+            .into_iter()
+            .map(|reference| {
+                json!({
+                    "id": reference.id,
+                    "name": reference.name,
+                    "kind": reference.kind,
+                })
             })
-        })
-        .collect();
-    let references_truncated = refs.len() > MAX_REFERENCES;
-    refs.truncate(MAX_REFERENCES);
-    let steering_refs = refs.clone();
-    let has_references = !steering_refs.is_empty();
+            .collect();
+        let truncated = refs.len() > MAX_REFERENCES;
+        refs.truncate(MAX_REFERENCES);
+        (refs, truncated)
+    } else {
+        (Vec::new(), false)
+    };
     let observation = session::observe_content(
         Path::new(&canonical_project),
         "symbol",
@@ -147,52 +174,34 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         "name": sym.name,
         "qualified": sym.qualified,
         "kind": sym.kind.to_string(),
-        "language": sym.language.to_string(),
         "file": sym.file.to_string_lossy().replace('\\', "/"),
         "line_start": sym.line_start,
         "line_end": sym.line_end,
         "source": source_text,
         "signature": sym.signature,
-        "doc": sym.doc,
-        "content_seen": observation.content_seen,
-        "target_seen": observation.target_seen,
-        "content_changed": observation.changed_since_last_read,
-        "references": refs,
-        "references_truncated": references_truncated,
     });
-    let content_seen = response["content_seen"].as_bool().unwrap_or(false);
-    let content_changed = response["content_changed"].as_bool().unwrap_or(false);
+    if include_references && !refs.is_empty() {
+        response["references"] = json!(refs);
+        if references_truncated {
+            response["references_truncated"] = json!(true);
+        }
+    }
+    let content_seen = observation.content_seen;
+    let content_changed = observation.changed_since_last_read;
     attach_steering(
         &mut response,
         build_steering(
+            if content_seen { 0.76 } else { 0.86 },
             if content_seen {
-                0.76
+                "Repeat read. Expand to usages instead.".to_string()
             } else if content_changed {
-                0.82
-            } else if references_truncated {
-                0.86
-            } else if has_references {
-                0.9
+                "Changed since last read.".to_string()
             } else {
-                0.72
-            },
-            if content_seen {
-                "The symbol body was already returned in this session, so this read is a repeat."
-                    .to_string()
-            } else if content_changed {
-                "The symbol body changed since the previous read in this session, so this reread contains new content."
-                    .to_string()
-            } else {
-                "The symbol body was read and direct identifier references were extracted for local expansion."
-                    .to_string()
+                "Symbol body read.".to_string()
             },
             "find_usages",
-            json!({
-                "symbol_id": sym.id,
-                "name": sym.name,
-                "file": sym.file.to_string_lossy().replace('\\', "/"),
-            }),
-            take_fallback_candidates(&steering_refs),
+            json!({ "symbol_id": sym.id }),
+            take_fallback_candidates(&refs),
         ),
     );
     session::record_symbol(
@@ -251,6 +260,7 @@ mod tests {
             symbol_id,
             include_context: None,
             signature_only: Some(true),
+            include_references: None,
         })
         .await
         .unwrap();
@@ -275,6 +285,7 @@ mod tests {
             symbol_id,
             include_context: None,
             signature_only: None,
+            include_references: None,
         })
         .await
         .unwrap();
@@ -296,6 +307,7 @@ mod tests {
             symbol_id: symbol_id.clone(),
             include_context: None,
             signature_only: None,
+            include_references: None,
         })
         .await
         .unwrap();
@@ -304,12 +316,19 @@ mod tests {
             symbol_id,
             include_context: None,
             signature_only: None,
+            include_references: None,
         })
         .await
         .unwrap();
 
-        assert_eq!(first["content_seen"].as_bool(), Some(false));
-        assert_eq!(second["content_seen"].as_bool(), Some(true));
+        assert!(first["steering"]["why_this_matched"]
+            .as_str()
+            .unwrap()
+            .contains("Symbol body read"));
+        assert!(second["steering"]["why_this_matched"]
+            .as_str()
+            .unwrap()
+            .contains("Repeat read"));
     }
 
     #[tokio::test]
@@ -325,6 +344,7 @@ mod tests {
             symbol_id: symbol_id.clone(),
             include_context: None,
             signature_only: Some(false),
+            include_references: None,
         })
         .await
         .unwrap();
@@ -336,17 +356,19 @@ mod tests {
             symbol_id,
             include_context: None,
             signature_only: Some(false),
+            include_references: None,
         })
         .await
         .unwrap();
 
-        assert_eq!(first["content_changed"].as_bool(), Some(false));
-        assert_eq!(second["target_seen"].as_bool(), Some(true));
-        assert_eq!(second["content_changed"].as_bool(), Some(true));
+        assert!(first["steering"]["why_this_matched"]
+            .as_str()
+            .unwrap()
+            .contains("Symbol body read"));
         assert!(second["steering"]["why_this_matched"]
             .as_str()
             .unwrap()
-            .contains("changed since the previous read"));
+            .contains("Changed"));
     }
 
     /// signature_only captures the doc comment stored in the index.
@@ -366,6 +388,7 @@ mod tests {
             symbol_id,
             include_context: None,
             signature_only: Some(true),
+            include_references: None,
         })
         .await
         .unwrap();
@@ -395,6 +418,7 @@ mod tests {
             symbol_id,
             include_context: None,
             signature_only: Some(true),
+            include_references: None,
         })
         .await;
 
@@ -416,6 +440,7 @@ mod tests {
             symbol_id: "nonexistent::symbol#function".to_string(),
             include_context: None,
             signature_only: None,
+            include_references: None,
         })
         .await
         .unwrap_err();
@@ -447,6 +472,7 @@ mod tests {
             symbol_id,
             include_context: None,
             signature_only: None,
+            include_references: None,
         })
         .await
         .unwrap();
@@ -471,6 +497,7 @@ mod tests {
             symbol_id,
             include_context: None,
             signature_only: Some(false),
+            include_references: None,
         })
         .await
         .unwrap();
@@ -507,6 +534,7 @@ mod tests {
             symbol_id: caller_id,
             include_context: None,
             signature_only: Some(false),
+            include_references: Some(true),
         })
         .await
         .unwrap();
@@ -538,6 +566,7 @@ mod tests {
             symbol_id,
             include_context: None,
             signature_only: Some(true),
+            include_references: None,
         })
         .await
         .unwrap();

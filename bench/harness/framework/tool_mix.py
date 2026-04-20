@@ -26,6 +26,7 @@ from bench.harness.framework.models import RunResult, ToolCallRecord
 PITLANE_TOOL_NAMES: frozenset[str] = frozenset({
     # Public tier
     "ensure_project_ready",
+    "investigate",
     "locate_code",
     "read_code_unit",
     "trace_path",
@@ -49,6 +50,7 @@ PITLANE_TOOL_NAMES: frozenset[str] = frozenset({
     "get_usage_stats",
     # Also match with mcp_ prefix (some runtimes keep it)
     "mcp_ensure_project_ready",
+    "mcp_investigate",
     "mcp_locate_code",
     "mcp_read_code_unit",
     "mcp_trace_path",

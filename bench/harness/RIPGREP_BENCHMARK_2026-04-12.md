@@ -4,7 +4,7 @@ This note summarizes the latest `bench/harness` comparison on the ripgrep prompt
 
 ## Setup
 
-- Prompt set: `bench/harness/prompts.ripgrep.jsonl`
+- Prompt set: `bench/harness/prompts/ripgrep.jsonl`
 - Prompt set SHA-256: `d0ff8ebe7022a4770feef22a178a52bf8baf5c951c544f05b7873702df8f5216`
 - Prompt count: `19`
 - Runs per prompt: `3`

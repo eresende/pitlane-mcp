@@ -131,10 +131,9 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
             0.58
         },
         if result.get("architecture_anchors").is_some() {
-            "This tool identified the repo archetype and a small set of central files that anchor an architecture answer. Use read_code_unit or locate_code to drill into the identified files. Do not escape to generic directory listings or shell commands.".to_string()
+            "Repo oriented. Use read_code_unit on the primary file next.".to_string()
         } else {
-            "This tool provides repo-scale orientation and index health rather than a specific code unit."
-                .to_string()
+            "Index stats only. Use locate_code for discovery.".to_string()
         },
         if result.get("architecture_anchors").is_some() {
             "read_code_unit"
@@ -155,13 +154,7 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
     {
         value["recommended_action"] = json!({
             "tool": "read_code_unit",
-            "arguments": {
-                "file_path": primary_file,
-            },
-            "reason": format!(
-                "Read the outline of the primary file {} to discover its symbols. Do NOT use generic file read or directory listing tools.",
-                primary_file
-            ),
+            "file_path": primary_file,
         });
     }
 

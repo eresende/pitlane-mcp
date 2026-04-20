@@ -219,6 +219,19 @@ enum Command {
         /// Path to the indexed project (omit for global totals)
         project: Option<String>,
     },
+    /// Investigate a code question — discovers symbols and returns source inline
+    Investigate {
+        /// Path to the indexed project
+        project: String,
+        /// The question to investigate
+        query: String,
+        /// Filter by language
+        #[arg(long)]
+        lang: Option<String>,
+        /// Restrict to a subtree or file glob
+        #[arg(long)]
+        scope: Option<String>,
+    },
 }
 
 fn embeddings_count_in_store(path: &std::path::Path) -> usize {
@@ -389,6 +402,7 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
                 symbol_id,
                 include_context: if context { Some(true) } else { None },
                 signature_only: if sig_only { Some(true) } else { None },
+                include_references: None,
             };
             tools::get_symbol::get_symbol(params).await?
         }
@@ -528,6 +542,21 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
         Command::UsageStats { project } => {
             let params = tools::get_usage_stats::GetUsageStatsParams { project };
             tools::get_usage_stats::get_usage_stats(params).await?
+        }
+
+        Command::Investigate {
+            project,
+            query,
+            lang,
+            scope,
+        } => {
+            let params = tools::investigate::InvestigateParams {
+                project,
+                query,
+                language: lang,
+                scope,
+            };
+            tools::investigate::investigate(params).await?
         }
     };
     Ok(result)

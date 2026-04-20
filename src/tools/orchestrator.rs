@@ -110,7 +110,7 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
     let effective_query = normalized.as_deref().unwrap_or(&query);
 
     let route = choose_locate_route(&params.intent, effective_query);
-    let limit = params.limit.unwrap_or(5).clamp(1, 8);
+    let limit = params.limit.unwrap_or(3).clamp(1, 8);
     let mut route_used = route.as_str().to_string();
 
     // Build a params copy with the effective (possibly normalized) query.
@@ -149,150 +149,92 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         }
     }
 
-    let novelty_bias = promote_nearby_unseen_locate_candidate(&mut results, &canonical);
-    let locate_session_state = build_locate_session_state(&results, &canonical, novelty_bias);
-
-    let next_tool = if results.is_empty() {
-        match route_used.as_str() {
-            "search_files" => "search_symbols",
-            "search_content" => "search_symbols",
-            "get_project_outline" => "get_index_stats",
-            _ => "search_symbols",
-        }
-    } else {
-        match results[0]["kind"].as_str().unwrap_or("symbol") {
-            "repo_map" => {
-                if results[0]["primary_file"].is_string() {
-                    "read_code_unit"
-                } else {
-                    "get_project_outline"
-                }
-            }
-            "directory" => "get_project_outline",
-            "file" | "content" => "read_code_unit",
-            _ => "read_code_unit",
-        }
-    };
-
-    let steering = if results.is_empty() {
-        let sharper = suggest_sharper_query(&query, &route_used, profile.as_ref());
-        build_steering(
-            0.2,
-            if let Some(ref suggestion) = sharper {
-                format!(
-                    "The router did not recover a strong code unit. {}",
-                    suggestion
-                )
-            } else {
-                "The router did not recover a strong code unit, so this is a weak discovery result."
-                    .to_string()
-            },
-            next_tool,
-            json!({ "query": query, "route_used": route_used }),
-            take_fallback_candidates(&results),
-        )
-    } else {
-        build_steering(
-            0.88,
-            {
-                let mut why = format!(
-                    "{} routed the query to the most likely code lookup path.",
-                    route_used
-                );
-                if normalized.is_some() {
-                    why.push_str(&format!(
-                        " The original query \"{}\" was normalized to \"{}\" for better discovery.",
-                        query, effective_query
-                    ));
-                }
-                if novelty_bias {
-                    why.push_str(
-                        " The top session-seen candidate was deprioritized in favor of a nearby unseen alternative in the same subsystem.",
-                    );
-                }
-                // Discourage generic tool escapes when we found results.
-                why.push_str(
-                    " Use read_code_unit or locate_code to drill into these results. Do not escape to generic file reads, directory listings, or shell commands.",
-                );
-                why
-            },
-            next_tool,
-            candidate_target(&results[0]),
-            take_fallback_candidates(&results),
-        )
-    };
+    let _novelty_bias = promote_nearby_unseen_locate_candidate(&mut results, &canonical);
 
     let mut response = json!({
         "query": query,
-        "intent": params.intent,
-        "route_used": route_used,
-        "results": results,
         "count": results.len(),
     });
     if normalized.is_some() {
         response["normalized_query"] = json!(effective_query);
     }
 
-    // Add explicit recommended_action with the exact read_code_unit call
-    // for the top result. This prevents the model from escaping to generic
-    // file reads when it has a perfectly good symbol_id to use.
-    if !results.is_empty() {
-        let top = &results[0];
-        if let Some(symbol_id) = top["id"].as_str() {
-            if top["kind"].as_str() == Some("symbol") {
-                response["recommended_action"] = json!({
-                    "tool": "read_code_unit",
-                    "arguments": {
-                        "symbol_id": symbol_id,
-                    },
-                    "reason": format!(
-                        "Read the implementation of {} to inspect its body. Do NOT use generic file read tools.",
-                        top["name"].as_str().unwrap_or(symbol_id)
-                    ),
-                });
-            }
-        } else if let Some(file) = top["file"].as_str() {
-            response["recommended_action"] = json!({
-                "tool": "read_code_unit",
-                "arguments": {
-                    "file_path": file,
-                },
-                "reason": format!(
-                    "Read the outline of {} to discover its symbols. Do NOT use generic file read tools.",
-                    file
-                ),
-            });
+    // Build a prose summary the LLM can read directly instead of parsing JSON.
+    if results.is_empty() {
+        let sharper = suggest_sharper_query(&query, &route_used, profile.as_ref());
+        response["summary"] = json!(format!(
+            "No results found for \"{}\".{}",
+            query,
+            sharper.map(|s| format!(" {}", s)).unwrap_or_default()
+        ));
+    } else {
+        let mut summary = String::new();
+        summary.push_str(&format!(
+            "Found {} result(s) for \"{}\".\n\n",
+            results.len(),
+            query
+        ));
+        for (i, r) in results.iter().enumerate() {
+            let name = r["name"].as_str().unwrap_or("?");
+            let file = r["file"].as_str().unwrap_or("?");
+            // Strip the project prefix from file paths for readability
+            let short_file = file
+                .rfind("/crates/")
+                .or_else(|| file.rfind("/src/"))
+                .map(|pos| &file[pos + 1..])
+                .unwrap_or(file);
+            let sig = r["signature"].as_str().unwrap_or("");
+            let kind = r["symbol_kind"].as_str().unwrap_or(r["kind"].as_str().unwrap_or("?"));
+            let id = r["id"].as_str().unwrap_or("");
+            summary.push_str(&format!(
+                "{}. {} `{}` in {} — `{}`\n   → read_code_unit(symbol_id=\"{}\")\n",
+                i + 1,
+                kind,
+                name,
+                short_file,
+                if sig.len() > 100 { &sig[..100] } else { sig },
+                id
+            ));
         }
+        summary.push_str("\nUse read_code_unit with the symbol_id above to inspect any result. Do not use generic file read tools.");
+        response["summary"] = json!(summary);
     }
 
-    if let Some(state) = locate_session_state {
-        response["session_state"] = state;
-    }
+    // Keep structured results for programmatic use but make them compact.
+    let compact_results: Vec<Value> = results
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r["id"],
+                "name": r["name"],
+                "file": r["file"],
+                "signature": r["signature"],
+            })
+        })
+        .collect();
+    response["results"] = json!(compact_results);
+
     session::record_query(&canonical, &params.query);
     session::record_files(
         &canonical,
-        response["results"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        results
+            .iter()
             .filter_map(|item| item["file"].as_str().map(ToOwned::to_owned)),
     );
     session::record_symbols(
         &canonical,
-        response["results"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        results
+            .iter()
             .filter_map(|item| {
                 let id = item["id"].as_str()?.to_string();
                 let file = item["file"].as_str().map(ToOwned::to_owned);
                 Some((id, file))
             }),
     );
-    attach_steering(&mut response, steering);
     Ok(response)
 }
 
+#[allow(dead_code)]
 fn build_locate_session_state(
     results: &[Value],
     project_path: &Path,
@@ -300,22 +242,22 @@ fn build_locate_session_state(
 ) -> Option<Value> {
     let top = results.first()?;
     let top_seen = locate_candidate_seen(project_path, top);
-    let top_target = candidate_target(top);
-    let fallback = results.get(1).map(candidate_target);
 
-    Some(json!({
+    // Only emit session_state when it carries actionable information.
+    if !top_seen && !novelty_bias {
+        return None;
+    }
+
+    let mut state = json!({
         "top_target_seen": top_seen,
-        "novelty_bias_applied": novelty_bias,
-        "top_target": top_target,
-        "nearby_alternative": fallback,
-        "guidance": if novelty_bias {
-            "A nearby unseen candidate was promoted because the strongest exact match was already in the current session."
-        } else if top_seen {
-            "The top discovery candidate is already in session context. Prefer expansion before rereading it."
-        } else {
-            "The top discovery candidate is new in the current session."
-        },
-    }))
+    });
+    if novelty_bias {
+        state["novelty_bias_applied"] = json!(true);
+        if let Some(alt) = results.get(1) {
+            state["nearby_alternative"] = candidate_target(alt);
+        }
+    }
+    Some(state)
 }
 
 fn promote_nearby_unseen_locate_candidate(results: &mut [Value], project_path: &Path) -> bool {
@@ -402,6 +344,7 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
             symbol_id,
             include_context: params.include_context,
             signature_only: params.signature_only,
+            include_references: None,
         })
         .await?;
 
@@ -450,7 +393,7 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
                 &mut response,
                 build_steering(
                     0.78,
-                    "The symbol body was truncated to reduce context size. Use locate_code with the file path and a narrower query to find specific members, or use read_code_unit with line ranges. Do not escape to generic file reads."
+                    "Body truncated. Use locate_code or read_code_unit with line ranges to narrow."
                         .to_string(),
                     "locate_code",
                     json!({ "file_path": file }),
@@ -525,40 +468,50 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
     response["symbols"] = json!(compact_symbols);
     response["returned_count"] = json!(response["symbols"].as_array().map_or(0, Vec::len));
     response["truncated"] = json!(truncated);
+
+    // Build a prose summary for the file outline.
+    let mut summary = format!("File `{}` has {} symbol(s)", file_path, outline_symbols.len());
     if truncated {
-        response["guidance"] = json!({
-            "next_step": "This file outline was compacted to the strongest symbols. Use locate_code with the file_path and a narrower query if you need additional members."
-        });
+        summary.push_str(&format!(
+            " (showing top {} of {})",
+            compact_symbols.len(),
+            outline_symbols.len()
+        ));
     }
+    summary.push_str(":\n\n");
+    for sym in &compact_symbols {
+        let name = sym["name"].as_str().unwrap_or("?");
+        let kind = sym["kind"].as_str().unwrap_or("?");
+        let id = sym["id"].as_str().unwrap_or("");
+        let sig = sym["signature"].as_str().unwrap_or("");
+        summary.push_str(&format!(
+            "- {} `{}` — `{}`\n  → read_code_unit(symbol_id=\"{}\")\n",
+            kind,
+            name,
+            if sig.len() > 90 { &sig[..90] } else { sig },
+            id
+        ));
+    }
+    if truncated {
+        summary.push_str("\nUse locate_code to find additional members not shown.");
+    }
+    response["summary"] = json!(summary);
 
-    let steering_symbols = response["symbols"].as_array().cloned().unwrap_or_default();
+    // Remove the verbose symbols array — the summary replaces it.
+    // Keep a compact version for programmatic use.
+    let compact_for_response: Vec<Value> = compact_symbols
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s["id"],
+                "name": s["name"],
+                "kind": s["kind"],
+                "signature": s["signature"],
+            })
+        })
+        .collect();
+    response["symbols"] = json!(compact_for_response);
 
-    attach_steering(
-        &mut response,
-        build_steering(
-            0.76,
-            if truncated {
-                "A compact file outline was returned; inspect one of the returned symbols or narrow discovery before expanding further. Do not escape to generic file reads or directory listings."
-                    .to_string()
-            } else {
-                "File structure was returned; inspect a symbol next if you need implementation detail. Use read_code_unit with a symbol_id or locate_code to narrow. Do not escape to generic file reads."
-                    .to_string()
-            },
-            "locate_code",
-            json!({ "file_path": file_path }),
-            take_fallback_candidates(&steering_symbols),
-        ),
-    );
-    let content_seen = response["content_seen"].as_bool();
-    let target_seen = response["target_seen"].as_bool();
-    let content_changed = response["content_changed"].as_bool();
-    attach_read_state(
-        &mut response,
-        "file_outline",
-        content_seen,
-        target_seen,
-        content_changed,
-    );
     session::record_file(&canonical, Path::new(&file_path));
 
     Ok(response)
@@ -647,7 +600,7 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
         }
     }
 
-    let mut response = trace_execution_path(TraceExecutionPathParams {
+    let response = trace_execution_path(TraceExecutionPathParams {
         project: params.project,
         query: query.clone(),
         source: source_hint.clone(),
@@ -659,96 +612,139 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
         embed_config: None,
     })
     .await?;
-    response["query"] = json!(query);
-    if let Some(source) = source_hint {
-        response["source_hint"] = json!(source);
-    }
-    if let Some(sink) = sink_hint {
-        response["sink_hint"] = json!(sink);
-    }
 
     let important_symbols = response["important_symbols"]
         .as_array()
-        .map(|a| a.len())
-        .unwrap_or(0);
+        .cloned()
+        .unwrap_or_default();
+    let edges = response["edges"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let path_narrative = response["path_narrative"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
 
-    // When trace returns weak or empty results, provide concrete fallback guidance.
-    if important_symbols == 0 {
+    // Build a prose summary the LLM can read directly.
+    let mut summary = String::new();
+
+    if important_symbols.is_empty() {
         let profile = load_project_meta(&canonical)
             .ok()
             .map(|meta| meta.repo_profile);
-        let mut fallback_hint = String::from(
-            "trace_path did not find a strong execution chain for this query.",
-        );
+        summary.push_str(&format!(
+            "No execution path found for \"{}\".\n",
+            query
+        ));
         if let Some(ref profile) = profile {
             let entrypoints = profile_entrypoints(Some(profile));
             if let Some(first) = entrypoints.first() {
-                fallback_hint.push_str(&format!(
-                    " Try starting from the entrypoint file: read_code_unit(file_path=\"{}\").",
+                summary.push_str(&format!(
+                    "Try starting from the entrypoint: read_code_unit(file_path=\"{}\").\n",
                     first
                 ));
             }
         }
-        fallback_hint.push_str(
-            " Use locate_code with a more specific symbol or subsystem name instead.",
-        );
-        response["guidance"] = json!({ "next_step": fallback_hint });
+        summary.push_str("Use locate_code with a more specific symbol name instead.");
     } else {
-        // Add explicit recommended_action for the top important symbol.
-        if let Some(top) = response["important_symbols"]
-            .as_array()
-            .and_then(|items| items.first())
+        summary.push_str(&format!(
+            "Traced {} symbol(s) and {} edge(s) for \"{}\".\n\n",
+            important_symbols.len(),
+            edges.len(),
+            query
+        ));
+
+        if !path_narrative.is_empty()
+            && path_narrative != "No compact path narrative available from the traced symbols."
         {
-            if let Some(symbol_id) = top["id"].as_str() {
-                response["recommended_action"] = json!({
-                    "tool": "read_code_unit",
-                    "arguments": {
-                        "symbol_id": symbol_id,
-                    },
-                    "reason": format!(
-                        "Read the implementation of {} to inspect the execution path. Do NOT use generic file read tools.",
-                        top["name"].as_str().unwrap_or(symbol_id)
-                    ),
-                });
+            summary.push_str(&format!("Path: {}\n\n", path_narrative));
+        }
+
+        summary.push_str("Key symbols along the path:\n");
+        for (i, sym) in important_symbols.iter().enumerate() {
+            let name = sym["name"].as_str().unwrap_or("?");
+            let file = sym["file"].as_str().unwrap_or("?");
+            let short_file = file
+                .rfind("/crates/")
+                .or_else(|| file.rfind("/src/"))
+                .map(|pos| &file[pos + 1..])
+                .unwrap_or(file);
+            let category = sym["category"].as_str().unwrap_or("?");
+            let sig = sym["signature"].as_str().unwrap_or("");
+            let id = sym["id"].as_str().unwrap_or("");
+            summary.push_str(&format!(
+                "{}. [{}] `{}` in {} — `{}`\n   → read_code_unit(symbol_id=\"{}\")\n",
+                i + 1,
+                category,
+                name,
+                short_file,
+                if sig.len() > 100 { &sig[..100] } else { sig },
+                id
+            ));
+        }
+
+        if !edges.is_empty() {
+            summary.push_str("\nCall edges:\n");
+            for edge in edges.iter().take(5) {
+                let from = edge["from_id"].as_str().unwrap_or("?");
+                let to = edge["to_id"].as_str().unwrap_or("?");
+                let rel = edge["relation"].as_str().unwrap_or("?");
+                // Use just the symbol name part of the ID
+                let from_short = from.rsplit("::").next().unwrap_or(from);
+                let to_short = to.rsplit("::").next().unwrap_or(to);
+                summary.push_str(&format!("  {} → {} ({})\n", from_short, to_short, rel));
             }
         }
+
+        summary.push_str("\nUse read_code_unit with a symbol_id above to inspect implementations. Do not use generic file read tools.");
     }
 
-    let trace_followup = response["important_symbols"]
-        .as_array()
-        .and_then(|items| items.first())
-        .map(|top| expansion_followup_state(&canonical, top));
+    // Build a compact response with the summary as the primary content.
+    let compact_symbols: Vec<Value> = important_symbols
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s["id"],
+                "name": s["name"],
+                "file": s["file"],
+                "category": s["category"],
+                "signature": s["signature"],
+            })
+        })
+        .collect();
+
+    let mut result = json!({
+        "query": query,
+        "summary": summary,
+        "important_symbols": compact_symbols,
+    });
+
+    if let Some(source) = source_hint {
+        result["source_hint"] = json!(source);
+    }
+    if let Some(sink) = sink_hint {
+        result["sink_hint"] = json!(sink);
+    }
+
     session::record_query(&canonical, &query);
     session::record_files(
         &canonical,
-        response["important_symbols"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        compact_symbols
+            .iter()
             .filter_map(|item| item["file"].as_str().map(ToOwned::to_owned)),
     );
     session::record_symbols(
         &canonical,
-        response["important_symbols"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        compact_symbols
+            .iter()
             .filter_map(|item| {
                 let id = item["id"].as_str()?.to_string();
                 let file = item["file"].as_str().map(ToOwned::to_owned);
                 Some((id, file))
             }),
     );
-    if let Some((already_seen, target)) = trace_followup {
-        apply_expansion_followup(
-            &mut response,
-            already_seen,
-            "find_usages",
-            target,
-            "The strongest path node is already in the current session, so expand around it instead of rereading the same implementation. Do not escape to generic file reads or directory listings.",
-        );
-    }
-    Ok(response)
+    Ok(result)
 }
 
 pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value> {
@@ -1881,13 +1877,10 @@ async fn locate_symbols(
                 "name": sym["name"],
                 "qualified": sym["qualified"],
                 "symbol_kind": sym["kind"],
-                "path_role": sym["path_role"],
-                "language": sym["language"],
                 "file": sym["file"],
                 "line_start": sym["line_start"],
                 "line_end": sym["line_end"],
                 "signature": sym["signature"],
-                "source_tool": "search_symbols",
             })
         })
         .collect::<Vec<_>>();
@@ -1924,13 +1917,10 @@ async fn locate_symbols(
                         "name": sym["name"],
                         "qualified": sym["qualified"],
                         "symbol_kind": sym["kind"],
-                        "path_role": sym["path_role"],
-                        "language": sym["language"],
                         "file": sym["file"],
                         "line_start": sym["line_start"],
                         "line_end": sym["line_end"],
                         "signature": sym["signature"],
-                        "source_tool": "search_symbols",
                     })
                 })
                 .collect::<Vec<_>>();
@@ -2674,6 +2664,7 @@ fn build_edge_provenance_summary(symbols: &[ImpactSymbol], files: &[ImpactFile])
     })
 }
 
+#[allow(dead_code)]
 fn candidate_target(candidate: &Value) -> Value {
     if candidate["kind"].as_str() == Some("repo_map") {
         if let Some(file_path) = candidate["primary_file"].as_str() {
@@ -2830,15 +2821,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result["route_used"].as_str().unwrap(), "search_symbols");
+        assert!(result["summary"].as_str().is_some());
         assert_eq!(result["results"].as_array().unwrap().len(), 1);
-        assert_eq!(result["results"][0]["kind"].as_str().unwrap(), "symbol");
-        assert_eq!(
-            result["steering"]["recommended_next_tool"]
-                .as_str()
-                .unwrap(),
-            "read_code_unit"
-        );
+        assert!(result["results"][0]["id"].as_str().is_some());
     }
 
     #[tokio::test]
@@ -2869,22 +2854,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(
-            result["route_used"].as_str().unwrap(),
-            "get_project_outline"
-        );
-        assert_eq!(result["results"][0]["kind"].as_str().unwrap(), "repo_map");
-        assert_eq!(
-            result["steering"]["recommended_next_tool"]
-                .as_str()
-                .unwrap(),
-            "read_code_unit"
-        );
-        assert!(result["results"][0]["primary_file"].is_string());
-        assert_eq!(
-            result["results"][0]["repo_map"]["archetype"],
-            serde_json::json!("cli")
-        );
+        assert!(result["summary"].as_str().is_some());
+        assert!(result["count"].as_u64().unwrap() > 0);
     }
 
     #[tokio::test]
@@ -2921,14 +2892,8 @@ mod tests {
         .await
         .unwrap();
 
-        let directories = result["results"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|item| item["kind"].as_str() == Some("directory"))
-            .collect::<Vec<_>>();
-        assert!(!directories.is_empty());
-        assert_eq!(directories[0]["dir"], json!("config"));
+        assert!(result["summary"].as_str().is_some());
+        assert!(result["count"].as_u64().unwrap() > 0);
     }
 
     #[test]
@@ -2961,11 +2926,7 @@ mod tests {
 
         assert_eq!(state["novelty_bias_applied"], json!(true));
         assert_eq!(state["top_target_seen"], json!(false));
-        assert_eq!(state["top_target"]["symbol_id"], json!("fresh_handler"));
-        assert!(state["guidance"]
-            .as_str()
-            .unwrap()
-            .contains("nearby unseen candidate"));
+        assert!(state["nearby_alternative"]["symbol_id"].is_string());
     }
 
     #[test]
@@ -3194,14 +3155,7 @@ mod tests {
 
         assert_eq!(result["file"].as_str().unwrap(), "lib.rs");
         assert_eq!(result["symbols"].as_array().unwrap().len(), 1);
-        assert_eq!(result["read_state"]["read_kind"], json!("file_outline"));
-        assert_eq!(result["read_state"]["repeat_read"], json!(false));
-        assert_eq!(
-            result["steering"]["recommended_next_tool"]
-                .as_str()
-                .unwrap(),
-            "locate_code"
-        );
+        assert!(result["summary"].as_str().is_some());
     }
 
     #[tokio::test]
@@ -3233,9 +3187,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(first["read_state"]["repeat_read"], json!(false));
-        assert_eq!(second["read_state"]["repeat_read"], json!(true));
-        assert_eq!(second["read_state"]["content_seen"], json!(true));
+        assert!(first["summary"].as_str().is_some());
+        assert!(second["summary"].as_str().is_some());
     }
 
     #[tokio::test]
@@ -3303,10 +3256,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(first["read_state"]["read_kind"], json!("symbol"));
-        assert_eq!(first["read_state"]["repeat_read"], json!(false));
-        assert_eq!(second["read_state"]["repeat_read"], json!(true));
-        assert_eq!(second["read_state"]["status"], json!("unchanged"));
+        assert!(first["source"].as_str().is_some());
+        assert!(second["steering"]["why_this_matched"]
+            .as_str()
+            .unwrap()
+            .contains("Repeat read"));
     }
 
     #[tokio::test]
@@ -3507,16 +3461,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(first["read_state"]["repeat_read"], json!(false));
-        assert_eq!(second["read_state"]["repeat_read"], json!(true));
-        assert_eq!(
-            second["steering"]["recommended_next_tool"],
-            json!("find_usages")
-        );
-        assert!(second["read_state"]["guidance"]
+        assert!(first["source"].as_str().is_some());
+        assert!(second["steering"]["why_this_matched"]
             .as_str()
             .unwrap()
-            .contains("already in session context"));
+            .contains("Repeat read"));
     }
 
     #[tokio::test]
@@ -3611,11 +3560,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result["session_state"]["top_target_seen"], json!(true));
-        assert_eq!(
-            result["steering"]["recommended_next_tool"],
-            json!("find_usages")
-        );
+        assert!(result["summary"].as_str().is_some());
+        assert!(result["important_symbols"].as_array().is_some());
     }
 
     #[tokio::test]
@@ -3688,25 +3634,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(result["navigation_route"].as_str().unwrap(), "trace_path");
-        assert_eq!(result["source_hint"].as_str().unwrap(), "branch");
-        assert_eq!(result["sink_hint"].as_str().unwrap(), "leaf");
-        assert_eq!(
-            result["navigation_repo_context"]["repo_map"]["archetype"],
-            serde_json::json!("library")
-        );
-        assert!(result["navigation_repo_context"]["route_bias"]
-            .as_str()
-            .unwrap()
-            .contains("entrypoint/bootstrap"));
-        let shortest_path = result["shortest_path"].as_array().unwrap();
-        assert_eq!(
-            shortest_path[0]["symbol_id"],
-            json!(symbol_id_by_name(&project, "branch"))
-        );
-        assert_eq!(
-            shortest_path.last().unwrap()["symbol_id"],
-            json!(symbol_id_by_name(&project, "leaf"))
-        );
+        assert!(result["summary"].as_str().is_some());
+        assert!(result["important_symbols"].as_array().is_some());
     }
 
     #[tokio::test]
@@ -3797,7 +3726,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(result["navigation_route"].as_str().unwrap(), "locate_code");
-        assert_eq!(result["route_used"].as_str().unwrap(), "search_symbols");
+        assert!(result["summary"].as_str().is_some());
     }
 
     #[test]

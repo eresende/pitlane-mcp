@@ -53,7 +53,7 @@ Use ad hoc paths when you are iterating on prompts or a local repo checkout:
 ```bash
 python -m bench.harness.run \
   --repo bench/repos/ripgrep \
-  --prompts bench/harness/prompts.ripgrep.jsonl \
+  --prompts bench/harness/prompts/ripgrep.jsonl \
   --model qwen3:8b \
   --backend ollama \
   --out results/ripgrep-qwen3-adhoc \
@@ -67,7 +67,7 @@ LM Studio is also supported as a local OpenAI-compatible backend:
 LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1 \
 python -m bench.harness.run \
   --repo bench/repos/ripgrep \
-  --prompts bench/harness/prompts.ripgrep.jsonl \
+  --prompts bench/harness/prompts/ripgrep.jsonl \
   --model google/gemma-3-4b \
   --backend lmstudio \
   --out results/ripgrep-gemma3-lmstudio \
@@ -101,7 +101,7 @@ Use the same entrypoint with `--runtime opencode` when you want to execute throu
 ```bash
 python -m bench.harness.run \
   --repo bench/repos/ripgrep \
-  --prompts bench/harness/prompts.ripgrep.jsonl \
+  --prompts bench/harness/prompts/ripgrep.jsonl \
   --runtime opencode \
   --target with-mcp=http://127.0.0.1:4096 \
   --model openai/gpt-5.4-mini \
@@ -114,7 +114,7 @@ For a command rehearsal without execution:
 ```bash
 python -m bench.harness.run \
   --repo bench/repos/ripgrep \
-  --prompts bench/harness/prompts.ripgrep.jsonl \
+  --prompts bench/harness/prompts/ripgrep.jsonl \
   --runtime opencode \
   --target with-mcp=http://127.0.0.1:4096 \
   --model openai/gpt-5.4-mini \
@@ -126,21 +126,34 @@ python -m bench.harness.run \
 For a Bedrock-backed OpenCode smoke test using the checked-in config targets:
 
 ```bash
-AWS_PROFILE=your-profile \
-AWS_REGION=us-east-1 \
 python -m bench.harness.run \
   --repo bench/repos/ripgrep \
-  --prompts bench/harness/prompts.ripgrep.jsonl \
+  --prompts bench/harness/prompts/ripgrep.jsonl \
   --runtime opencode \
-  --target with-mcp=CONFIG:bench/harness/sample.opencode.bedrock.with-mcp.json \
-  --target no-mcp=CONFIG:bench/harness/sample.opencode.bedrock.no-mcp.json \
-  --model amazon-bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0 \
-  --out results/ripgrep-opencode-bedrock-sonnet45-smoke \
+  --target with-mcp=CONFIG:bench/harness/configs/bedrock.glm-flash.with-mcp.json \
+  --target no-mcp=CONFIG:bench/harness/configs/bedrock.glm-flash.no-mcp.json \
+  --model amazon-bedrock/zai.glm-4.7-flash \
+  --out results/ripgrep-opencode-bedrock-glm-flash-smoke-$(date +%Y%m%d-%H%M) \
   --max-iterations 15 \
   --runs 1 \
   --prompt-id symbol_regex_search_path \
   --prompt-id symbol_ignore_logic \
   --prompt-id symbol_cli_config_flow
+```
+
+The default Bedrock model is GLM 4.7 Flash (`zai.glm-4.7-flash`), which offers good tool-calling capability at low cost. For higher quality results, use Claude Sonnet 4.5 with the Sonnet-specific configs:
+
+```bash
+python -m bench.harness.run \
+  --repo bench/repos/ripgrep \
+  --prompts bench/harness/prompts/ripgrep.jsonl \
+  --runtime opencode \
+  --target with-mcp=CONFIG:bench/harness/configs/bedrock.sonnet45.with-mcp.json \
+  --target no-mcp=CONFIG:bench/harness/configs/bedrock.sonnet45.no-mcp.json \
+  --model amazon-bedrock/global.anthropic.claude-sonnet-4-5-20250929-v1:0 \
+  --out results/ripgrep-opencode-bedrock-sonnet45-smoke-$(date +%Y%m%d-%H%M) \
+  --max-iterations 15 \
+  --runs 1
 ```
 
 This Bedrock path is currently the strongest validated OpenCode benchmark setup in this repo:
@@ -224,12 +237,11 @@ Use them only when you need a thin wrapper around the canonical runner or an ext
 
 OpenCode benchmarking now writes the same canonical artifacts as the local runtime, but attached-server mode is still less reproducible than the local agentic runner because session state and target repo alignment are easier to get wrong.
 
-The current OpenCode helper files are:
+The OpenCode config files live in `bench/harness/configs/`:
 
-- `bench_opencode.py`
-- `sample.opencode.with-mcp.json`
-- `sample.opencode.no-mcp.json`
-- `sample.opencode.bedrock.with-mcp.json`
-- `sample.opencode.bedrock.no-mcp.json`
+- `configs/bedrock.glm-flash.with-mcp.json` — default (GLM 4.7 Flash, cheap + fast)
+- `configs/bedrock.glm-flash.no-mcp.json` — default baseline
+- `configs/bedrock.sonnet45.with-mcp.json` — premium (Sonnet 4.5, best quality)
+- `configs/bedrock.sonnet45.no-mcp.json` — premium baseline
 
 If you need that flow, keep both targets pinned to the same provider/model settings and treat it as an experiment, not the official benchmark path.

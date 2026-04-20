@@ -246,6 +246,64 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
     Ok(response)
 }
 
+/// Extract likely symbol-name terms from a natural-language query.
+///
+/// BM25 search works poorly with long natural-language queries because the
+/// signal gets diluted. This function extracts words that look like code
+/// identifiers (CamelCase, snake_case, ALL_CAPS) and returns them as a
+/// shorter, more focused query for BM25 fallback.
+fn extract_symbol_terms(query: &str) -> Option<String> {
+    let stop_words: &[&str] = &[
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "will", "would", "could",
+        "should", "may", "might", "shall", "can", "need", "dare", "ought",
+        "used", "to", "of", "in", "for", "on", "with", "at", "by", "from",
+        "as", "into", "through", "during", "before", "after", "above", "below",
+        "between", "out", "off", "over", "under", "again", "further", "then",
+        "once", "here", "there", "when", "where", "why", "how", "all", "each",
+        "every", "both", "few", "more", "most", "other", "some", "such", "no",
+        "nor", "not", "only", "own", "same", "so", "than", "too", "very",
+        "and", "but", "or", "if", "while", "that", "which", "what", "this",
+        "these", "those", "it", "its", "uses", "using", "main", "entry",
+        "point", "execution", "path", "flow", "implementation",
+    ];
+
+    let terms: Vec<&str> = query
+        .split_whitespace()
+        .filter(|w| {
+            let lower = w.to_lowercase();
+            // Keep words that look like identifiers
+            let is_camel = w.chars().any(|c| c.is_uppercase())
+                && w.chars().any(|c| c.is_lowercase())
+                && w.chars().all(|c| c.is_alphanumeric() || c == '_');
+            let is_snake = w.contains('_') && w.chars().all(|c| c.is_alphanumeric() || c == '_');
+            let is_short_code = w.len() <= 2 && w.chars().all(|c| c.is_uppercase());
+
+            (is_camel || is_snake || is_short_code)
+                && !stop_words.contains(&lower.as_str())
+        })
+        .collect();
+
+    if terms.is_empty() {
+        // Fall back to just non-stop-words
+        let fallback: Vec<&str> = query
+            .split_whitespace()
+            .filter(|w| {
+                let lower = w.to_lowercase();
+                w.len() > 3 && !stop_words.contains(&lower.as_str())
+            })
+            .take(3)
+            .collect();
+        if fallback.is_empty() {
+            None
+        } else {
+            Some(fallback.join(" "))
+        }
+    } else {
+        Some(terms.join(" "))
+    }
+}
+
 async fn discover_seed_ids(
     params: &TraceExecutionPathParams,
 ) -> anyhow::Result<(&'static str, Vec<String>)> {
@@ -267,7 +325,7 @@ async fn discover_seed_ids(
         let semantic = search_symbols(SearchSymbolsParams {
             project: params.project.clone(),
             query: query.to_string(),
-            kind: Some("function".to_string()),
+            kind: None, // Search all symbol kinds — traces often involve structs, methods, and impls
             language: params.language.clone(),
             file: params.file.clone(),
             limit: Some(DEFAULT_SEED_COUNT),
@@ -287,10 +345,12 @@ async fn discover_seed_ids(
             }
         }
 
+        // Try BM25 with the full query first, then with extracted symbol terms.
+        let bm25_query = query.to_string();
         let bm25 = search_symbols(SearchSymbolsParams {
             project: params.project.clone(),
-            query: query.to_string(),
-            kind: Some("function".to_string()),
+            query: bm25_query.clone(),
+            kind: None,
             language: params.language.clone(),
             file: params.file.clone(),
             limit: Some(DEFAULT_SEED_COUNT),
@@ -301,7 +361,37 @@ async fn discover_seed_ids(
         .await?;
         let mut bm25 = bm25;
         rerank_seed_response(&mut bm25, &canonical, query, profile.as_ref());
-        let candidate_ids = extract_symbol_ids(&bm25);
+        let mut candidate_ids = extract_symbol_ids(&bm25);
+
+        // If BM25 with the full query found nothing, try with extracted symbol terms.
+        if candidate_ids.is_empty() {
+            if let Some(terms) = extract_symbol_terms(query) {
+                // Try each extracted term individually — BM25 multi-word
+                // queries require all terms to match, which often fails.
+                for term in terms.split_whitespace().take(3) {
+                    let term_bm25 = search_symbols(SearchSymbolsParams {
+                        project: params.project.clone(),
+                        query: term.to_string(),
+                        kind: None,
+                        language: params.language.clone(),
+                        file: params.file.clone(),
+                        limit: Some(DEFAULT_SEED_COUNT),
+                        offset: Some(0),
+                        mode: Some("bm25".to_string()),
+                        embed_config: params.embed_config.clone(),
+                    })
+                    .await?;
+                    let mut term_bm25 = term_bm25;
+                    rerank_seed_response(&mut term_bm25, &canonical, query, profile.as_ref());
+                    let term_ids = extract_symbol_ids(&term_bm25);
+                    if !term_ids.is_empty() {
+                        candidate_ids.extend(term_ids);
+                        break; // One good term is enough for seeding
+                    }
+                }
+            }
+        }
+
         if !candidate_ids.is_empty() {
             discovered_modes.push("bm25");
             ids.extend(candidate_ids);

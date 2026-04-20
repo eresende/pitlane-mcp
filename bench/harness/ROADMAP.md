@@ -379,7 +379,7 @@ Example:
     "path": "bench/repos/ripgrep"
   },
   "prompts": {
-    "path": "bench/harness/prompts.ripgrep.jsonl"
+    "path": "bench/harness/prompts/ripgrep.jsonl"
   },
   "defaults": {
     "runs": 3,

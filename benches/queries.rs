@@ -346,6 +346,7 @@ fn bench_get_symbol(c: &mut Criterion, setups: &[(&str, Setup)]) {
                     symbol_id: id.clone(),
                     include_context: None,
                     signature_only: None,
+                    include_references: None,
                 }))
                 .unwrap()
             })

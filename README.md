@@ -41,7 +41,7 @@ LM Studio can also be used as a local backend through its OpenAI-compatible serv
 LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1 \
 python -m bench.harness.run \
   --repo bench/repos/ripgrep \
-  --prompts bench/harness/prompts.ripgrep.jsonl \
+  --prompts bench/harness/prompts/ripgrep.jsonl \
   --model google/gemma-3-4b \
   --backend lmstudio \
   --out results/ripgrep-lmstudio-1 \
@@ -196,6 +196,7 @@ Use the tools by intent, not by implementation detail.
 Default public tier:
 
 - `ensure_project_ready` — one-call startup
+- `investigate` — single-call code question answering with source inlined
 - `locate_code` — ambiguous discovery
 - `read_code_unit` — smallest useful read
 - `trace_path` — flow and path questions
@@ -212,11 +213,12 @@ Advanced tier:
 Recommended flow:
 
 1. Call `ensure_project_ready`.
-2. If the intent is fuzzy, start with `locate_code`.
-3. Use `trace_path` for behavior, source-to-sink, config-to-effect, and execution-path questions.
-4. Switch to `read_code_unit` once you have the right target.
-5. Use `analyze_impact` when you need blast-radius guidance before edits.
-6. Reach for advanced primitives only if you deliberately exposed them with `PITLANE_MCP_TOOL_TIER=all`.
+2. For broad code questions, use `investigate` — it discovers symbols and returns source code in one call.
+3. If the intent is fuzzy and you need just discovery (not full source), use `locate_code`.
+4. Use `trace_path` for behavior, source-to-sink, config-to-effect, and execution-path questions.
+5. Switch to `read_code_unit` once you have the right target.
+6. Use `analyze_impact` when you need blast-radius guidance before edits.
+7. Reach for advanced primitives only if you deliberately exposed them with `PITLANE_MCP_TOOL_TIER=all`.
 
 Avoid shell `grep`, globbing, or broad file reads when the MCP tools can answer the question directly.
 
@@ -237,6 +239,30 @@ Preferred one-call startup for MCP clients and harnesses.
 ```
 
 This ensures the index exists and waits for embeddings only if they are still running. In the common case it replaces a manual `index_project` + `wait_for_embeddings` sequence.
+
+### `investigate`
+
+Answer a code question in one call. Discovers relevant symbols using multiple search strategies, reads their source, and returns a prose answer with code inlined.
+
+```json
+{ "project": "/your/project", "query": "How does the ignore/gitignore handling work?" }
+{ "project": "/your/project", "query": "main regex search execution path", "scope": "crates/core/**" }
+```
+
+Use this as the first call after `ensure_project_ready` when you need to understand a subsystem, execution path, or implementation. It replaces the typical `locate_code` → `read_code_unit` → `read_code_unit` → … sequence with a single round-trip, dramatically reducing conversation length and accumulated prompt tokens.
+
+The response includes:
+
+- A markdown-formatted answer with up to 6 symbol bodies inlined (capped at 120 lines each)
+- `symbols_read` — number of symbols whose source was included
+- `files_covered` — number of distinct files represented
+
+For struct/class results, `investigate` automatically expands the first few methods so you see both the type shape and its key implementations.
+
+Optional parameters:
+
+- `language` — restrict discovery to a specific language
+- `scope` — restrict discovery to a subtree or file glob
 
 ### `index_project`
 
@@ -640,6 +666,16 @@ pitlane usage-stats
 pitlane usage-stats /your/project
 ```
 
+### `pitlane investigate`
+
+Investigate a code question — discovers symbols and returns source inline.
+
+```bash
+pitlane investigate /your/project "How does the ignore/gitignore handling work?"
+pitlane investigate /your/project "main regex search execution path" --scope "crates/core/**"
+pitlane investigate /your/project "authentication flow" --lang rust
+```
+
 All commands output JSON to stdout. Logs go to stderr and can be controlled with `RUST_LOG`.
 
 ## Symbol IDs
@@ -678,18 +714,19 @@ Add a `CLAUDE.md` at your project root to guide the agent:
 Use pitlane-mcp for all code lookups when available.
 
 1. Prefer ensure_project_ready at the start of each session. If you use index_project directly and it reports embeddings="running", call wait_for_embeddings immediately.
-2. Call watch_project only when you expect the repo to change during the session.
-3. Use search_symbols for symbol names or intent.
-4. Use search_content when you know a text snippet but not the symbol boundary.
-5. Use search_files when you know a file name, test file, path suffix, or directory pattern.
-6. Use trace_execution_path for behavior or execution-path questions like "where is X implemented?".
-7. Use get_symbol to retrieve the exact implementation you need instead of reading whole files.
-8. Use get_file_outline when you know the file but not the symbol, or need file structure before choosing symbols.
-9. Use find_callees, find_callers, and find_usages for graph or impact analysis.
-10. For struct/class/interface/trait symbols, get_symbol returns signature-only by default. Pass signature_only=false to get the full body and references.
-11. Use get_lines only for non-symbol code blocks.
-12. Use get_index_stats to orient yourself before reaching for get_project_outline.
-13. Fall back to direct file reads only when editing or when full-file context is genuinely required.
+2. For broad code questions ("how does X work?", "where is Y implemented?"), use investigate first — it returns source code in one call.
+3. Call watch_project only when you expect the repo to change during the session.
+4. Use locate_code when you need discovery without full source (e.g. finding a symbol ID).
+5. Use search_content when you know a text snippet but not the symbol boundary.
+6. Use search_files when you know a file name, test file, path suffix, or directory pattern.
+7. Use trace_path for explicit source-to-sink or config-to-effect path questions.
+8. Use read_code_unit to retrieve the exact implementation you need instead of reading whole files.
+9. Use get_file_outline when you know the file but not the symbol, or need file structure before choosing symbols.
+10. Use find_callees, find_callers, and find_usages for graph or impact analysis.
+11. For struct/class/interface/trait symbols, get_symbol returns signature-only by default. Pass signature_only=false to get the full body and references.
+12. Use get_lines only for non-symbol code blocks.
+13. Use get_index_stats to orient yourself before reaching for get_project_outline.
+14. Fall back to direct file reads only when editing or when full-file context is genuinely required.
 ```
 
 ## Benchmarks
