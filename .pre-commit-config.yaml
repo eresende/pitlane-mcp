@@ -1,0 +1,15 @@
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt-check
+        name: cargo fmt check
+        entry: cargo fmt --check
+        language: system
+        files: '.*\.(rs|toml)$'
+        pass_filenames: false
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy -- -D warnings
+        language: system
+        files: '.*\.(rs|toml)$'
+        pass_filenames: false
