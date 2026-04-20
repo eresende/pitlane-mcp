@@ -280,7 +280,7 @@ fn prune_recent(state: &mut ProjectSessionState) {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
         state.recent_files = entries
             .into_iter()
             .take(MAX_RECENT_ITEMS)
@@ -292,7 +292,7 @@ fn prune_recent(state: &mut ProjectSessionState) {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
         state.recent_symbols = entries
             .into_iter()
             .take(MAX_RECENT_ITEMS)
@@ -304,7 +304,7 @@ fn prune_recent(state: &mut ProjectSessionState) {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
         state.recent_dirs = entries
             .into_iter()
             .take(MAX_RECENT_ITEMS)
@@ -319,7 +319,7 @@ fn prune_recent(state: &mut ProjectSessionState) {
             .iter()
             .map(|(k, v)| (k.clone(), *v))
             .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1));
         state.recent_content = entries
             .into_iter()
             .take(MAX_RECENT_ITEMS)
@@ -331,7 +331,7 @@ fn prune_recent(state: &mut ProjectSessionState) {
             .iter()
             .map(|(k, (digest, tick))| (k.clone(), (digest.clone(), *tick)))
             .collect();
-        entries.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.1 .1));
         state.recent_target_content = entries
             .into_iter()
             .take(MAX_RECENT_ITEMS)

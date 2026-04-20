@@ -300,7 +300,7 @@ pub async fn update_embeddings_for_files(
                 let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
                 let ids: Vec<String> = chunk.iter().map(|(id, _)| id.clone()).collect();
                 let results = client.embed_batch(&texts).await;
-                ids.into_iter().zip(results.into_iter()).collect::<Vec<_>>()
+                ids.into_iter().zip(results).collect::<Vec<_>>()
             }
         });
 
