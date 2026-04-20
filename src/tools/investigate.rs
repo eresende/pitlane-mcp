@@ -94,6 +94,25 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         return Err(anyhow::anyhow!("query must not be empty"));
     }
 
+    // Check if this project was already investigated in this session.
+    // If so, return a short response telling the model to use the previous answer.
+    let investigate_key = format!("investigate:{}", query);
+    let observation = session::observe_content(&canonical, "investigate", &investigate_key, &query);
+    if observation.content_seen {
+        return Ok(json!({
+            "query": query,
+            "answer": format!(
+                "You already investigated \"{}\". Use the previous answer. \
+                 Do NOT call investigate again. If you need a specific symbol, \
+                 use read_code_unit(symbol_id=...) directly.",
+                query
+            ),
+            "symbols_read": 0,
+            "files_covered": 0,
+            "repeated": true,
+        }));
+    }
+
     let index = load_project_index(&params.project)?;
     let profile = load_project_meta(&canonical)
         .ok()
@@ -290,9 +309,11 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         ));
         answer.push_str(&sections.join("\n\n"));
         answer.push_str(
-            "\n\n---\nThis response contains the source code of the most relevant symbols. \
-             You should be able to answer from the code above. \
-             If you need more detail on a specific symbol, use read_code_unit(symbol_id=...).",
+            "\n\n---\n\
+             **IMPORTANT: Answer the user's question NOW from the code above.** \
+             Do NOT call investigate again. Do NOT call locate_code or read_code_unit \
+             unless the code above is clearly insufficient. \
+             The source code shown is the complete relevant implementation.",
         );
     }
 
