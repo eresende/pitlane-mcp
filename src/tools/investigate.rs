@@ -87,6 +87,30 @@ fn build_discovery_queries(query: &str) -> Vec<String> {
     queries
 }
 
+/// Normalize an investigate query into a stable key for deduplication.
+/// Extracts sorted non-stop-words so rephrased questions match.
+fn normalize_investigate_key(query: &str) -> String {
+    let stop: &[&str] = &[
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "have",
+        "has", "had", "do", "does", "did", "will", "would", "could", "should",
+        "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
+        "and", "but", "or", "if", "how", "what", "where", "when", "why",
+        "this", "that", "which", "it", "its", "show", "find", "explain",
+        "all", "each", "every", "some", "any", "no", "not", "only",
+        "implement", "implementation", "implemented", "implements",
+        "involved", "are", "there", "does", "about",
+    ];
+    let mut words: Vec<&str> = query
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| w.len() > 2 && !stop.contains(&w.to_lowercase().as_str()))
+        .collect();
+    words.sort();
+    words.dedup();
+    words.truncate(6);
+    words.join(" ")
+}
+
 pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
     let canonical = resolve_project_path(&params.project)?;
     let query = params.query.trim().to_string();
@@ -94,18 +118,20 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         return Err(anyhow::anyhow!("query must not be empty"));
     }
 
-    // Check if this project was already investigated in this session.
-    // If so, return a short response telling the model to use the previous answer.
-    let investigate_key = format!("investigate:{}", query);
+    // Check if a similar question was already investigated in this session.
+    // Normalize the key to catch rephrased queries (e.g. "search pipeline files"
+    // and "files in the search pipeline" should match).
+    let normalized_key = normalize_investigate_key(&query);
+    let investigate_key = format!("investigate:{}", normalized_key);
     let observation = session::observe_content(&canonical, "investigate", &investigate_key, &query);
     if observation.content_seen {
         return Ok(json!({
             "query": query,
             "answer": format!(
-                "You already investigated \"{}\". Use the previous answer. \
-                 Do NOT call investigate again. If you need a specific symbol, \
-                 use read_code_unit(symbol_id=...) directly.",
-                query
+                "You already investigated a similar question (\"{}\"). \
+                 Use the previous answer. Do NOT call investigate again. \
+                 If you need a specific symbol, use read_code_unit(symbol_id=...) directly.",
+                normalized_key
             ),
             "symbols_read": 0,
             "files_covered": 0,
