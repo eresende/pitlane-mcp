@@ -1,25 +1,35 @@
 # Code Navigation
 
-Use pitlane-mcp when it is likely to reduce total search effort.
+This project is indexed by pitlane-mcp. Always use pitlane tools instead of bash, grep, glob, or reading files directly.
 
-1. Only call `index_project` once per new repo/session when Pitlane is actually needed.
-2. Only call `watch_project` if the task involves file edits or the repo may change during the session.
-3. Do not call `get_file_outline` before every file read. Use it only for large or unfamiliar files.
-4. For exact symbol lookups, prefer the cheapest path first:
-   - `search_symbols` with `mode="exact"` or `mode="bm25"`
-   - direct targeted read if the file is already obvious
-5. Use `get_symbol` when you need a specific implementation body without reading the full file.
-6. Use `find_usages` mainly for public APIs, refactors, or cross-file behavior questions.
-7. Use `get_lines` only when a symbol is unnamed or line-specific context is needed.
-8. Fall back to direct file reads when they are cheaper than multiple MCP calls.
+## Quick Start
 
-# Semantic Search
+1. Call `ensure_project_ready` once at the start.
+2. For any code question, call `investigate` first — it returns source code in one call.
+3. If you need more detail after `investigate`, use `read_code_unit(symbol_id=...)` with a symbol ID from the response.
 
-Use semantic search only when names are unknown or keyword search is weak.
+## Rules
 
-1. If semantic search is available and the task is concept-based, use `mode="semantic"`.
-2. If the symbol name is known, use `mode="exact"` or `mode="bm25"` first.
-3. Do not scan 3–5 semantic results by default. Start with the top 1–2 and expand only if needed.
-4. If semantic results look unrelated, rephrase once, then fall back to `bm25`.
-5. After identifying a likely candidate, read only the minimum needed symbol or lines.
-6. Avoid semantic search for obvious central files or exact class/function-name prompts.
+- **DO** use `investigate` for broad questions like "how does X work?" or "where is Y implemented?"
+- **DO** use `locate_code` when you need to find a specific symbol or file without reading its source.
+- **DO** use `read_code_unit` to read a specific symbol body or file outline.
+- **DO** use `trace_path` for execution-path or source-to-sink questions.
+- **DO** use `search_content` when you know exact text in the code but not which symbol contains it.
+- **DO NOT** use `bash`, `grep`, `glob`, or `read` for code exploration. The pitlane tools are faster and return less noise.
+- **DO NOT** read entire files. Use `read_code_unit(symbol_id=...)` to read only the symbol you need.
+- **DO NOT** list directories or glob for files. Use `locate_code` or `get_index_stats` instead.
+
+## Tool Priority
+
+1. `investigate` — answers most questions in one call
+2. `locate_code` — finds symbols/files when you just need discovery
+3. `read_code_unit` — reads a specific symbol or file outline
+4. `trace_path` — traces execution paths
+5. `search_content` — finds text patterns in code
+6. `analyze_impact` — checks blast radius before edits
+
+## What NOT to Do
+
+- Do not run `find`, `ls`, `cat`, `grep`, or `bash` to explore code
+- Do not read whole files with `read` — use `read_code_unit` with a symbol_id
+- Do not call multiple discovery tools for the same question — `investigate` does it all in one call

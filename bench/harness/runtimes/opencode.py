@@ -530,19 +530,28 @@ def run_once(
         }
 
     start = time.perf_counter()
-    proc = subprocess.run(
-        cmd,
-        cwd=str(repo),
-        env=env,
-        text=True,
-        capture_output=True,
-    )
-    end = time.perf_counter()
-
-    stdout = proc.stdout or ""
-    stderr = proc.stderr or ""
-    (raw_dir / "stdout.ndjson").write_text(stdout, encoding="utf-8")
-    (raw_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(repo),
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=600,  # 10 min timeout to handle Bedrock throttling
+        )
+    except subprocess.TimeoutExpired as e:
+        end = time.perf_counter()
+        stdout = (e.stdout or "") if isinstance(e.stdout, str) else (e.stdout or b"").decode("utf-8", errors="replace")
+        stderr = (e.stderr or "") if isinstance(e.stderr, str) else (e.stderr or b"").decode("utf-8", errors="replace")
+        (raw_dir / "stdout.ndjson").write_text(stdout, encoding="utf-8")
+        (raw_dir / "stderr.txt").write_text(f"TIMEOUT after {request.timeout_seconds}s\n{stderr}", encoding="utf-8")
+        proc = None
+    else:
+        end = time.perf_counter()
+        stdout = proc.stdout or ""
+        stderr = proc.stderr or ""
+        (raw_dir / "stdout.ndjson").write_text(stdout, encoding="utf-8")
+        (raw_dir / "stderr.txt").write_text(stderr, encoding="utf-8")
 
     events = _try_parse_json_lines(stdout)
     session_id = extract_session_id(events)
@@ -563,7 +572,7 @@ def run_once(
         "target_value": target.value,
         "run_index": run_index,
         "title": title,
-        "status_code": proc.returncode,
+        "status_code": proc.returncode if proc else -1,
         "latency_seconds": round(end - start, 3),
         "session_id": session_id,
         "input_tokens": usage["input_tokens"],
