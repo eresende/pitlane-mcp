@@ -8,7 +8,7 @@ repository = "https://github.com/eresende/pitlane-mcp"
 readme = "README.md"
 keywords = ["mcp", "tree-sitter", "ast", "code-intelligence", "ai"]
 categories = ["development-tools", "command-line-utilities"]
-exclude = ["bench/", "CLAUDE.md", "TODO.md", ".kiro/"]
+exclude = ["bench/", "docs/", "CLAUDE.md", "TODO.md", ".kiro/"]
 
 [package.metadata.binstall]
 bin-dir = "{ bin }{ binary-ext }"
