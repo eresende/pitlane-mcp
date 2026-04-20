@@ -56,13 +56,61 @@ fn build_discovery_queries(query: &str) -> Vec<String> {
 
     // Extract non-stop-word terms for broader search
     let stop: &[&str] = &[
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "have",
-        "has", "had", "do", "does", "did", "will", "would", "could", "should",
-        "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
-        "and", "but", "or", "if", "how", "what", "where", "when", "why",
-        "this", "that", "which", "it", "its", "does", "show", "find",
-        "implement", "implementation", "handling", "logic", "main", "the",
-        "using", "uses", "used",
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "to",
+        "of",
+        "in",
+        "for",
+        "on",
+        "with",
+        "at",
+        "by",
+        "from",
+        "as",
+        "and",
+        "but",
+        "or",
+        "if",
+        "how",
+        "what",
+        "where",
+        "when",
+        "why",
+        "this",
+        "that",
+        "which",
+        "it",
+        "its",
+        "does",
+        "show",
+        "find",
+        "implement",
+        "implementation",
+        "handling",
+        "logic",
+        "main",
+        "the",
+        "using",
+        "uses",
+        "used",
     ];
     let key_terms: Vec<&str> = query
         .split_whitespace()
@@ -91,14 +139,69 @@ fn build_discovery_queries(query: &str) -> Vec<String> {
 /// Extracts sorted non-stop-words so rephrased questions match.
 fn normalize_investigate_key(query: &str) -> String {
     let stop: &[&str] = &[
-        "the", "a", "an", "is", "are", "was", "were", "be", "been", "have",
-        "has", "had", "do", "does", "did", "will", "would", "could", "should",
-        "to", "of", "in", "for", "on", "with", "at", "by", "from", "as",
-        "and", "but", "or", "if", "how", "what", "where", "when", "why",
-        "this", "that", "which", "it", "its", "show", "find", "explain",
-        "all", "each", "every", "some", "any", "no", "not", "only",
-        "implement", "implementation", "implemented", "implements",
-        "involved", "are", "there", "does", "about",
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "to",
+        "of",
+        "in",
+        "for",
+        "on",
+        "with",
+        "at",
+        "by",
+        "from",
+        "as",
+        "and",
+        "but",
+        "or",
+        "if",
+        "how",
+        "what",
+        "where",
+        "when",
+        "why",
+        "this",
+        "that",
+        "which",
+        "it",
+        "its",
+        "show",
+        "find",
+        "explain",
+        "all",
+        "each",
+        "every",
+        "some",
+        "any",
+        "no",
+        "not",
+        "only",
+        "implement",
+        "implementation",
+        "implemented",
+        "implements",
+        "involved",
+        "are",
+        "there",
+        "does",
+        "about",
     ];
     let mut words: Vec<&str> = query
         .split_whitespace()
@@ -119,20 +222,16 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
     }
 
     // Check if a similar question was already investigated in this session.
-    // Normalize the key to catch rephrased queries (e.g. "search pipeline files"
-    // and "files in the search pipeline" should match).
+    // Normalize the key to catch rephrased queries.
     let normalized_key = normalize_investigate_key(&query);
     let investigate_key = format!("investigate:{}", normalized_key);
     let observation = session::observe_content(&canonical, "investigate", &investigate_key, &query);
     if observation.content_seen {
         return Ok(json!({
             "query": query,
-            "answer": format!(
-                "You already investigated a similar question (\"{}\"). \
+            "answer": "You already investigated a similar question. \
                  Use the previous answer. Do NOT call investigate again. \
                  If you need a specific symbol, use read_code_unit(symbol_id=...) directly.",
-                normalized_key
-            ),
             "symbols_read": 0,
             "files_covered": 0,
             "repeated": true,
@@ -255,6 +354,109 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
     discovered_ids.extend(extra_ids);
     discovered_ids.truncate(MAX_INLINE_SYMBOLS);
 
+    // Phase 3b: If the query mentions tests, prioritize test functions.
+    let query_lower = query.to_lowercase();
+    let wants_tests = query_lower.contains("test")
+        || query_lower.contains("behavior")
+        || query_lower.contains("edge case")
+        || query_lower.contains("scenario");
+
+    if wants_tests {
+        // Search for test functions related to the query's topic.
+        let test_queries = build_discovery_queries(&query);
+        let mut test_ids: Vec<String> = Vec::new();
+
+        for sub_query in test_queries.iter().take(3) {
+            if test_ids.len() >= MAX_INLINE_SYMBOLS {
+                break;
+            }
+            // Search with file scope restricted to test files
+            if let Ok(result) = search_symbols(SearchSymbolsParams {
+                project: params.project.clone(),
+                query: sub_query.clone(),
+                kind: None,
+                language: params.language.clone(),
+                file: Some("**/tests/**".to_string()),
+                limit: Some(MAX_INLINE_SYMBOLS),
+                offset: Some(0),
+                mode: Some("bm25".to_string()),
+                embed_config: None,
+            })
+            .await
+            {
+                if let Some(results) = result["results"].as_array() {
+                    for r in results {
+                        if let Some(id) = r["id"].as_str() {
+                            if !test_ids.contains(&id.to_string())
+                                && !discovered_ids.contains(&id.to_string())
+                            {
+                                test_ids.push(id.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also search in test files within src/ (Rust #[test] modules)
+        if test_ids.is_empty() {
+            // Look for functions with "test" in their name
+            if let Ok(result) = search_symbols(SearchSymbolsParams {
+                project: params.project.clone(),
+                query: "test".to_string(),
+                kind: Some("function".to_string()),
+                language: params.language.clone(),
+                file: params.scope.clone(),
+                limit: Some(MAX_INLINE_SYMBOLS * 2),
+                offset: Some(0),
+                mode: Some("bm25".to_string()),
+                embed_config: None,
+            })
+            .await
+            {
+                if let Some(results) = result["results"].as_array() {
+                    // Filter to test functions that are relevant to the query topic
+                    for r in results {
+                        if let Some(name) = r["name"].as_str() {
+                            let name_lower = name.to_lowercase();
+                            // Check if the test name relates to any key term in the query
+                            let key_terms: Vec<&str> = query_lower
+                                .split_whitespace()
+                                .filter(|w| w.len() > 3)
+                                .collect();
+                            let relevant = key_terms.iter().any(|term| {
+                                name_lower.contains(term) || term.contains(&name_lower)
+                            });
+                            if relevant {
+                                if let Some(id) = r["id"].as_str() {
+                                    if !test_ids.contains(&id.to_string())
+                                        && !discovered_ids.contains(&id.to_string())
+                                    {
+                                        test_ids.push(id.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if !test_ids.is_empty() {
+            // Replace some implementation symbols with test symbols
+            // Keep at most 2 implementation symbols, fill rest with tests
+            discovered_ids.truncate(2);
+            for id in test_ids {
+                if discovered_ids.len() >= MAX_INLINE_SYMBOLS {
+                    break;
+                }
+                if !discovered_ids.contains(&id) {
+                    discovered_ids.push(id);
+                }
+            }
+        }
+    }
+
     // Phase 4: Read symbol bodies.
     let mut sections: Vec<String> = Vec::new();
     let mut files_seen: Vec<String> = Vec::new();
@@ -313,10 +515,7 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
     let mut answer = String::new();
 
     if sections.is_empty() {
-        answer.push_str(&format!(
-            "No relevant symbols found for \"{}\".\n",
-            query
-        ));
+        answer.push_str(&format!("No relevant symbols found for \"{}\".\n", query));
         if let Some(ref profile) = profile {
             let entrypoints = profile_entrypoints(Some(profile));
             if let Some(first) = entrypoints.first() {

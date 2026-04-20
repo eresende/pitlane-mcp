@@ -128,7 +128,9 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         LocateRoute::Project => locate_project(&effective_params, limit).await?,
         LocateRoute::Files => locate_files(&effective_params, limit).await?,
         LocateRoute::Content => locate_content(&effective_params, limit).await?,
-        LocateRoute::Symbols { ref mode } => locate_symbols(&effective_params, limit, mode.as_str()).await?,
+        LocateRoute::Symbols { ref mode } => {
+            locate_symbols(&effective_params, limit, mode.as_str()).await?
+        }
     };
 
     if results.is_empty() {
@@ -184,7 +186,9 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
                 .map(|pos| &file[pos + 1..])
                 .unwrap_or(file);
             let sig = r["signature"].as_str().unwrap_or("");
-            let kind = r["symbol_kind"].as_str().unwrap_or(r["kind"].as_str().unwrap_or("?"));
+            let kind = r["symbol_kind"]
+                .as_str()
+                .unwrap_or(r["kind"].as_str().unwrap_or("?"));
             let id = r["id"].as_str().unwrap_or("");
             summary.push_str(&format!(
                 "{}. {} `{}` in {} — `{}`\n   → read_code_unit(symbol_id=\"{}\")\n",
@@ -223,13 +227,11 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
     );
     session::record_symbols(
         &canonical,
-        results
-            .iter()
-            .filter_map(|item| {
-                let id = item["id"].as_str()?.to_string();
-                let file = item["file"].as_str().map(ToOwned::to_owned);
-                Some((id, file))
-            }),
+        results.iter().filter_map(|item| {
+            let id = item["id"].as_str()?.to_string();
+            let file = item["file"].as_str().map(ToOwned::to_owned);
+            Some((id, file))
+        }),
     );
     Ok(response)
 }
@@ -470,7 +472,11 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
     response["truncated"] = json!(truncated);
 
     // Build a prose summary for the file outline.
-    let mut summary = format!("File `{}` has {} symbol(s)", file_path, outline_symbols.len());
+    let mut summary = format!(
+        "File `{}` has {} symbol(s)",
+        file_path,
+        outline_symbols.len()
+    );
     if truncated {
         summary.push_str(&format!(
             " (showing top {} of {})",
@@ -617,10 +623,7 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let edges = response["edges"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let edges = response["edges"].as_array().cloned().unwrap_or_default();
     let path_narrative = response["path_narrative"]
         .as_str()
         .unwrap_or("")
@@ -633,10 +636,7 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
         let profile = load_project_meta(&canonical)
             .ok()
             .map(|meta| meta.repo_profile);
-        summary.push_str(&format!(
-            "No execution path found for \"{}\".\n",
-            query
-        ));
+        summary.push_str(&format!("No execution path found for \"{}\".\n", query));
         if let Some(ref profile) = profile {
             let entrypoints = profile_entrypoints(Some(profile));
             if let Some(first) = entrypoints.first() {
@@ -718,6 +718,7 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
         "query": query,
         "summary": summary,
         "important_symbols": compact_symbols,
+        "edges": edges,
     });
 
     if let Some(source) = source_hint {
@@ -736,13 +737,11 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
     );
     session::record_symbols(
         &canonical,
-        compact_symbols
-            .iter()
-            .filter_map(|item| {
-                let id = item["id"].as_str()?.to_string();
-                let file = item["file"].as_str().map(ToOwned::to_owned);
-                Some((id, file))
-            }),
+        compact_symbols.iter().filter_map(|item| {
+            let id = item["id"].as_str()?.to_string();
+            let file = item["file"].as_str().map(ToOwned::to_owned);
+            Some((id, file))
+        }),
     );
     Ok(result)
 }
@@ -1506,10 +1505,30 @@ fn looks_like_text_snippet(query: &str) -> bool {
         let lower = query.to_lowercase();
         // If it reads like a concept query, don't treat as text snippet.
         let concept_words = [
-            "function", "method", "class", "struct", "module", "handler",
-            "config", "parse", "build", "create", "implement", "logic",
-            "handling", "execution", "path", "flow", "search", "find",
-            "where", "how", "what", "which", "the", "this",
+            "function",
+            "method",
+            "class",
+            "struct",
+            "module",
+            "handler",
+            "config",
+            "parse",
+            "build",
+            "create",
+            "implement",
+            "logic",
+            "handling",
+            "execution",
+            "path",
+            "flow",
+            "search",
+            "find",
+            "where",
+            "how",
+            "what",
+            "which",
+            "the",
+            "this",
         ];
         let has_concept = concept_words.iter().any(|w| lower.contains(w));
         return !has_concept;
