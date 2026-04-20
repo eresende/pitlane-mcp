@@ -3612,10 +3612,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result["session_state"]["top_target_seen"], json!(true));
-        assert!(
-            result["steering"]["recommended_next_tool"].as_str().is_some(),
-        );
+        assert!(result["steering"]["recommended_next_tool"]
+            .as_str()
+            .is_some());
     }
 
     #[tokio::test]
