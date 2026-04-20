@@ -12,7 +12,7 @@ Side-by-side Codex comparison on the same prompt: pitlane-mcp vs no MCP.
 
 AI coding agents default to reading whole files. With pitlane-mcp, they fetch only the symbol they need — **532× less tokens** on a Rust codebase ([ripgrep](https://github.com/BurntSushi/ripgrep)), **418×** on C++ ([LevelDB](https://github.com/google/leveldb)), **133×** on C ([Redis](https://github.com/redis/redis)), **125×** on Go ([Gin](https://github.com/gin-gonic/gin)), **112×** on Java ([Guava](https://github.com/google/guava)), **65×** on C# ([Newtonsoft.Json](https://github.com/JamesNK/Newtonsoft.Json)), **61×** on Ruby ([RuboCop](https://github.com/rubocop/rubocop)), **56×** on Kotlin ([OkHttp](https://github.com/square/okhttp)), **54×** on Objective-C ([SDWebImage](https://github.com/SDWebImage/SDWebImage)), **53×** on TypeScript ([Hono](https://github.com/honojs/hono)), **52×** on Swift ([SwiftLint](https://github.com/realm/SwiftLint)), **49×** on Solidity ([OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts)), **41×** on Svelte ([svelte.dev](https://github.com/sveltejs/svelte.dev)), **20×** on Python ([FastAPI](https://github.com/fastapi/fastapi)), **80×** on PHP ([Laravel](https://github.com/laravel/framework)), **801×** on Zig ([zls](https://github.com/zigtools/zls)), **90×** on Lua ([Roact](https://github.com/Roblox/roact)), and Bash ([bats-core](https://github.com/bats-core/bats-core))¹.
 
-Recent `bench/harness` runs on the ripgrep prompt set also show a consistent quality win over a non-MCP baseline. In matched 19-prompt runs, MCP improved average quality from `0.115` to `0.326` on a local AMD Radeon RX 6800 XT / Ryzen 9 9950X system and from `0.143` to `0.277` on an AWS NVIDIA A10G / AMD EPYC 7R32 instance. See [bench/harness/RIPGREP_BENCHMARK_2026-04-12.md](bench/harness/RIPGREP_BENCHMARK_2026-04-12.md) for the full comparison, system specs, and caveats.
+Recent `bench/harness` runs on the ripgrep prompt set show MCP using **13% fewer tokens** than a non-MCP baseline while producing **9% better quality answers** across 19 prompts (GLM 4.7 Flash on Bedrock, n=3). MCP wins on tokens for 13/19 prompts, with standouts like `symbol_regex_search_path` at 0.14x (86% cheaper) and `usage_ignore_skip_path` at 0.22x (78% cheaper). See [bench/harness/TODO.md](bench/harness/TODO.md) for the full breakdown.
 
 ## Benchmark Harness
 
@@ -77,7 +77,7 @@ Patch Set 3 folds the OpenCode runtime into the same canonical artifact contract
 
 - **AST-based indexing** — tree-sitter parses Rust, Python, JavaScript, TypeScript, Svelte (embedded `<script>` / `<script lang="ts">` blocks only), C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, Solidity, and Bash source into structured symbols
 - **BM25 full-text search** — tantivy-backed ranked search over name, qualified name, signature, and doc fields with a custom camelCase tokenizer (`LowerInstruction` → `["lower", "instruction"]`); falls back to exact substring match if the index isn't ready
-- **Intent-aware composite tools** — `locate_code`, `read_code_unit`, `trace_path`, `analyze_impact`, and `navigate_code` reduce tool thrash and broad file reads
+- **Intent-aware composite tools** — `investigate`, `locate_code`, `read_code_unit`, `trace_path`, `analyze_impact`, and `navigate_code` reduce tool thrash and broad file reads
 - **Graph-aware navigation tools** — evidence-backed callers, callees, path tracing, and impact analysis without whole-repo back-and-forth
 - **Small default MCP surface** — default clients see only startup, discovery, reading, tracing, impact, orientation, and one text-search escape hatch
 - **Incremental re-indexing** — background watcher re-parses only changed files
@@ -426,7 +426,7 @@ Optional parameters:
 - `signature_only` — returns only the indexed metadata (signature, doc comment, file, line range) with no file I/O. Defaults to `true` for struct, class, interface, and trait kinds; defaults to `false` for functions, methods, and everything else. Pass `signature_only: false` explicitly to get the full body of a container type.
 - `include_context: true` — includes 3 lines of surrounding source before and after the symbol.
 
-Full-source responses include a `references` field — a list of symbols whose names appear as identifiers in the source. This saves a separate `find_usages` call when you want to understand what a symbol depends on.
+Full-source responses can optionally include a `references` field — a list of symbols whose names appear as identifiers in the source. Pass `include_references: true` to enable. This saves a separate `find_usages` call when you want to understand what a symbol depends on.
 
 > **Python/JS/TS/Java classes, C++ classes/structs, C# classes/structs, Ruby classes/modules, and Swift classes/structs**: for classes that contain methods, `get_symbol` returns only the class header (plus docstring for Python) — not the full body. Objective-C `@interface` blocks are returned at full extent (they contain only declarations, not implementations). Retrieve individual methods by their own symbol IDs (e.g. `models.py::MyClass::some_method#method`). Use `get_file_outline` to list all methods first.
 
