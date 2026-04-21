@@ -1122,8 +1122,8 @@ impl ServerHandler for PitlaneMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_logging().build())
             .with_instructions(
                 "pitlane-mcp: token-efficient code navigation. \
-                Default tool tier: ensure_project_ready, locate_code, read_code_unit, trace_path, analyze_impact, get_index_stats, and search_content. \
-                Suggested flow: start with ensure_project_ready; use locate_code for ambiguous discovery; use read_code_unit to inspect a chosen target; use trace_path for flow questions; use analyze_impact before edits; use get_index_stats for lightweight orientation; use search_content only when you know a text fragment. \
+                Default tool tier: ensure_project_ready, investigate, locate_code, read_code_unit, trace_path, analyze_impact, get_index_stats, and search_content. \
+                Suggested flow: start with ensure_project_ready; use investigate for broad code questions; use locate_code for ambiguous discovery; use read_code_unit to inspect a chosen target; use trace_path for flow questions; use analyze_impact before edits; use get_index_stats for lightweight orientation; use search_content only when you know a text fragment. \
                 Advanced primitive tools are hidden from tools/list by default to reduce agent branching. Set PITLANE_MCP_TOOL_TIER=all to expose the full primitive surface.",
             )
     }

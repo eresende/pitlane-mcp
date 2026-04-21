@@ -187,6 +187,20 @@ Add to your MCP settings (`.kiro/settings/mcp.json` or `.vscode/mcp.json`):
 }
 ```
 
+## Recommended Workflow
+
+Most users should stay on the default tool tier and follow a small, predictable loop:
+
+1. Call `ensure_project_ready` once at startup.
+2. Use `investigate` for broad code questions such as "how does this work?" or "what is the execution path?".
+3. Use `locate_code` when you need discovery without full source.
+4. Use `read_code_unit` once you know the target.
+5. Use `trace_path` for explicit source-to-sink or config-to-effect questions.
+6. Use `analyze_impact` before edits or refactors.
+7. Use `search_content` only when you know a text fragment but not the owning symbol.
+
+By default, `pitlane-mcp` advertises only this agent-facing tool tier. Set `PITLANE_MCP_TOOL_TIER=all` to expose the full advanced primitive surface.
+
 ## Tools
 
 ### Tool Hierarchy
@@ -238,7 +252,16 @@ Preferred one-call startup for MCP clients and harnesses.
 { "path": "/your/project" }
 ```
 
-This ensures the index exists and waits for embeddings only if they are still running. In the common case it replaces a manual `index_project` + `wait_for_embeddings` sequence.
+This ensures the index exists and reports indexing and embedding readiness in one call. It does not block on embeddings. In the common case it replaces a manual startup check, and the response tells the client whether embeddings are still running in the background.
+
+Optional parameters:
+
+- `exclude` — additional glob patterns to skip during the walk
+- `force: true` — rebuild the index even if the on-disk copy is up to date
+- `max_files` — cap on the number of source files indexed (default: 100 000)
+- `poll_interval_ms` and `timeout_secs` — accepted for compatibility but currently ignored
+
+If the response reports embeddings as still running and your client explicitly needs semantic search to be ready before continuing, call `wait_for_embeddings`. Otherwise continue immediately.
 
 ### `investigate`
 
@@ -263,6 +286,10 @@ Optional parameters:
 
 - `language` — restrict discovery to a specific language
 - `scope` — restrict discovery to a subtree or file glob
+
+## Advanced Tools
+
+The following tools are available only when you start the server with `PITLANE_MCP_TOOL_TIER=all`. Most agent users should not need them in normal use.
 
 ### `index_project`
 
@@ -733,7 +760,7 @@ Use pitlane-mcp for all code lookups when available.
 
 Each language is benchmarked against a pinned open-source project chosen for real-world representativeness. New corpora are added as language support grows.
 
-> **Note:** pitlane-mcp is under active development. New language support and token-efficiency optimizations land frequently, so these numbers are updated with each release and may change significantly between versions.
+> **Note:** these benchmark numbers are release-specific snapshots, not guarantees about every agent workflow or model. Real-world outcomes vary with the host agent, prompt strategy, and model choice.
 
 **Test environment:** AMD Ryzen 9 9950X (16 cores / 32 threads), 32 GB RAM, NVMe SSD.
 
