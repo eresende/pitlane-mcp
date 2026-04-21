@@ -10,6 +10,10 @@ Token-efficient code intelligence MCP server for AI coding agents.
 
 `pitlane-mcp` indexes a codebase once with tree-sitter and lets agents retrieve the symbols they actually need instead of dumping whole files into context.
 
+## Project Status
+
+`pitlane-mcp` is feature-complete and currently in maintenance mode. New major features are not actively planned. Bug fixes, compatibility updates, documentation improvements, and focused contributions are still welcome.
+
 <p align="center">
   <a href="docs/demo/pitlane-demo.webm">
     <img src="docs/demo/pitlane-demo.gif" alt="pitlane-mcp demo">
