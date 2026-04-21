@@ -51,9 +51,7 @@ Best results on Sonnet 4.5 (single-prompt):
 - [x] `investigate` positioned as first-call tool
 - [x] Strong anti-bash/grep/glob/read language
 
-## Remaining Work
-
-### High Impact (would move the needle)
+### Fine Tuning
 
 - [x] Fix the 7 prompts where MCP is still more expensive than baseline.
   - `token_efficiency_probe`: 1.60x → **0.27x** ✓ (fuzzy investigate dedup)
@@ -70,29 +68,6 @@ Best results on Sonnet 4.5 (single-prompt):
   - `tests_hidden_files` went from 13.35x to 0.68x
   - Note: global one-shot guard was tried and reverted — breaks multi-prompt
     benchmark runs since MCP server persists across prompts
-
-- [ ] Add a `max_calls` or iteration budget hint in the MCP tool descriptions
-  so models know when to stop exploring.
-
-### Medium Impact
-
-- [ ] Run the full 19-prompt suite with n=3 on GLM Flash to get stable averages.
-  - Current results are n=1 which has high variance.
-
-- [ ] Make `trace_path` more useful for CLI/config flow prompts.
-  - Seed selection still weak for configuration-flow questions.
-
-- [ ] Evaluate whether `investigate` should also search test files when the
-  query mentions "test" or "behavior".
-
-### Low Impact / Deferred
-
-- [ ] Consider returning a lighter default for container-heavy files in
-  `read_code_unit`.
-
-- [ ] Build a focused "Pitlane must win" prompt slice for rapid iteration.
-
-- [ ] Evaluate tool behavior metrics (not just final answer) per prompt category.
 
 ## Benchmark Commands
 
