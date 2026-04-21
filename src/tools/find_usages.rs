@@ -7,7 +7,9 @@ use walkdir::WalkDir;
 
 use crate::error::ToolError;
 use crate::indexer::svelte::{collect_script_blocks, ScriptBlockLanguage};
-use crate::indexer::{is_supported_extension, tree_sitter_language_for_extension};
+use crate::indexer::{
+    is_supported_extension, tree_sitter_language_for_extension, warn_walkdir_error,
+};
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 
@@ -80,8 +82,14 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
             .follow_links(false)
             .sort_by_file_name()
             .into_iter()
-            .filter_map(|e| e.ok())
         {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    warn_walkdir_error(&project_path, &err, "find_usages");
+                    continue;
+                }
+            };
             let path = entry.path();
             if !should_search_path(path, &project_path, scope_set.as_ref()) {
                 continue;
@@ -338,10 +346,48 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     fn write(dir: &TempDir, name: &str, content: &str) -> std::path::PathBuf {
         let path = dir.path().join(name);
         std::fs::write(&path, content).unwrap();
         path
+    }
+
+    #[cfg(unix)]
+    struct RestrictedDir {
+        path: std::path::PathBuf,
+        original_mode: u32,
+    }
+
+    #[cfg(unix)]
+    impl RestrictedDir {
+        fn new(root: &TempDir, name: &str) -> Self {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("hidden.rs"), b"fn hidden() {}\n").unwrap();
+            let metadata = std::fs::metadata(&path).unwrap();
+            let original_mode = metadata.permissions().mode();
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o0);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            Self {
+                path,
+                original_mode,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RestrictedDir {
+        fn drop(&mut self) {
+            if let Ok(metadata) = std::fs::metadata(&self.path) {
+                let mut permissions = metadata.permissions();
+                permissions.set_mode(self.original_mode);
+                let _ = std::fs::set_permissions(&self.path, permissions);
+            }
+        }
     }
 
     // ── Rust ────────────────────────────────────────────────────────────────
@@ -1179,6 +1225,48 @@ pub fn caller_e() { target_fn(); }
             .expect("target_fn must be indexed");
 
         (dir, project, sym_id)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_find_usages_skips_walkdir_permission_denied_entries() {
+        use crate::index::format::{index_dir, save_index};
+        use crate::indexer::{registry, Indexer};
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"pub fn target_fn() {}\npub fn caller() { target_fn(); }\n",
+        )
+        .unwrap();
+        let _restricted = RestrictedDir::new(&dir, "blocked");
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let canonical = dir.path().canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let sym_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == "target_fn")
+            .map(|s| s.id.clone())
+            .expect("target_fn must be indexed");
+
+        let response = find_usages(FindUsagesParams {
+            project,
+            symbol_id: sym_id,
+            scope: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(response["count"].as_u64().unwrap(), 2);
     }
 
     /// Symbol with 6 usages, limit=3 → count=3, truncated:true, next_page_message contains "offset: 3"

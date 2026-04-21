@@ -23,7 +23,7 @@ use crate::index::format::{
 use crate::index::SymbolIndex;
 use crate::indexer::{
     is_declaration_file, is_excluded_dir_name, is_supported_extension, load_gitignore_patterns,
-    registry, Indexer,
+    registry, warn_walkdir_error, Indexer,
 };
 use crate::path_policy::resolve_project_path;
 
@@ -517,8 +517,14 @@ fn current_file_mtimes(
             }
             true
         })
-        .filter_map(|e| e.ok())
     {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                warn_walkdir_error(project_path, &err, "current_file_mtimes");
+                continue;
+            }
+        };
         let path = entry.path();
         if !path.is_file() {
             continue;
@@ -613,6 +619,9 @@ mod tests {
     use crate::path_policy::set_test_allowed_roots;
     use tempfile::TempDir;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     /// Helper: index a temp project to disk and return its path string.
     fn setup_project_on_disk(dir: &TempDir) -> String {
         let indexer = Indexer::new(registry::build_default_registry());
@@ -622,6 +631,41 @@ mod tests {
         std::fs::create_dir_all(&idx_dir).unwrap();
         save_index(&index, &idx_dir.join("index.bin")).unwrap();
         dir.path().to_string_lossy().to_string()
+    }
+
+    #[cfg(unix)]
+    struct RestrictedDir {
+        path: std::path::PathBuf,
+        original_mode: u32,
+    }
+
+    #[cfg(unix)]
+    impl RestrictedDir {
+        fn new(root: &TempDir, name: &str) -> Self {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("hidden.rs"), b"fn hidden() {}\n").unwrap();
+            let metadata = std::fs::metadata(&path).unwrap();
+            let original_mode = metadata.permissions().mode();
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o0);
+            std::fs::set_permissions(&path, permissions).unwrap();
+            Self {
+                path,
+                original_mode,
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RestrictedDir {
+        fn drop(&mut self) {
+            if let Ok(metadata) = std::fs::metadata(&self.path) {
+                let mut permissions = metadata.permissions();
+                permissions.set_mode(self.original_mode);
+                let _ = std::fs::set_permissions(&self.path, permissions);
+            }
+        }
     }
 
     #[test]
@@ -672,6 +716,19 @@ mod tests {
         assert_eq!(tool_err.code(), "PROJECT_NOT_INDEXED");
         assert!(tool_err.to_string().contains(project.as_str()));
         assert_eq!(tool_err.hint(), "Call index_project first.");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_current_file_mtimes_skips_walkdir_permission_denied_entries() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn visible() {}\n").unwrap();
+        let _restricted = RestrictedDir::new(&dir, "blocked");
+
+        let mtimes = current_file_mtimes(dir.path(), &[]).unwrap();
+
+        assert!(mtimes.keys().any(|path| path.ends_with("lib.rs")));
+        assert_eq!(mtimes.len(), 1);
     }
 
     #[test]
