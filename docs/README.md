@@ -18,7 +18,3 @@ This directory contains the focused documentation for `pitlane-mcp`.
 
 - [Security](security.md)
   Filesystem scope, confinement, storage, and practical deployment guidance.
-
-- [Branding](branding/README.md)
-  Branding assets and usage notes for the project logo.
-
