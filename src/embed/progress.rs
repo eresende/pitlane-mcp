@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::sync_utils::{rw_read, rw_write};
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -32,7 +34,7 @@ static REGISTRY: LazyLock<RwLock<HashMap<PathBuf, EmbedProgress>>> =
 
 /// Record that embedding has started for a project.
 pub fn start(project: &Path, total: usize) {
-    REGISTRY.write().unwrap().insert(
+    rw_write(&REGISTRY).insert(
         project.to_path_buf(),
         EmbedProgress {
             stored: 0,
@@ -46,7 +48,7 @@ pub fn start(project: &Path, total: usize) {
 /// Set the current progress for a project (keyed by canonical path).
 /// Preserves `started_at` from the existing entry if present.
 pub fn set(project: &Path, stored: usize, total: usize) {
-    let mut reg = REGISTRY.write().unwrap();
+    let mut reg = rw_write(&REGISTRY);
     let started_at = reg
         .get(project)
         .map(|p| p.started_at)
@@ -64,7 +66,7 @@ pub fn set(project: &Path, stored: usize, total: usize) {
 
 /// Mark embedding as finished, recording the completion timestamp.
 pub fn finish(project: &Path) {
-    let mut reg = REGISTRY.write().unwrap();
+    let mut reg = rw_write(&REGISTRY);
     if let Some(entry) = reg.get_mut(project) {
         entry.finished_at = Some(now_secs());
     }
@@ -72,10 +74,10 @@ pub fn finish(project: &Path) {
 
 /// Get the current progress for a project, or `None` if not tracked.
 pub fn get(project: &Path) -> Option<EmbedProgress> {
-    REGISTRY.read().unwrap().get(project).copied()
+    rw_read(&REGISTRY).get(project).copied()
 }
 
 /// Remove the entry once embedding is complete (optional cleanup).
 pub fn remove(project: &Path) {
-    REGISTRY.write().unwrap().remove(project);
+    rw_write(&REGISTRY).remove(project);
 }

@@ -9,20 +9,22 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, RwLock};
 
+use crate::sync_utils::{rw_read, rw_write};
+
 static IN_PROGRESS: LazyLock<RwLock<HashSet<PathBuf>>> =
     LazyLock::new(|| RwLock::new(HashSet::new()));
 
 /// Mark `path` as currently being indexed.
 pub fn mark(path: PathBuf) {
-    IN_PROGRESS.write().unwrap().insert(path);
+    rw_write(&IN_PROGRESS).insert(path);
 }
 
 /// Unmark `path` — indexing has finished (success or failure).
 pub fn unmark(path: &Path) {
-    IN_PROGRESS.write().unwrap().remove(path);
+    rw_write(&IN_PROGRESS).remove(path);
 }
 
 /// Returns `true` if `path` is currently being indexed in the background.
 pub fn is_indexing(path: &Path) -> bool {
-    IN_PROGRESS.read().unwrap().contains(path)
+    rw_read(&IN_PROGRESS).contains(path)
 }

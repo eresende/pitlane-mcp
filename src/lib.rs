@@ -8,5 +8,6 @@ pub mod indexing;
 pub mod path_policy;
 pub mod session;
 pub mod stats;
+pub mod sync_utils;
 pub mod tools;
 pub mod watcher;

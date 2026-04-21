@@ -15,6 +15,7 @@ use tantivy::{
 };
 
 use crate::indexer::language::{Language, Symbol, SymbolId, SymbolKind};
+use crate::sync_utils::{rw_read, rw_write};
 
 // ---------------------------------------------------------------------------
 // CamelCase tokenizer
@@ -257,7 +258,7 @@ pub fn ensure(symbols: &HashMap<SymbolId, Symbol>, tantivy_dir: &Path) -> anyhow
 
 fn get_or_open_reader(project: &Path, tantivy_dir: &Path) -> anyhow::Result<Arc<ReaderEntry>> {
     {
-        let cache = READER_CACHE.read().unwrap();
+        let cache = rw_read(&READER_CACHE);
         if let Some(entry) = cache.get(project) {
             return Ok(Arc::clone(entry));
         }
@@ -274,17 +275,14 @@ fn get_or_open_reader(project: &Path, tantivy_dir: &Path) -> anyhow::Result<Arc<
         .try_into()?;
     let entry = Arc::new(ReaderEntry { index, reader });
 
-    READER_CACHE
-        .write()
-        .unwrap()
-        .insert(project.to_path_buf(), Arc::clone(&entry));
+    rw_write(&READER_CACHE).insert(project.to_path_buf(), Arc::clone(&entry));
     Ok(entry)
 }
 
 /// Evict the cached reader for `project`. Call before rebuilding the tantivy
 /// index so the next search opens a fresh reader.
 pub fn invalidate(project: &Path) {
-    READER_CACHE.write().unwrap().remove(project);
+    rw_write(&READER_CACHE).remove(project);
 }
 
 /// Search the BM25 index, returning symbol IDs in relevance order.

@@ -8,6 +8,7 @@ use crate::embed::EmbedConfig;
 use crate::error::ToolError;
 use crate::index::format::index_dir;
 use crate::path_policy::resolve_project_path;
+use crate::sync_utils::mutex_lock;
 use crate::tools::index_project::load_project_index;
 use crate::watcher::ProjectWatcher;
 
@@ -45,7 +46,7 @@ impl WatcherRegistry {
 
         // Check if already watching
         {
-            let watchers = self.watchers.lock().unwrap();
+            let watchers = mutex_lock(&self.watchers);
             if watchers.contains_key(&key) {
                 return Ok(json!({
                     "status": "already_running",
@@ -76,7 +77,7 @@ impl WatcherRegistry {
         )?;
 
         {
-            let mut watchers = self.watchers.lock().unwrap();
+            let mut watchers = mutex_lock(&self.watchers);
             watchers.insert(key.clone(), watcher);
         }
 
@@ -102,7 +103,7 @@ impl WatcherRegistry {
         };
         let key = canonical.display().to_string();
 
-        let mut watchers = self.watchers.lock().unwrap();
+        let mut watchers = mutex_lock(&self.watchers);
         if watchers.remove(&key).is_some() {
             json!({
                 "status": "stopped",
@@ -130,7 +131,7 @@ impl WatcherRegistry {
             },
         };
         let key = canonical.display().to_string();
-        let watchers = self.watchers.lock().unwrap();
+        let watchers = mutex_lock(&self.watchers);
         let watching = watchers.contains_key(&key);
         json!({
             "project": key,

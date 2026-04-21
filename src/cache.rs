@@ -16,26 +16,27 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, RwLock};
 
 use crate::index::SymbolIndex;
+use crate::sync_utils::{rw_read, rw_write};
 
 static CACHE: LazyLock<RwLock<HashMap<PathBuf, Arc<SymbolIndex>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 /// Returns the cached index for `path`, or `None` on a cache miss.
 pub fn get(path: &Path) -> Option<Arc<SymbolIndex>> {
-    CACHE.read().unwrap().get(path).cloned()
+    rw_read(&CACHE).get(path).cloned()
 }
 
 /// Wraps `index` in an `Arc`, stores it under `path`, and returns the Arc.
 pub fn insert(path: PathBuf, index: SymbolIndex) -> Arc<SymbolIndex> {
     let arc = Arc::new(index);
-    CACHE.write().unwrap().insert(path, arc.clone());
+    rw_write(&CACHE).insert(path, arc.clone());
     arc
 }
 
 /// Removes the entry for `path`. The next `load_project_index` call will
 /// reload from disk and repopulate the cache.
 pub fn invalidate(path: &Path) {
-    CACHE.write().unwrap().remove(path);
+    rw_write(&CACHE).remove(path);
 }
 
 #[cfg(test)]

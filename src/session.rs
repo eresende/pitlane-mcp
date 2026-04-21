@@ -5,6 +5,8 @@ use std::sync::{
     LazyLock, RwLock,
 };
 
+use crate::sync_utils::{rw_read, rw_write};
+
 const MAX_RECENT_ITEMS: usize = 16;
 const RECENT_QUERY_LIMIT: usize = 12;
 
@@ -44,13 +46,13 @@ fn tokenize(text: &str) -> Vec<String> {
 }
 
 fn with_state_mut(project: &Path, f: impl FnOnce(&mut ProjectSessionState)) {
-    let mut guard = SESSION.write().unwrap();
+    let mut guard = rw_write(&SESSION);
     let state = guard.entry(project.to_path_buf()).or_default();
     f(state);
 }
 
 fn with_state<T>(project: &Path, f: impl FnOnce(&ProjectSessionState) -> T) -> T {
-    let guard = SESSION.read().unwrap();
+    let guard = rw_read(&SESSION);
     match guard.get(project) {
         Some(state) => f(state),
         None => f(&ProjectSessionState::default()),
