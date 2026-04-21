@@ -141,7 +141,6 @@ Advanced primitives are hidden from `tools/list` by default. Set `PITLANE_MCP_TO
 - [Languages and Symbol Kinds](docs/languages.md)
 - [Benchmarks](docs/benchmarks.md)
 - [Security](docs/security.md)
-- [Branding](docs/branding/README.md)
 - [Semantic Search](SEMANTIC_SEARCH.md)
 - [Benchmark Harness](bench/harness/README.md)
 
