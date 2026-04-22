@@ -377,6 +377,13 @@ mod tests {
                 original_mode,
             }
         }
+
+        fn is_effectively_inaccessible(&self) -> bool {
+            matches!(
+                std::fs::read_dir(&self.path),
+                Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied
+            )
+        }
     }
 
     #[cfg(unix)]
@@ -1239,7 +1246,7 @@ pub fn caller_e() { target_fn(); }
             b"pub fn target_fn() {}\npub fn caller() { target_fn(); }\n",
         )
         .unwrap();
-        let _restricted = RestrictedDir::new(&dir, "blocked");
+        let restricted = RestrictedDir::new(&dir, "blocked");
 
         let indexer = Indexer::new(registry::build_default_registry());
         let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
@@ -1269,7 +1276,9 @@ pub fn caller_e() { target_fn(); }
         let usages = response["usages"].as_array().unwrap();
         assert!(response["count"].as_u64().unwrap() >= 2);
         assert!(!usages.is_empty());
-        assert!(usages.iter().all(|usage| usage["file"] == "lib.rs"));
+        if restricted.is_effectively_inaccessible() {
+            assert!(usages.iter().all(|usage| usage["file"] == "lib.rs"));
+        }
     }
 
     /// Symbol with 6 usages, limit=3 → count=3, truncated:true, next_page_message contains "offset: 3"
