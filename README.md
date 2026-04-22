@@ -94,9 +94,11 @@ Add to `opencode.json` or `opencode.jsonc`:
 }
 ```
 
-### VS Code / Kiro IDE
+### VS Code
 
-Add to `.vscode/mcp.json` or `.kiro/settings/mcp.json`:
+Add to `.vscode/mcp.json`:
+
+Optional semantic-search variables go under `env`.
 
 ```json
 {
@@ -105,21 +107,28 @@ Add to `.vscode/mcp.json` or `.kiro/settings/mcp.json`:
       "pitlane-mcp": {
         "type": "stdio",
         "command": "pitlane-mcp",
-        "args": []
+        "args": [],
+        "env": {}
       }
     }
   }
 }
 ```
 
-### Cursor
+### Cursor / Kiro IDE
+
+Add to `.cursor/mcp.json` or `.kiro/settings/mcp.json`:
+
+Optional semantic-search variables go under `env`.
 
 ```json
 {
   "mcpServers": {
     "pitlane-mcp": {
+      "type": "stdio",
       "command": "pitlane-mcp",
-      "args": []
+      "args": [],
+      "env": {}
     }
   }
 }
