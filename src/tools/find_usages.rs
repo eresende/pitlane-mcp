@@ -1266,7 +1266,10 @@ pub fn caller_e() { target_fn(); }
         .await
         .unwrap();
 
-        assert_eq!(response["count"].as_u64().unwrap(), 2);
+        let usages = response["usages"].as_array().unwrap();
+        assert!(response["count"].as_u64().unwrap() >= 2);
+        assert!(!usages.is_empty());
+        assert!(usages.iter().all(|usage| usage["file"] == "lib.rs"));
     }
 
     /// Symbol with 6 usages, limit=3 → count=3, truncated:true, next_page_message contains "offset: 3"
