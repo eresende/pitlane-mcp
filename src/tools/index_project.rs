@@ -22,8 +22,9 @@ use crate::index::format::{
 };
 use crate::index::SymbolIndex;
 use crate::indexer::{
-    is_declaration_file, is_excluded_dir_name, is_supported_extension, load_gitignore_patterns,
-    registry, warn_walkdir_error, Indexer,
+    default_exclude_patterns, extra_excluded_dir_names, is_declaration_file,
+    is_excluded_dir_name_with_custom, is_supported_extension, load_gitignore_patterns, registry,
+    warn_walkdir_error, Indexer,
 };
 use crate::path_policy::resolve_project_path;
 
@@ -55,7 +56,7 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
     let force = params.force.unwrap_or(false);
     let mut exclude = params.exclude.take().unwrap_or_default();
     if exclude.is_empty() {
-        exclude = default_excludes();
+        exclude = default_exclude_patterns();
     }
 
     // Extend with patterns from the project's .gitignore (if present).
@@ -459,18 +460,6 @@ async fn do_index_project(
     Ok(response)
 }
 
-fn default_excludes() -> Vec<String> {
-    vec![
-        "target/**".to_string(),
-        ".git/**".to_string(),
-        "__pycache__/**".to_string(),
-        "node_modules/**".to_string(),
-        ".venv/**".to_string(),
-        "venv/**".to_string(),
-        "*.pyc".to_string(),
-    ]
-}
-
 fn build_exclude_set(patterns: &[String]) -> anyhow::Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
@@ -484,6 +473,7 @@ fn current_file_mtimes(
     exclude_patterns: &[String],
 ) -> anyhow::Result<HashMap<String, u64>> {
     let exclude_set = build_exclude_set(exclude_patterns)?;
+    let extra_excluded_dirs = extra_excluded_dir_names();
     let mut file_mtimes = HashMap::new();
 
     for entry in WalkDir::new(project_path)
@@ -508,10 +498,11 @@ fn current_file_mtimes(
                 if exclude_set.is_match(format!("{}/", rel_str).as_str()) {
                     return false;
                 }
-                if rel
-                    .components()
-                    .any(|c| c.as_os_str().to_str().is_some_and(is_excluded_dir_name))
-                {
+                if rel.components().any(|c| {
+                    c.as_os_str().to_str().is_some_and(|name| {
+                        is_excluded_dir_name_with_custom(name, &extra_excluded_dirs)
+                    })
+                }) {
                     return false;
                 }
             }

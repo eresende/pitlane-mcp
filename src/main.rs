@@ -17,7 +17,7 @@ use pitlane_mcp::tools::watch_project::WatcherRegistry;
 pub struct EnsureProjectReadyRequest {
     /// Absolute or relative path to the project root
     pub path: String,
-    /// Glob patterns to exclude (default: target/, .git/, __pycache__/)
+    /// Glob patterns to exclude. Built-in defaults apply, and PITLANE_EXCLUDE_DIRS adds process-wide directory-name excludes.
     pub exclude: Option<Vec<String>>,
     /// Re-index even if an up-to-date index exists
     pub force: Option<bool>,
@@ -33,7 +33,7 @@ pub struct EnsureProjectReadyRequest {
 pub struct IndexProjectRequest {
     /// Absolute or relative path to the project root
     pub path: String,
-    /// Glob patterns to exclude (default: target/, .git/, __pycache__/)
+    /// Glob patterns to exclude. Built-in defaults apply, and PITLANE_EXCLUDE_DIRS adds process-wide directory-name excludes.
     pub exclude: Option<Vec<String>>,
     /// Re-index even if an up-to-date index exists
     pub force: Option<bool>,
