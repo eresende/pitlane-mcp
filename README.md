@@ -112,6 +112,19 @@ Add to `.vscode/mcp.json` or `.kiro/settings/mcp.json`:
 }
 ```
 
+### Cursor
+
+```json
+{
+  "mcpServers": {
+    "pitlane-mcp": {
+      "command": "pitlane-mcp",
+      "args": []
+    }
+  }
+}
+```
+
 ## Default Workflow
 
 Most users should stay on the default tool tier:
