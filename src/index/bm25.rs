@@ -9,7 +9,9 @@ use tantivy::{
     collector::TopDocs,
     directory::MmapDirectory,
     query::{BooleanQuery, Occur, QueryParser, TermQuery},
-    schema::{IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING},
+    schema::{
+        Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
+    },
     tokenizer::{Token, TokenStream, Tokenizer},
     Index, IndexReader, ReloadPolicy, TantivyDocument, Term,
 };
@@ -170,6 +172,48 @@ struct ReaderEntry {
     reader: IndexReader,
 }
 
+struct Bm25Fields {
+    symbol_id: Field,
+    name: Field,
+    qualified: Field,
+    signature: Field,
+    doc: Field,
+    kind: Field,
+    language: Field,
+    file_path: Field,
+}
+
+impl Bm25Fields {
+    fn load(schema: &Schema) -> anyhow::Result<Self> {
+        Ok(Self {
+            symbol_id: schema
+                .get_field("symbol_id")
+                .context("BM25 schema missing symbol_id field")?,
+            name: schema
+                .get_field("name")
+                .context("BM25 schema missing name field")?,
+            qualified: schema
+                .get_field("qualified")
+                .context("BM25 schema missing qualified field")?,
+            signature: schema
+                .get_field("signature")
+                .context("BM25 schema missing signature field")?,
+            doc: schema
+                .get_field("doc")
+                .context("BM25 schema missing doc field")?,
+            kind: schema
+                .get_field("kind")
+                .context("BM25 schema missing kind field")?,
+            language: schema
+                .get_field("language")
+                .context("BM25 schema missing language field")?,
+            file_path: schema
+                .get_field("file_path")
+                .context("BM25 schema missing file_path field")?,
+        })
+    }
+}
+
 static READER_CACHE: LazyLock<RwLock<HashMap<PathBuf, Arc<ReaderEntry>>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
@@ -209,30 +253,22 @@ pub fn build(symbols: &HashMap<SymbolId, Symbol>, tantivy_dir: &Path) -> anyhow:
     let index = Index::open_or_create(dir, schema.clone())?;
     register_tokenizer(&index);
     let mut writer = index.writer(50_000_000)?;
-
-    let symbol_id_f = schema.get_field("symbol_id").unwrap();
-    let name_f = schema.get_field("name").unwrap();
-    let qualified_f = schema.get_field("qualified").unwrap();
-    let signature_f = schema.get_field("signature").unwrap();
-    let doc_f = schema.get_field("doc").unwrap();
-    let kind_f = schema.get_field("kind").unwrap();
-    let language_f = schema.get_field("language").unwrap();
-    let file_path_f = schema.get_field("file_path").unwrap();
+    let fields = Bm25Fields::load(&schema)?;
 
     for sym in symbols.values() {
         let mut document = TantivyDocument::default();
-        document.add_text(symbol_id_f, &sym.id);
-        document.add_text(name_f, &sym.name);
-        document.add_text(qualified_f, &sym.qualified);
+        document.add_text(fields.symbol_id, &sym.id);
+        document.add_text(fields.name, &sym.name);
+        document.add_text(fields.qualified, &sym.qualified);
         if let Some(ref sig) = sym.signature {
-            document.add_text(signature_f, sig);
+            document.add_text(fields.signature, sig);
         }
         if let Some(ref d) = sym.doc {
-            document.add_text(doc_f, d);
+            document.add_text(fields.doc, d);
         }
-        document.add_text(kind_f, sym.kind.to_string());
-        document.add_text(language_f, sym.language.to_string());
-        document.add_text(file_path_f, sym.file.to_string_lossy());
+        document.add_text(fields.kind, sym.kind.to_string());
+        document.add_text(fields.language, sym.language.to_string());
+        document.add_text(fields.file_path, sym.file.to_string_lossy());
         writer.add_document(document)?;
     }
 
@@ -304,17 +340,12 @@ pub fn search(
     let entry = get_or_open_reader(project, tantivy_dir)?;
     let searcher = entry.reader.searcher();
     let schema = searcher.schema();
+    let fields = Bm25Fields::load(schema)?;
 
-    let name_f = schema.get_field("name").unwrap();
-    let qualified_f = schema.get_field("qualified").unwrap();
-    let signature_f = schema.get_field("signature").unwrap();
-    let doc_f = schema.get_field("doc").unwrap();
-    let kind_f = schema.get_field("kind").unwrap();
-    let language_f = schema.get_field("language").unwrap();
-    let symbol_id_f = schema.get_field("symbol_id").unwrap();
-
-    let mut parser =
-        QueryParser::for_index(&entry.index, vec![name_f, qualified_f, signature_f, doc_f]);
+    let mut parser = QueryParser::for_index(
+        &entry.index,
+        vec![fields.name, fields.qualified, fields.signature, fields.doc],
+    );
     // AND semantics: all terms must be present, reducing noise for code queries.
     parser.set_conjunction_by_default();
 
@@ -327,14 +358,14 @@ pub fn search(
     let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = vec![(Occur::Must, text_query)];
 
     if let Some(kind) = kind_filter {
-        let term = Term::from_field_text(kind_f, &kind.to_string());
+        let term = Term::from_field_text(fields.kind, &kind.to_string());
         clauses.push((
             Occur::Must,
             Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
         ));
     }
     if let Some(lang) = lang_filter {
-        let term = Term::from_field_text(language_f, &lang.to_string());
+        let term = Term::from_field_text(fields.language, &lang.to_string());
         clauses.push((
             Occur::Must,
             Box::new(TermQuery::new(term, IndexRecordOption::Basic)),
@@ -347,7 +378,7 @@ pub fn search(
     let mut ids = Vec::with_capacity(top_docs.len());
     for (_score, doc_address) in top_docs {
         let doc: TantivyDocument = searcher.doc(doc_address)?;
-        if let Some(v) = doc.get_first(symbol_id_f) {
+        if let Some(v) = doc.get_first(fields.symbol_id) {
             if let Some(id) = v.as_str() {
                 ids.push(id.to_string());
             }
