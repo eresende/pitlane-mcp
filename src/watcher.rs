@@ -12,6 +12,7 @@ use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMet
 use crate::index::SymbolIndex;
 use crate::indexer::is_supported_extension;
 use crate::indexer::{registry, Indexer};
+use crate::tools::index_project::current_source_snapshot;
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
 const CHANNEL_CAPACITY: usize = 1024;
@@ -195,7 +196,7 @@ async fn full_resync(
     let indexer = Arc::clone(indexer);
     let rebuilt = tokio::task::spawn_blocking(move || indexer.index_project(&root_buf, &[])).await;
 
-    let (rebuilt_index, _) = match rebuilt {
+    let (rebuilt_index, source_file_count) = match rebuilt {
         Ok(Ok(result)) => result,
         Ok(Err(err)) => {
             eprintln!("pitlane-mcp: full watcher resync failed: {}", err);
@@ -208,16 +209,6 @@ async fn full_resync(
     };
 
     let changed_files: HashSet<PathBuf> = rebuilt_index.by_file.keys().cloned().collect();
-    let mut file_mtimes = IndexMeta::new(root).file_mtimes;
-    for file_path in &changed_files {
-        if let Ok(meta) = std::fs::metadata(file_path) {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    file_mtimes.insert(file_path.display().to_string(), dur.as_secs());
-                }
-            }
-        }
-    }
 
     {
         let mut idx = index.write().await;
@@ -254,7 +245,11 @@ async fn full_resync(
     }
 
     let mut meta = IndexMeta::new(root);
-    meta.file_mtimes = file_mtimes;
+    if let Ok(snapshot) = current_source_snapshot(root, &[]) {
+        meta.file_mtimes = snapshot.file_mtimes;
+        meta.dir_mtimes = snapshot.dir_mtimes;
+    }
+    meta.source_file_count = source_file_count;
     if let Err(e) = save_meta(&meta, meta_path) {
         eprintln!("pitlane-mcp: failed to flush meta to disk: {}", e);
     }
@@ -329,7 +324,7 @@ async fn reindex_batch(
             Ok(fs_meta) => {
                 if let Ok(modified) = fs_meta.modified() {
                     if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                        meta.file_mtimes.insert(key, dur.as_secs());
+                        meta.file_mtimes.insert(key, dur.as_nanos() as u64);
                     }
                 }
             }
@@ -338,7 +333,18 @@ async fn reindex_batch(
                 meta.file_mtimes.remove(&key);
             }
         }
+        if let Some(parent) = path.parent() {
+            if let Ok(fs_meta) = std::fs::metadata(parent) {
+                if let Ok(modified) = fs_meta.modified() {
+                    if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
+                        meta.dir_mtimes
+                            .insert(parent.display().to_string(), dur.as_nanos() as u64);
+                    }
+                }
+            }
+        }
     }
+    meta.source_file_count = meta.file_mtimes.len();
     if let Err(e) = save_meta(&meta, meta_path) {
         eprintln!("pitlane-mcp: failed to flush meta to disk: {}", e);
     }
