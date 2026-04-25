@@ -7,7 +7,10 @@ use serde_json::{json, Value};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::error::ToolError;
-use crate::indexer::{is_declaration_file, is_supported_extension, load_gitignore_patterns};
+use crate::indexer::{
+    default_exclude_patterns, extra_excluded_dir_names, is_declaration_file,
+    is_excluded_dir_name_with_custom, is_supported_extension, load_gitignore_patterns,
+};
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
@@ -64,6 +67,7 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
         .map(parse_language_filter)
         .transpose()?;
     let exclude_set = build_exclude_set(&canonical)?;
+    let extra_excluded_dirs = extra_excluded_dir_names();
 
     let matcher = if regex {
         ContentMatcher::Regex(
@@ -86,6 +90,7 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
     let mut files = collect_searchable_files(
         &canonical,
         &exclude_set,
+        &extra_excluded_dirs,
         file_glob.as_ref(),
         language_filter,
     )?;
@@ -253,21 +258,9 @@ fn parse_language_filter(language: &str) -> anyhow::Result<&'static [&'static st
     }
 }
 
-fn default_excludes() -> Vec<String> {
-    vec![
-        "target/**".to_string(),
-        ".git/**".to_string(),
-        "__pycache__/**".to_string(),
-        "node_modules/**".to_string(),
-        ".venv/**".to_string(),
-        "venv/**".to_string(),
-        "*.pyc".to_string(),
-    ]
-}
-
 fn build_exclude_set(root: &Path) -> anyhow::Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
-    for pattern in default_excludes()
+    for pattern in default_exclude_patterns()
         .into_iter()
         .chain(load_gitignore_patterns(root))
     {
@@ -279,6 +272,7 @@ fn build_exclude_set(root: &Path) -> anyhow::Result<GlobSet> {
 fn collect_searchable_files(
     root: &Path,
     exclude_set: &GlobSet,
+    extra_excluded_dirs: &std::collections::HashSet<String>,
     file_glob: Option<&globset::GlobMatcher>,
     language_filter: Option<&[&str]>,
 ) -> anyhow::Result<Vec<PathBuf>> {
@@ -286,7 +280,7 @@ fn collect_searchable_files(
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| should_descend(root, exclude_set, entry))
+        .filter_entry(|entry| should_descend(root, exclude_set, extra_excluded_dirs, entry))
     {
         let entry = entry?;
         let path = entry.path();
@@ -307,6 +301,14 @@ fn collect_searchable_files(
         }
         let rel = path.strip_prefix(root).unwrap_or(path);
         let rel_str = rel.to_string_lossy();
+        if rel.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| is_excluded_dir_name_with_custom(name, extra_excluded_dirs))
+        }) {
+            continue;
+        }
         if exclude_set.is_match(rel_str.as_ref()) || exclude_set.is_match(path) {
             continue;
         }
@@ -321,7 +323,12 @@ fn collect_searchable_files(
     Ok(files)
 }
 
-fn should_descend(root: &Path, exclude_set: &GlobSet, entry: &DirEntry) -> bool {
+fn should_descend(
+    root: &Path,
+    exclude_set: &GlobSet,
+    extra_excluded_dirs: &std::collections::HashSet<String>,
+    entry: &DirEntry,
+) -> bool {
     let path = entry.path();
     let rel = match path.strip_prefix(root) {
         Ok(rel) => rel,
@@ -332,6 +339,14 @@ fn should_descend(root: &Path, exclude_set: &GlobSet, entry: &DirEntry) -> bool 
     }
     let rel_str = rel.to_string_lossy();
     if exclude_set.is_match(rel_str.as_ref()) {
+        return false;
+    }
+    if rel.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| is_excluded_dir_name_with_custom(name, extra_excluded_dirs))
+    }) {
         return false;
     }
     if entry.file_type().is_dir() && exclude_set.is_match(format!("{rel_str}/").as_str()) {
@@ -351,7 +366,7 @@ fn rel_string(root: &Path, path: &Path) -> String {
 mod tests {
     use super::*;
     use crate::index::format::{index_dir, save_index};
-    use crate::indexer::{registry, Indexer};
+    use crate::indexer::{registry, test_env_var_lock, Indexer, EXCLUDE_DIRS_ENV_VAR};
     use tempfile::TempDir;
 
     fn setup_indexed_project(dir: &TempDir) -> String {
@@ -429,5 +444,36 @@ mod tests {
             result["guidance"]["next_step"],
             json!("Use the matched file paths to pivot back to get_file_outline, search_symbols, or get_symbol instead of repeating nearby text searches.")
         );
+    }
+
+    #[tokio::test]
+    async fn test_search_content_respects_env_excluded_dir_names() {
+        let _guard = test_env_var_lock().lock().await;
+        std::env::set_var(EXCLUDE_DIRS_ENV_VAR, "vendor");
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn keep_me() {}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
+        std::fs::write(dir.path().join("vendor/ignored.rs"), "fn find_me() {}\n").unwrap();
+        let project = setup_indexed_project(&dir);
+
+        let result = search_content(SearchContentParams {
+            project,
+            query: "find_me".to_string(),
+            regex: None,
+            case_sensitive: None,
+            language: Some("rust".to_string()),
+            file: None,
+            limit: None,
+            offset: None,
+            before_context: None,
+            after_context: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["count"], json!(0));
+
+        std::env::remove_var(EXCLUDE_DIRS_ENV_VAR);
     }
 }

@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use crate::index::format::load_project_meta;
-use crate::indexer::is_excluded_dir_name;
+use crate::indexer::{extra_excluded_dir_names, is_excluded_dir_name_with_custom};
 use crate::path_policy::resolve_project_path;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
@@ -38,6 +38,7 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
     let depth = params.depth.unwrap_or(2) as usize;
     let max_dirs = params.max_dirs.unwrap_or(50).min(HARD_MAX_DIRS);
     let summary = params.summary.unwrap_or(false);
+    let extra_excluded_dirs = extra_excluded_dir_names();
 
     // Normalise the optional path filter to a forward-slash prefix for matching.
     let path_filter: Option<String> = params.path.as_ref().map(|p| {
@@ -64,10 +65,11 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
                 }
             }
 
-            if rel
-                .components()
-                .any(|c| c.as_os_str().to_str().is_some_and(is_excluded_dir_name))
-            {
+            if rel.components().any(|c| {
+                c.as_os_str().to_str().is_some_and(|name| {
+                    is_excluded_dir_name_with_custom(name, &extra_excluded_dirs)
+                })
+            }) {
                 continue;
             }
 
@@ -158,10 +160,11 @@ pub async fn get_project_outline(params: GetProjectOutlineParams) -> anyhow::Res
             }
         }
 
-        if rel
-            .components()
-            .any(|c| c.as_os_str().to_str().is_some_and(is_excluded_dir_name))
-        {
+        if rel.components().any(|c| {
+            c.as_os_str()
+                .to_str()
+                .is_some_and(|name| is_excluded_dir_name_with_custom(name, &extra_excluded_dirs))
+        }) {
             continue;
         }
 

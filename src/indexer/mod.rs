@@ -20,7 +20,7 @@ pub mod swift;
 pub mod typescript;
 pub mod zig;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -34,6 +34,7 @@ use language::LanguageParser;
 
 /// Files larger than this are skipped to avoid memory exhaustion and parser hangs.
 const MAX_FILE_BYTES: u64 = 1024 * 1024; // 1 MiB
+pub const EXCLUDE_DIRS_ENV_VAR: &str = "PITLANE_EXCLUDE_DIRS";
 
 pub struct Indexer {
     parsers: Vec<Box<dyn LanguageParser>>,
@@ -87,6 +88,7 @@ impl Indexer {
         on_progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
     ) -> anyhow::Result<(SymbolIndex, usize)> {
         let exclude_set = Self::build_exclude_set(exclude_patterns)?;
+        let extra_excluded_dirs = extra_excluded_dir_names();
 
         // Phase 1 — collect eligible file paths (sequential: WalkDir is not parallel).
         let eligible: Vec<std::path::PathBuf> = WalkDir::new(root)
@@ -109,10 +111,11 @@ impl Indexer {
                     if exclude_set.is_match(format!("{}/", rel_str).as_str()) {
                         return false;
                     }
-                    if rel
-                        .components()
-                        .any(|c| c.as_os_str().to_str().is_some_and(is_excluded_dir_name))
-                    {
+                    if rel.components().any(|c| {
+                        c.as_os_str().to_str().is_some_and(|name| {
+                            is_excluded_dir_name_with_custom(name, &extra_excluded_dirs)
+                        })
+                    }) {
                         return false;
                     }
                 }
@@ -458,7 +461,7 @@ pub fn tree_sitter_language_for_extension(ext: &str) -> Option<tree_sitter::Lang
     })
 }
 
-pub fn is_excluded_dir_name(name: &str) -> bool {
+fn is_builtin_excluded_dir_name(name: &str) -> bool {
     matches!(
         name,
         ".venv"
@@ -493,6 +496,69 @@ pub fn is_excluded_dir_name(name: &str) -> bool {
             | ".parcel-cache"
             | "storybook-static"
     )
+}
+
+fn normalize_excluded_dir_name(raw: &str) -> Option<String> {
+    let trimmed = raw.trim().trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('\\') {
+        return None;
+    }
+    Some(trimmed.to_ascii_lowercase())
+}
+
+pub fn extra_excluded_dir_names() -> HashSet<String> {
+    let mut names = HashSet::new();
+    if let Ok(value) = std::env::var(EXCLUDE_DIRS_ENV_VAR) {
+        for raw in value.split(',') {
+            if let Some(name) = normalize_excluded_dir_name(raw) {
+                names.insert(name);
+            }
+        }
+    }
+    names
+}
+
+pub fn extra_excluded_dir_patterns() -> Vec<String> {
+    let mut patterns = Vec::new();
+    for name in extra_excluded_dir_names() {
+        patterns.push(name.clone());
+        patterns.push(format!("{name}/**"));
+        patterns.push(format!("**/{name}"));
+        patterns.push(format!("**/{name}/**"));
+    }
+    patterns
+}
+
+pub fn default_exclude_patterns() -> Vec<String> {
+    let mut patterns = vec![
+        "target/**".to_string(),
+        ".git/**".to_string(),
+        "__pycache__/**".to_string(),
+        "node_modules/**".to_string(),
+        ".venv/**".to_string(),
+        "venv/**".to_string(),
+        "*.pyc".to_string(),
+    ];
+    patterns.extend(extra_excluded_dir_patterns());
+    patterns
+}
+
+pub fn is_excluded_dir_name_with_custom(name: &str, extra_excluded_dirs: &HashSet<String>) -> bool {
+    is_builtin_excluded_dir_name(name) || extra_excluded_dirs.contains(&name.to_ascii_lowercase())
+}
+
+pub fn is_excluded_dir_name(name: &str) -> bool {
+    let extra_excluded_dirs = extra_excluded_dir_names();
+    is_excluded_dir_name_with_custom(name, &extra_excluded_dirs)
+}
+
+#[cfg(test)]
+pub fn test_env_var_lock() -> &'static tokio::sync::Mutex<()> {
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex;
+
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[cfg(test)]
@@ -545,6 +611,7 @@ mod tests {
 
     #[test]
     fn test_is_excluded_dir_name_known() {
+        let extra = HashSet::new();
         for name in &[
             "target",
             "node_modules",
@@ -565,15 +632,95 @@ mod tests {
             ".parcel-cache",
             "storybook-static",
         ] {
-            assert!(is_excluded_dir_name(name), "{name} should be excluded");
+            assert!(
+                is_excluded_dir_name_with_custom(name, &extra),
+                "{name} should be excluded"
+            );
         }
     }
 
     #[test]
     fn test_is_excluded_dir_name_unknown() {
+        let extra = HashSet::new();
         for name in &["src", "lib", "tests", "docs", "my_module"] {
-            assert!(!is_excluded_dir_name(name), "{name} should not be excluded");
+            assert!(
+                !is_excluded_dir_name_with_custom(name, &extra),
+                "{name} should not be excluded"
+            );
         }
+    }
+
+    #[test]
+    fn test_extra_excluded_dir_names_from_env() {
+        let _guard = test_env_var_lock().blocking_lock();
+        std::env::set_var(
+            EXCLUDE_DIRS_ENV_VAR,
+            " vendor , tmp/ ,nested/path,,cache\\inner",
+        );
+
+        let names = extra_excluded_dir_names();
+
+        assert!(names.contains("vendor"));
+        assert!(names.contains("tmp"));
+        assert_eq!(names.len(), 2);
+
+        std::env::remove_var(EXCLUDE_DIRS_ENV_VAR);
+    }
+
+    #[test]
+    fn test_is_excluded_dir_name_with_env_override() {
+        let _guard = test_env_var_lock().blocking_lock();
+        std::env::set_var(EXCLUDE_DIRS_ENV_VAR, "vendor");
+
+        assert!(is_excluded_dir_name("vendor"));
+        assert!(is_excluded_dir_name("Vendor"));
+        assert!(!is_excluded_dir_name("src"));
+
+        std::env::remove_var(EXCLUDE_DIRS_ENV_VAR);
+    }
+
+    #[test]
+    fn test_index_project_respects_env_excluded_dir_names() {
+        let _guard = test_env_var_lock().blocking_lock();
+        std::env::set_var(EXCLUDE_DIRS_ENV_VAR, "vendor");
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn root() {}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
+        std::fs::write(
+            dir.path().join("vendor/ignored.rs"),
+            b"pub fn ignored() {}\n",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        assert_eq!(index.symbol_count(), 1);
+
+        std::env::remove_var(EXCLUDE_DIRS_ENV_VAR);
+    }
+
+    #[test]
+    fn test_index_project_respects_env_excluded_dir_names_case_insensitively() {
+        let _guard = test_env_var_lock().blocking_lock();
+        std::env::set_var(EXCLUDE_DIRS_ENV_VAR, "vendor");
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn root() {}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("Vendor")).unwrap();
+        std::fs::write(
+            dir.path().join("Vendor/ignored.rs"),
+            b"pub fn ignored() {}\n",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        assert_eq!(index.symbol_count(), 1);
+
+        std::env::remove_var(EXCLUDE_DIRS_ENV_VAR);
     }
 
     #[test]

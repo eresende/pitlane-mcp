@@ -9,7 +9,10 @@ use walkdir::{DirEntry, WalkDir};
 use crate::error::ToolError;
 use crate::index::format::load_project_meta;
 use crate::index::repo_profile::{archetype_label, role_boost_for_path, role_by_path, role_label};
-use crate::indexer::load_gitignore_patterns;
+use crate::indexer::{
+    default_exclude_patterns, extra_excluded_dir_names, is_excluded_dir_name_with_custom,
+    load_gitignore_patterns,
+};
 use crate::path_policy::resolve_project_path;
 use crate::session;
 use crate::tools::index_project::load_project_index;
@@ -60,13 +63,16 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
                 .map(|g| g.compile_matcher())
         })
         .transpose()?;
-    let exclude_set = build_exclude_set(&canonical)?;
+    let exclusions = ExclusionContext {
+        exclude_set: build_exclude_set(&canonical)?,
+        extra_excluded_dirs: extra_excluded_dir_names(),
+    };
 
     let matcher = FileMatcher::new(mode, &params.query)?;
 
     let mut matches: Vec<FileMatch> = collect_files(
         &canonical,
-        &exclude_set,
+        &exclusions,
         scope_glob.as_ref(),
         language_filter,
         &matcher,
@@ -166,6 +172,11 @@ struct FileMatch {
     path_role: Option<String>,
 }
 
+struct ExclusionContext {
+    exclude_set: GlobSet,
+    extra_excluded_dirs: std::collections::HashSet<String>,
+}
+
 enum FileMatcher {
     Exact { query: String },
     Substring { query: String },
@@ -257,7 +268,7 @@ fn compare_matches(a: &FileMatch, b: &FileMatch) -> Ordering {
 
 fn collect_files(
     root: &Path,
-    exclude_set: &GlobSet,
+    exclusions: &ExclusionContext,
     scope_glob: Option<&globset::GlobMatcher>,
     language_filter: Option<&[&str]>,
     matcher: &FileMatcher,
@@ -268,7 +279,7 @@ fn collect_files(
     for entry in WalkDir::new(root)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| should_descend(root, exclude_set, entry))
+        .filter_entry(|entry| should_descend(root, exclusions, entry))
     {
         let entry = entry?;
         let path = entry.path();
@@ -277,7 +288,16 @@ fn collect_files(
         }
         let rel = path.strip_prefix(root).unwrap_or(path);
         let rel_str = rel.to_string_lossy().replace('\\', "/");
-        if exclude_set.is_match(rel_str.as_str()) || exclude_set.is_match(path) {
+        if rel.components().any(|component| {
+            component.as_os_str().to_str().is_some_and(|name| {
+                is_excluded_dir_name_with_custom(name, &exclusions.extra_excluded_dirs)
+            })
+        }) {
+            continue;
+        }
+        if exclusions.exclude_set.is_match(rel_str.as_str())
+            || exclusions.exclude_set.is_match(path)
+        {
             continue;
         }
         if let Some(scope) = scope_glob {
@@ -369,21 +389,9 @@ fn trigrams(s: &str) -> std::collections::HashSet<[char; 3]> {
     chars.windows(3).map(|w| [w[0], w[1], w[2]]).collect()
 }
 
-fn default_excludes() -> Vec<String> {
-    vec![
-        "target/**".to_string(),
-        ".git/**".to_string(),
-        "__pycache__/**".to_string(),
-        "node_modules/**".to_string(),
-        ".venv/**".to_string(),
-        "venv/**".to_string(),
-        "*.pyc".to_string(),
-    ]
-}
-
 fn build_exclude_set(root: &Path) -> anyhow::Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
-    for pattern in default_excludes()
+    for pattern in default_exclude_patterns()
         .into_iter()
         .chain(load_gitignore_patterns(root))
     {
@@ -392,7 +400,7 @@ fn build_exclude_set(root: &Path) -> anyhow::Result<GlobSet> {
     Ok(builder.build()?)
 }
 
-fn should_descend(root: &Path, exclude_set: &GlobSet, entry: &DirEntry) -> bool {
+fn should_descend(root: &Path, exclusions: &ExclusionContext, entry: &DirEntry) -> bool {
     let path = entry.path();
     let rel = match path.strip_prefix(root) {
         Ok(rel) => rel,
@@ -402,10 +410,21 @@ fn should_descend(root: &Path, exclude_set: &GlobSet, entry: &DirEntry) -> bool 
         return true;
     }
     let rel_str = rel.to_string_lossy();
-    if exclude_set.is_match(rel_str.as_ref()) {
+    if exclusions.exclude_set.is_match(rel_str.as_ref()) {
         return false;
     }
-    if entry.file_type().is_dir() && exclude_set.is_match(format!("{rel_str}/").as_str()) {
+    if rel.components().any(|component| {
+        component.as_os_str().to_str().is_some_and(|name| {
+            is_excluded_dir_name_with_custom(name, &exclusions.extra_excluded_dirs)
+        })
+    }) {
+        return false;
+    }
+    if entry.file_type().is_dir()
+        && exclusions
+            .exclude_set
+            .is_match(format!("{rel_str}/").as_str())
+    {
         return false;
     }
     true
@@ -415,7 +434,7 @@ fn should_descend(root: &Path, exclude_set: &GlobSet, entry: &DirEntry) -> bool 
 mod tests {
     use super::*;
     use crate::index::format::{build_index_meta, index_dir, save_index, save_meta};
-    use crate::indexer::{registry, Indexer};
+    use crate::indexer::{registry, test_env_var_lock, Indexer, EXCLUDE_DIRS_ENV_VAR};
     use tempfile::TempDir;
 
     fn setup_indexed_project(dir: &TempDir) -> String {
@@ -512,5 +531,37 @@ mod tests {
             result["guidance"]["next_step"],
             json!("Use the returned file paths with get_file_outline, search_content, or get_symbol instead of switching to shell globbing.")
         );
+    }
+
+    #[tokio::test]
+    async fn test_search_files_respects_env_excluded_dir_names() {
+        let _guard = test_env_var_lock().lock().await;
+        std::env::set_var(EXCLUDE_DIRS_ENV_VAR, "vendor");
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("root.rs"), "fn root() {}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
+        std::fs::write(
+            dir.path().join("vendor/SecretFeatureTest.java"),
+            "class SecretFeatureTest {}\n",
+        )
+        .unwrap();
+        let project = setup_indexed_project(&dir);
+
+        let result = search_files(SearchFilesParams {
+            project,
+            query: "SecretFeature".to_string(),
+            mode: None,
+            language: None,
+            file: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["count"], json!(0));
+
+        std::env::remove_var(EXCLUDE_DIRS_ENV_VAR);
     }
 }
