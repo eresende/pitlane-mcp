@@ -487,6 +487,7 @@ pub(crate) fn current_source_snapshot(
     exclude_patterns: &[String],
 ) -> anyhow::Result<SourceSnapshot> {
     let exclude_set = build_exclude_set(exclude_patterns)?;
+    let extra_excluded_dirs = extra_excluded_dir_names();
     let mut snapshot = SourceSnapshot::default();
 
     for entry in WalkDir::new(project_path)
