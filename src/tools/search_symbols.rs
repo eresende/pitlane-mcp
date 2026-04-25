@@ -811,7 +811,7 @@ mod tests {
                 .unwrap()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs(),
+                .as_nanos() as u64,
         );
         save_meta(&meta, &idx_dir.join("meta.json")).unwrap();
         // Invalidate cache so load_project_index reads from disk.

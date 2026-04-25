@@ -28,6 +28,10 @@ pub struct IndexMeta {
     pub version: u32,
     pub indexed_at: String,
     pub file_mtimes: HashMap<String, u64>,
+    #[serde(default)]
+    pub dir_mtimes: HashMap<String, u64>,
+    #[serde(default)]
+    pub source_file_count: usize,
     pub repo_profile: RepoProfile,
 }
 
@@ -35,9 +39,11 @@ impl IndexMeta {
     pub fn new(project_path: &Path) -> Self {
         Self {
             project_path: project_path.display().to_string(),
-            version: 3,
+            version: 5,
             indexed_at: chrono_now(),
             file_mtimes: HashMap::new(),
+            dir_mtimes: HashMap::new(),
+            source_file_count: 0,
             repo_profile: RepoProfile::default(),
         }
     }
@@ -259,12 +265,16 @@ mod tests {
         meta.repo_profile.archetype = crate::index::repo_profile::RepoArchetype::Cli;
         meta.file_mtimes
             .insert("src/foo.rs".to_string(), 1_700_000_000);
+        meta.dir_mtimes.insert("src".to_string(), 1_700_000_100);
+        meta.source_file_count = 7;
 
         save_meta(&meta, &meta_path).unwrap();
         let loaded = load_meta(&meta_path).unwrap();
 
-        assert_eq!(loaded.version, 3);
+        assert_eq!(loaded.version, 5);
         assert_eq!(loaded.file_mtimes["src/foo.rs"], 1_700_000_000);
+        assert_eq!(loaded.dir_mtimes["src"], 1_700_000_100);
+        assert_eq!(loaded.source_file_count, 7);
     }
 
     #[test]

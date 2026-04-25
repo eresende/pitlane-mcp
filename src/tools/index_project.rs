@@ -32,6 +32,12 @@ use crate::path_policy::resolve_project_path;
 /// Prevents accidental full-filesystem indexing (e.g. `index_project("/")`).
 pub const DEFAULT_MAX_FILES: usize = 100_000;
 
+#[derive(Default)]
+pub(crate) struct SourceSnapshot {
+    pub(crate) file_mtimes: HashMap<String, u64>,
+    pub(crate) dir_mtimes: HashMap<String, u64>,
+}
+
 pub struct IndexProjectParams {
     pub path: String,
     pub exclude: Option<Vec<String>>,
@@ -49,6 +55,7 @@ pub struct IndexProjectParams {
 }
 
 pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Value> {
+    let start = Instant::now();
     let canonical = resolve_project_path(&params.path)?;
 
     info!(path = %canonical.display(), "index_project: start");
@@ -72,7 +79,7 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
             if is_index_up_to_date(&canonical, &meta, &exclude) {
                 if let Ok(index) = crate::index::format::load_index(&index_path) {
                     let symbol_count = index.symbol_count();
-                    let file_count = index.file_count();
+                    let file_count = meta.source_file_count;
                     // Silently build the BM25 index if it is missing — this is the
                     // upgrade path for users who indexed before BM25 was added.
                     let tantivy_dir = idx_dir.join("tantivy");
@@ -137,6 +144,7 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
                         "file_count": file_count,
                         "index_path": index_path.display().to_string(),
                         "embeddings": embed_status,
+                        "elapsed_ms": start.elapsed().as_millis() as u64,
                     });
                     if let Some(ts) = embed_started_at {
                         response["embeddings_started_at"] = json!(ts);
@@ -266,9 +274,15 @@ async fn do_index_project(
     };
 
     let canonical_clone = canonical.clone();
+    let exclude_for_indexing = exclude.clone();
     let (index, file_count) = tokio::task::spawn_blocking(move || {
         let cb = make_cb();
-        indexer.index_project_with_progress(&canonical_clone, &exclude, max_files, cb.as_deref())
+        indexer.index_project_with_progress(
+            &canonical_clone,
+            &exclude_for_indexing,
+            max_files,
+            cb.as_deref(),
+        )
     })
     .await
     .context("Indexing task panicked")??;
@@ -290,24 +304,15 @@ async fn do_index_project(
 
     let symbol_count = index.symbol_count();
 
-    // Compute file mtimes
-    let mut file_mtimes = HashMap::new();
-    for file_path in index.by_file.keys() {
-        if let Ok(meta) = std::fs::metadata(file_path) {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                    file_mtimes.insert(file_path.display().to_string(), dur.as_secs());
-                }
-            }
-        }
-    }
-
     // Save index to disk, then populate the in-memory cache.
     save_index(&index, &index_path)?;
 
     let canonical_for_meta = canonical.clone();
+    let snapshot = current_source_snapshot(&canonical_for_meta, &exclude)?;
     let mut meta = build_index_meta(&canonical_for_meta, &index);
-    meta.file_mtimes = file_mtimes;
+    meta.file_mtimes = snapshot.file_mtimes;
+    meta.dir_mtimes = snapshot.dir_mtimes;
+    meta.source_file_count = file_count;
     save_meta(&meta, &meta_path)?;
 
     // Build the BM25 index. Invalidate any stale cached reader first so the
@@ -468,13 +473,21 @@ fn build_exclude_set(patterns: &[String]) -> anyhow::Result<GlobSet> {
     Ok(builder.build()?)
 }
 
-fn current_file_mtimes(
+fn modified_secs(path: &Path) -> anyhow::Result<u64> {
+    let meta = std::fs::metadata(path)?;
+    let modified = meta.modified()?;
+    Ok(modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64)
+}
+
+pub(crate) fn current_source_snapshot(
     project_path: &Path,
     exclude_patterns: &[String],
-) -> anyhow::Result<HashMap<String, u64>> {
+) -> anyhow::Result<SourceSnapshot> {
     let exclude_set = build_exclude_set(exclude_patterns)?;
-    let extra_excluded_dirs = extra_excluded_dir_names();
-    let mut file_mtimes = HashMap::new();
+    let mut snapshot = SourceSnapshot::default();
 
     for entry in WalkDir::new(project_path)
         .follow_links(false)
@@ -517,6 +530,14 @@ fn current_file_mtimes(
             }
         };
         let path = entry.path();
+        if entry.file_type().is_dir() {
+            let secs = match modified_secs(path) {
+                Ok(secs) => secs,
+                Err(_) => return Ok(SourceSnapshot::default()),
+            };
+            snapshot.dir_mtimes.insert(path.display().to_string(), secs);
+            continue;
+        }
         if !path.is_file() {
             continue;
         }
@@ -532,35 +553,68 @@ fn current_file_mtimes(
             continue;
         }
 
-        let meta = match std::fs::metadata(path) {
-            Ok(meta) => meta,
-            Err(_) => return Ok(HashMap::new()),
-        };
-        let modified = match meta.modified() {
-            Ok(modified) => modified,
-            Err(_) => return Ok(HashMap::new()),
-        };
-        let secs = match modified.duration_since(std::time::UNIX_EPOCH) {
-            Ok(dur) => dur.as_secs(),
-            Err(_) => return Ok(HashMap::new()),
+        let secs = match modified_secs(path) {
+            Ok(secs) => secs,
+            Err(_) => return Ok(SourceSnapshot::default()),
         };
 
-        file_mtimes.insert(path.display().to_string(), secs);
+        snapshot
+            .file_mtimes
+            .insert(path.display().to_string(), secs);
     }
 
-    Ok(file_mtimes)
+    Ok(snapshot)
+}
+
+#[cfg(test)]
+fn current_file_mtimes(
+    project_path: &Path,
+    exclude_patterns: &[String],
+) -> anyhow::Result<HashMap<String, u64>> {
+    Ok(current_source_snapshot(project_path, exclude_patterns)?.file_mtimes)
 }
 
 fn is_index_up_to_date(project_path: &Path, meta: &IndexMeta, exclude_patterns: &[String]) -> bool {
     if meta.project_path != project_path.display().to_string() {
         return false;
     }
-    if meta.version != 3 {
+    if meta.version != 5 {
         return false;
     }
 
-    match current_file_mtimes(project_path, exclude_patterns) {
-        Ok(current) => current == meta.file_mtimes,
+    for (path_str, stored_mtime) in &meta.file_mtimes {
+        let path = Path::new(path_str);
+        let secs = match modified_secs(path) {
+            Ok(secs) => secs,
+            Err(_) => return false,
+        };
+        if secs != *stored_mtime {
+            return false;
+        }
+    }
+
+    let mut dirs_unchanged = !meta.dir_mtimes.is_empty();
+    for (path_str, stored_mtime) in &meta.dir_mtimes {
+        let path = Path::new(path_str);
+        let secs = match modified_secs(path) {
+            Ok(secs) => secs,
+            Err(_) => {
+                dirs_unchanged = false;
+                break;
+            }
+        };
+        if secs != *stored_mtime {
+            dirs_unchanged = false;
+            break;
+        }
+    }
+
+    if dirs_unchanged {
+        return true;
+    }
+
+    match current_source_snapshot(project_path, exclude_patterns) {
+        Ok(current) => current.file_mtimes == meta.file_mtimes,
         Err(_) => false,
     }
 }
@@ -875,6 +929,53 @@ mod tests {
             "adding a new supported file must invalidate the cached index"
         );
         assert_eq!(refreshed["file_count"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn test_index_project_uses_cached_index_when_supported_file_has_no_symbols() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn foo() {}").unwrap();
+        std::fs::write(dir.path().join("comments_only.rs"), b"// no symbols here\n").unwrap();
+
+        let initial = index_project(IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(initial["status"], json!("indexed"));
+        assert_eq!(
+            initial["file_count"],
+            json!(2),
+            "indexed responses should report the eligible source-file count"
+        );
+
+        let cached = index_project(IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(false),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            cached["status"],
+            json!("cached"),
+            "supported source files without symbols should not force a rebuild"
+        );
+        assert_eq!(
+            cached["file_count"], initial["file_count"],
+            "cached responses should preserve the indexed source-file count"
+        );
     }
 
     #[tokio::test]
