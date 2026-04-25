@@ -25,6 +25,7 @@ use crate::sync_utils::{rw_read, rw_write};
 
 /// Tokenizer name used in the schema and registered on every index.
 const TOKENIZER_NAME: &str = "code";
+const READY_SENTINEL: &str = ".ready.v2";
 
 /// A tokenizer that splits on non-alphanumeric characters *and* at
 /// camelCase / digit-letter boundaries, then lowercases every token.
@@ -238,7 +239,7 @@ fn build_schema() -> Schema {
 // ---------------------------------------------------------------------------
 
 /// Build the tantivy BM25 index from scratch into `tantivy_dir`.
-/// Writes a `.ready` sentinel on success. Any partial write is cleaned up
+/// Writes a ready sentinel on success. Any partial write is cleaned up
 /// by removing the directory first.
 pub fn build(symbols: &HashMap<SymbolId, Symbol>, tantivy_dir: &Path) -> anyhow::Result<()> {
     if tantivy_dir.exists() {
@@ -275,17 +276,27 @@ pub fn build(symbols: &HashMap<SymbolId, Symbol>, tantivy_dir: &Path) -> anyhow:
     writer.commit()?;
     // Sentinel written last — a missing or partial build is retried next time.
     // Version suffix forces a rebuild when the tokenizer/schema changes.
-    std::fs::write(tantivy_dir.join(".ready.v2"), b"")?;
+    std::fs::write(tantivy_dir.join(READY_SENTINEL), b"")?;
     Ok(())
 }
 
 /// Builds the tantivy index only if the `.ready.v2` sentinel is absent, i.e.
 /// on first use after an upgrade or after a failed previous build.
 pub fn ensure(symbols: &HashMap<SymbolId, Symbol>, tantivy_dir: &Path) -> anyhow::Result<()> {
-    if tantivy_dir.join(".ready.v2").exists() {
+    if tantivy_dir.join(READY_SENTINEL).exists() {
         return Ok(());
     }
     build(symbols, tantivy_dir)
+}
+
+/// Mark the on-disk BM25 index stale so the next `ensure` call rebuilds it.
+pub fn mark_stale(tantivy_dir: &Path) -> anyhow::Result<()> {
+    let ready_path = tantivy_dir.join(READY_SENTINEL);
+    match std::fs::remove_file(&ready_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.into()),
+    }
 }
 
 // ---------------------------------------------------------------------------

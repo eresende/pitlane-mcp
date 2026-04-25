@@ -221,7 +221,7 @@ async fn full_resync(
         crate::cache::invalidate(root);
 
         if let Ok(tantivy_dir) = index_dir(root).map(|d| d.join("tantivy")) {
-            let _ = std::fs::remove_file(tantivy_dir.join(".ready"));
+            let _ = crate::index::bm25::mark_stale(&tantivy_dir);
         }
         crate::index::bm25::invalidate(root);
     }
@@ -288,10 +288,10 @@ async fn reindex_batch(
         crate::cache::invalidate(root);
 
         // Mark the BM25 index stale so the next BM25 search rebuilds it from
-        // the updated symbol set. We remove .ready rather than rebuilding here
+        // the updated symbol set. We remove the ready sentinel rather than rebuilding here
         // to avoid holding the write lock during tantivy I/O.
         if let Ok(tantivy_dir) = index_dir(root).map(|d| d.join("tantivy")) {
-            let _ = std::fs::remove_file(tantivy_dir.join(".ready"));
+            let _ = crate::index::bm25::mark_stale(&tantivy_dir);
         }
         crate::index::bm25::invalidate(root);
     }
@@ -417,6 +417,49 @@ mod tests {
         let names: Vec<_> = idx.symbols.values().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"updated"), "expected 'updated' in index");
         assert!(!names.contains(&"original"), "expected 'original' removed");
+    }
+
+    #[tokio::test]
+    async fn test_reindex_marks_bm25_stale() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, b"fn original() {}").unwrap();
+
+        let (index, indexer) = setup(&dir);
+        let tantivy_dir = index_dir(dir.path()).unwrap().join("tantivy");
+        {
+            let idx = index.read().await;
+            crate::index::bm25::build(&idx.symbols, &tantivy_dir).unwrap();
+        }
+
+        let original_hits =
+            crate::index::bm25::search("original", dir.path(), &tantivy_dir, None, None, 10)
+                .unwrap();
+        assert!(
+            original_hits.iter().any(|id| id.contains("original")),
+            "precondition: BM25 should find the original symbol"
+        );
+
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_loop(rx, &dir, indexer, index.clone());
+
+        std::fs::write(&file, b"fn updated() {}").unwrap();
+        tx.send(file).await.unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        {
+            let idx = index.read().await;
+            crate::index::bm25::ensure(&idx.symbols, &tantivy_dir).unwrap();
+        }
+
+        let updated_hits =
+            crate::index::bm25::search("updated", dir.path(), &tantivy_dir, None, None, 10)
+                .unwrap();
+        assert!(
+            updated_hits.iter().any(|id| id.contains("updated")),
+            "BM25 should rebuild after watcher reindex and find the updated symbol"
+        );
     }
 
     /// Multiple distinct paths sent in a burst are all batched into one flush.
