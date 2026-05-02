@@ -62,7 +62,7 @@ harness = false
 memory-bench = []
 
 [dependencies]
-rmcp = { version = "1.4", features = ["server", "transport-io"] }
+rmcp = { version = "1.6", features = ["server", "transport-io"] }
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
