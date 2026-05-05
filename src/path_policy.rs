@@ -8,6 +8,36 @@ use anyhow::Context;
 
 use crate::error::ToolError;
 
+/// Return metadata only for ordinary files, without following symlinks.
+///
+/// WalkDir is configured with `follow_links(false)`, but `Path::is_file()` and
+/// `std::fs::metadata()` still follow file symlinks. Use this helper at read
+/// boundaries so a symlink inside an allowed project cannot expose a file
+/// outside that project.
+pub fn regular_file_metadata(path: &Path) -> anyhow::Result<Option<std::fs::Metadata>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("Cannot inspect file: {}", path.display()));
+        }
+    };
+
+    if metadata.file_type().is_file() {
+        Ok(Some(metadata))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn is_regular_file(path: &Path) -> bool {
+    regular_file_metadata(path)
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 fn configured_allowed_roots() -> anyhow::Result<Option<Vec<PathBuf>>> {
     #[cfg(test)]
     let raw = test_allowed_roots_override().with(|slot| slot.borrow().clone());
@@ -176,5 +206,21 @@ mod tests {
             resolve_project_file(&dir.path().canonicalize().unwrap(), "../secret.rs").unwrap_err();
         let err = err.downcast::<ToolError>().unwrap();
         assert!(matches!(err, ToolError::AccessDenied { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_file_metadata_rejects_file_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("target.rs");
+        let link = dir.path().join("link.rs");
+        std::fs::write(&target, "fn target() {}\n").unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(regular_file_metadata(&target).unwrap().is_some());
+        assert!(regular_file_metadata(&link).unwrap().is_none());
+        assert!(!is_regular_file(&link));
     }
 }

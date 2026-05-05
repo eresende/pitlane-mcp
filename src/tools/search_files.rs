@@ -13,7 +13,7 @@ use crate::indexer::{
     default_exclude_patterns, extra_excluded_dir_names, is_excluded_dir_name_with_custom,
     load_gitignore_patterns,
 };
-use crate::path_policy::resolve_project_path;
+use crate::path_policy::{regular_file_metadata, resolve_project_path};
 use crate::session;
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
@@ -283,7 +283,7 @@ fn collect_files(
     {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_file() {
+        if !entry.file_type().is_file() || regular_file_metadata(path)?.is_none() {
             continue;
         }
         let rel = path.strip_prefix(root).unwrap_or(path);
@@ -486,6 +486,34 @@ mod tests {
         );
         assert_eq!(result["results"][0]["match_type"], json!("name_substring"));
         assert_eq!(result["results"][0]["path_role"], json!("test"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_search_files_skips_file_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let project_dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("SecretFeature.rs");
+        std::fs::write(&outside_file, "fn outside_secret() {}\n").unwrap();
+        std::fs::write(project_dir.path().join("lib.rs"), "fn inside() {}\n").unwrap();
+        symlink(&outside_file, project_dir.path().join("SecretFeature.rs")).unwrap();
+        let project = setup_indexed_project(&project_dir);
+
+        let result = search_files(SearchFilesParams {
+            project,
+            query: "SecretFeature".to_string(),
+            mode: None,
+            language: None,
+            file: None,
+            limit: None,
+            offset: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["count"], json!(0));
     }
 
     #[tokio::test]

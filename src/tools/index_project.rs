@@ -26,7 +26,7 @@ use crate::indexer::{
     is_excluded_dir_name_with_custom, is_supported_extension, load_gitignore_patterns, registry,
     warn_walkdir_error, Indexer,
 };
-use crate::path_policy::resolve_project_path;
+use crate::path_policy::{is_regular_file, resolve_project_path};
 
 /// Default cap on the number of eligible source files per walk.
 /// Prevents accidental full-filesystem indexing (e.g. `index_project("/")`).
@@ -474,7 +474,11 @@ fn build_exclude_set(patterns: &[String]) -> anyhow::Result<GlobSet> {
 }
 
 fn modified_secs(path: &Path) -> anyhow::Result<u64> {
-    let meta = std::fs::metadata(path)?;
+    let meta = std::fs::symlink_metadata(path)?;
+    let file_type = meta.file_type();
+    if !(file_type.is_file() || file_type.is_dir()) {
+        anyhow::bail!("Refusing to stat non-regular source path: {}", path.display());
+    }
     let modified = meta.modified()?;
     Ok(modified
         .duration_since(std::time::UNIX_EPOCH)
@@ -539,7 +543,7 @@ pub(crate) fn current_source_snapshot(
             snapshot.dir_mtimes.insert(path.display().to_string(), secs);
             continue;
         }
-        if !path.is_file() {
+        if !entry.file_type().is_file() {
             continue;
         }
 
@@ -585,6 +589,9 @@ fn is_index_up_to_date(project_path: &Path, meta: &IndexMeta, exclude_patterns: 
 
     for (path_str, stored_mtime) in &meta.file_mtimes {
         let path = Path::new(path_str);
+        if !is_regular_file(path) {
+            return false;
+        }
         let secs = match modified_secs(path) {
             Ok(secs) => secs,
             Err(_) => return false,
@@ -652,7 +659,20 @@ pub fn load_project_index(project: &str) -> anyhow::Result<Arc<SymbolIndex>> {
         .into());
     }
 
-    let index = crate::index::format::load_index(&index_path)?;
+    let mut index = crate::index::format::load_index(&index_path)?;
+    let before = index.symbol_count();
+    index.symbols.retain(|_, sym| {
+        sym.file.as_ref().starts_with(&canonical) && is_regular_file(sym.file.as_ref())
+    });
+    if index.symbol_count() != before {
+        tracing::warn!(
+            before,
+            after = index.symbol_count(),
+            "dropped unsafe or stale symbols while loading index"
+        );
+        index.rebuild_secondary_indexes();
+        index.graph = crate::graph::NavigationGraph::default();
+    }
     Ok(crate::cache::insert(canonical, index))
 }
 
@@ -661,8 +681,10 @@ mod tests {
     use super::*;
     use crate::embed::EmbedConfig;
     use crate::index::format::{index_dir, save_index};
+    use crate::indexer::language::{make_symbol_id, Language, Symbol, SymbolKind};
     use crate::indexer::{registry, Indexer};
     use crate::path_policy::set_test_allowed_roots;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     #[cfg(unix)]
@@ -775,6 +797,48 @@ mod tests {
 
         assert!(mtimes.keys().any(|path| path.ends_with("lib.rs")));
         assert_eq!(mtimes.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_project_index_drops_symlink_backed_symbols() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.rs");
+        std::fs::write(&outside_file, b"fn outside_secret() {}\n").unwrap();
+        let link = project.path().join("linked_secret.rs");
+        symlink(&outside_file, &link).unwrap();
+
+        let canonical = project.path().canonicalize().unwrap();
+        let mut index = SymbolIndex::new();
+        let rel = Path::new("linked_secret.rs");
+        let id = make_symbol_id(rel, "outside_secret", &SymbolKind::Function);
+        index.insert(Symbol {
+            id: id.clone(),
+            name: "outside_secret".to_string(),
+            qualified: "outside_secret".to_string(),
+            kind: SymbolKind::Function,
+            language: Language::Rust,
+            file: Arc::new(link),
+            byte_start: 0,
+            byte_end: 22,
+            line_start: 1,
+            line_end: 1,
+            signature: Some("fn outside_secret()".to_string()),
+            doc: None,
+        });
+
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        crate::cache::invalidate(&canonical);
+
+        let loaded = load_project_index(project.path().to_string_lossy().as_ref()).unwrap();
+
+        assert!(!loaded.symbols.contains_key(&id));
+        assert_eq!(loaded.symbol_count(), 0);
     }
 
     #[test]

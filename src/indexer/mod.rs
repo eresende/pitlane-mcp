@@ -30,6 +30,7 @@ use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use crate::index::SymbolIndex;
+use crate::path_policy::regular_file_metadata;
 use language::LanguageParser;
 
 /// Files larger than this are skipped to avoid memory exhaustion and parser hangs.
@@ -130,7 +131,7 @@ impl Indexer {
             })
             .filter(|e| {
                 let path = e.path();
-                if !path.is_file() {
+                if !e.file_type().is_file() {
                     return false;
                 }
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -145,7 +146,10 @@ impl Indexer {
                 if exclude_set.is_match(rel_str.as_ref()) || exclude_set.is_match(path) {
                     return false;
                 }
-                if e.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES {
+                let Some(metadata) = regular_file_metadata(path).ok().flatten() else {
+                    return false;
+                };
+                if metadata.len() > MAX_FILE_BYTES {
                     warn!(file = %rel_str, limit = MAX_FILE_BYTES, "skipping oversized file");
                     return false;
                 }
@@ -270,8 +274,11 @@ impl Indexer {
             None => return Ok(vec![]),
         };
 
-        // Guard against oversized files (e.g. minified bundles, generated data dicts)
-        let file_size = path.metadata().map(|m| m.len()).unwrap_or(0);
+        // Guard against symlinks and oversized files (e.g. minified bundles).
+        let Some(metadata) = regular_file_metadata(path)? else {
+            return Ok(vec![]);
+        };
+        let file_size = metadata.len();
         if file_size > MAX_FILE_BYTES {
             warn!(file = %path.display(), limit = MAX_FILE_BYTES, "skipping oversized file");
             return Ok(vec![]);
@@ -1124,6 +1131,26 @@ mod tests {
 
         // Previous symbols removed, oversized file produces no new symbols
         assert_eq!(index.symbol_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_index_project_skips_file_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.rs");
+        std::fs::write(&outside_file, b"fn outside_secret() {}\n").unwrap();
+        std::fs::write(project.path().join("lib.rs"), b"fn inside() {}\n").unwrap();
+        symlink(&outside_file, project.path().join("linked_secret.rs")).unwrap();
+
+        let (index, file_count) = create_indexer().index_project(project.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"inside"));
+        assert!(!names.contains(&"outside_secret"));
     }
 
     // ── load_gitignore_patterns ──────────────────────────────────────────────
