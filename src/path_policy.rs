@@ -19,8 +19,7 @@ pub fn regular_file_metadata(path: &Path) -> anyhow::Result<Option<std::fs::Meta
         Ok(metadata) => metadata,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
-            return Err(err)
-                .with_context(|| format!("Cannot inspect file: {}", path.display()));
+            return Err(err).with_context(|| format!("Cannot inspect file: {}", path.display()));
         }
     };
 

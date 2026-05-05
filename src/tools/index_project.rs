@@ -477,7 +477,10 @@ fn modified_secs(path: &Path) -> anyhow::Result<u64> {
     let meta = std::fs::symlink_metadata(path)?;
     let file_type = meta.file_type();
     if !(file_type.is_file() || file_type.is_dir()) {
-        anyhow::bail!("Refusing to stat non-regular source path: {}", path.display());
+        anyhow::bail!(
+            "Refusing to stat non-regular source path: {}",
+            path.display()
+        );
     }
     let modified = meta.modified()?;
     Ok(modified
