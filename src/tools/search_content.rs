@@ -11,7 +11,7 @@ use crate::indexer::{
     default_exclude_patterns, extra_excluded_dir_names, is_declaration_file,
     is_excluded_dir_name_with_custom, is_supported_extension, load_gitignore_patterns,
 };
-use crate::path_policy::resolve_project_path;
+use crate::path_policy::{regular_file_metadata, resolve_project_path};
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
@@ -284,10 +284,13 @@ fn collect_searchable_files(
     {
         let entry = entry?;
         let path = entry.path();
-        if !path.is_file() {
+        if !entry.file_type().is_file() {
             continue;
         }
-        if entry.metadata().map(|m| m.len()).unwrap_or(0) > MAX_FILE_BYTES {
+        let Some(metadata) = regular_file_metadata(path)? else {
+            continue;
+        };
+        if metadata.len() > MAX_FILE_BYTES {
             continue;
         }
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
@@ -413,6 +416,37 @@ mod tests {
             result["matches"][0]["before"][0]["text"],
             json!("fn hello_world() {")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_search_content_skips_file_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let project_dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.rs");
+        std::fs::write(&outside_file, "fn outside_secret() {}\n").unwrap();
+        std::fs::write(project_dir.path().join("lib.rs"), "fn inside() {}\n").unwrap();
+        symlink(&outside_file, project_dir.path().join("linked_secret.rs")).unwrap();
+        let project = setup_indexed_project(&project_dir);
+
+        let result = search_content(SearchContentParams {
+            project,
+            query: "outside_secret".to_string(),
+            regex: None,
+            case_sensitive: None,
+            language: Some("rust".to_string()),
+            file: None,
+            limit: None,
+            offset: None,
+            before_context: None,
+            after_context: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["count"], json!(0));
     }
 
     #[tokio::test]

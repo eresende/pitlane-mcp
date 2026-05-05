@@ -10,7 +10,7 @@ use crate::indexer::svelte::{collect_script_blocks, ScriptBlockLanguage};
 use crate::indexer::{
     is_supported_extension, tree_sitter_language_for_extension, warn_walkdir_error,
 };
-use crate::path_policy::resolve_project_path;
+use crate::path_policy::{is_regular_file, regular_file_metadata, resolve_project_path};
 use crate::tools::index_project::load_project_index;
 
 pub struct FindUsagesParams {
@@ -124,7 +124,7 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
 }
 
 fn should_search_path(path: &Path, project_path: &Path, scope_set: Option<&GlobSet>) -> bool {
-    if !path.is_file() {
+    if !is_regular_file(path) {
         return false;
     }
 
@@ -173,7 +173,10 @@ fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize,
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     // Skip oversized files (same guard as the indexer)
-    if path.metadata().map(|m| m.len()).unwrap_or(0) > 1024 * 1024 {
+    let Some(metadata) = regular_file_metadata(path)? else {
+        return Ok(vec![]);
+    };
+    if metadata.len() > 1024 * 1024 {
         return Ok(vec![]);
     }
 
@@ -520,6 +523,23 @@ mod tests {
         assert!(std::fs::metadata(&path).unwrap().len() > 1024 * 1024);
         let hits = search_file_ast(&path, "foo").unwrap();
         assert!(hits.is_empty(), "oversized file must be skipped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_search_file_ast_skips_file_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let project_dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let outside_file = outside.path().join("secret.rs");
+        std::fs::write(&outside_file, "fn outside_secret() {}\n").unwrap();
+        let link = project_dir.path().join("linked_secret.rs");
+        symlink(&outside_file, &link).unwrap();
+
+        let hits = search_file_ast(&link, "outside_secret").unwrap();
+
+        assert!(hits.is_empty(), "symlinked files must not be read");
     }
 
     // ── JavaScript ──────────────────────────────────────────────────────────
