@@ -32,10 +32,7 @@ pub fn regular_file_metadata(path: &Path) -> anyhow::Result<Option<std::fs::Meta
 }
 
 pub fn is_regular_file(path: &Path) -> bool {
-    regular_file_metadata(path)
-        .ok()
-        .flatten()
-        .is_some()
+    matches!(regular_file_metadata(path), Ok(Some(_)))
 }
 
 fn configured_allowed_roots() -> anyhow::Result<Option<Vec<PathBuf>>> {
