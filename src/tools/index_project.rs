@@ -26,7 +26,7 @@ use crate::indexer::{
     is_excluded_dir_name_with_custom, is_supported_extension, load_gitignore_patterns, registry,
     warn_walkdir_error, Indexer,
 };
-use crate::path_policy::{is_regular_file, resolve_project_path};
+use crate::path_policy::{canonical_regular_file, is_regular_file, resolve_project_path};
 
 /// Default cap on the number of eligible source files per walk.
 /// Prevents accidental full-filesystem indexing (e.g. `index_project("/")`).
@@ -665,7 +665,14 @@ pub fn load_project_index(project: &str) -> anyhow::Result<Arc<SymbolIndex>> {
     let mut index = crate::index::format::load_index(&index_path)?;
     let before = index.symbol_count();
     index.symbols.retain(|_, sym| {
-        sym.file.as_ref().starts_with(&canonical) && is_regular_file(sym.file.as_ref())
+        let Ok(Some(canonical_file)) = canonical_regular_file(sym.file.as_ref()) else {
+            return false;
+        };
+        if !canonical_file.starts_with(&canonical) {
+            return false;
+        }
+        sym.file = Arc::new(canonical_file);
+        true
     });
     if index.symbol_count() != before {
         tracing::warn!(
@@ -842,6 +849,38 @@ mod tests {
 
         assert!(!loaded.symbols.contains_key(&id));
         assert_eq!(loaded.symbol_count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_project_index_keeps_symbols_under_symlinked_parent() {
+        use std::os::unix::fs::symlink;
+
+        let real_parent = TempDir::new().unwrap();
+        let real_project = real_parent.path().join("project");
+        std::fs::create_dir(&real_project).unwrap();
+        std::fs::write(real_project.join("lib.rs"), b"fn inside() {}\n").unwrap();
+
+        let alias_parent = TempDir::new().unwrap();
+        let alias_root = alias_parent.path().join("alias_parent");
+        symlink(real_parent.path(), &alias_root).unwrap();
+        let alias_project = alias_root.join("project");
+
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(&alias_project, &[]).unwrap();
+        let canonical = alias_project.canonicalize().unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        std::fs::create_dir_all(&idx_dir).unwrap();
+        save_index(&index, &idx_dir.join("index.bin")).unwrap();
+        crate::cache::invalidate(&canonical);
+
+        let loaded = load_project_index(alias_project.to_string_lossy().as_ref()).unwrap();
+
+        assert_eq!(loaded.symbol_count(), 1);
+        assert!(loaded
+            .symbols
+            .values()
+            .all(|sym| sym.file.starts_with(&canonical)));
     }
 
     #[test]

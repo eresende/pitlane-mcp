@@ -34,6 +34,17 @@ pub fn is_regular_file(path: &Path) -> bool {
     matches!(regular_file_metadata(path), Ok(Some(_)))
 }
 
+/// Return a canonical path for an ordinary file, without allowing the final
+/// path component to be a symlink.
+pub fn canonical_regular_file(path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    if regular_file_metadata(path)?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(path.canonicalize().with_context(|| {
+        format!("Cannot canonicalize file: {}", path.display())
+    })?))
+}
+
 /// Open an ordinary source file without following a final symlink component.
 ///
 /// This closes the check-then-open race for source reads on supported platforms:
