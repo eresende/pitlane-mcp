@@ -8,6 +8,105 @@ use anyhow::Context;
 
 use crate::error::ToolError;
 
+/// Return metadata only for ordinary files, without following symlinks.
+///
+/// WalkDir is configured with `follow_links(false)`, but `Path::is_file()` and
+/// `std::fs::metadata()` still follow file symlinks. Use this helper at read
+/// boundaries so a symlink inside an allowed project cannot expose a file
+/// outside that project.
+pub fn regular_file_metadata(path: &Path) -> anyhow::Result<Option<std::fs::Metadata>> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(err).with_context(|| format!("Cannot inspect file: {}", path.display()));
+        }
+    };
+
+    if metadata.file_type().is_file() {
+        Ok(Some(metadata))
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn is_regular_file(path: &Path) -> bool {
+    matches!(regular_file_metadata(path), Ok(Some(_)))
+}
+
+/// Return a canonical path for an ordinary file, without allowing the final
+/// path component to be a symlink.
+pub fn canonical_regular_file(path: &Path) -> anyhow::Result<Option<PathBuf>> {
+    if regular_file_metadata(path)?.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(path.canonicalize().with_context(|| {
+        format!("Cannot canonicalize file: {}", path.display())
+    })?))
+}
+
+/// Open an ordinary source file without following a final symlink component.
+///
+/// This closes the check-then-open race for source reads on supported platforms:
+/// the open itself refuses or preserves final-component symlinks, then the
+/// opened handle is checked before any bytes are read.
+pub fn open_regular_file(path: &Path) -> anyhow::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .with_context(|| format!("Cannot open regular file: {}", path.display()))?;
+        if !file.metadata()?.file_type().is_file() {
+            anyhow::bail!("Refusing to read non-regular file: {}", path.display());
+        }
+        Ok(file)
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .with_context(|| format!("Cannot open regular file: {}", path.display()))?;
+        let file_type = file.metadata()?.file_type();
+        if !file_type.is_file() || file_type.is_symlink() {
+            anyhow::bail!("Refusing to read non-regular file: {}", path.display());
+        }
+        Ok(file)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        if regular_file_metadata(path)?.is_none() {
+            anyhow::bail!("Refusing to read non-regular file: {}", path.display());
+        }
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("Cannot open regular file: {}", path.display()))?;
+        if !file.metadata()?.file_type().is_file() {
+            anyhow::bail!("Refusing to read non-regular file: {}", path.display());
+        }
+        Ok(file)
+    }
+}
+
+pub fn read_regular_file(path: &Path) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut file = open_regular_file(path)?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
 fn configured_allowed_roots() -> anyhow::Result<Option<Vec<PathBuf>>> {
     #[cfg(test)]
     let raw = test_allowed_roots_override().with(|slot| slot.borrow().clone());
@@ -176,5 +275,36 @@ mod tests {
             resolve_project_file(&dir.path().canonicalize().unwrap(), "../secret.rs").unwrap_err();
         let err = err.downcast::<ToolError>().unwrap();
         assert!(matches!(err, ToolError::AccessDenied { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn regular_file_metadata_rejects_file_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("target.rs");
+        let link = dir.path().join("link.rs");
+        std::fs::write(&target, "fn target() {}\n").unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(regular_file_metadata(&target).unwrap().is_some());
+        assert!(regular_file_metadata(&link).unwrap().is_none());
+        assert!(!is_regular_file(&link));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_regular_file_rejects_in_project_file_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("target.rs");
+        let link = dir.path().join("link.rs");
+        std::fs::write(&target, "fn target() {}\n").unwrap();
+        symlink("target.rs", &link).unwrap();
+
+        assert!(read_regular_file(&target).is_ok());
+        assert!(read_regular_file(&link).is_err());
     }
 }

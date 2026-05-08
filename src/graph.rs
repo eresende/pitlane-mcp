@@ -6,6 +6,7 @@ use tree_sitter::{Node, Parser};
 
 use crate::index::SymbolIndex;
 use crate::indexer::language::{Language, Symbol, SymbolKind};
+use crate::path_policy::open_regular_file;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DirectReference {
@@ -66,7 +67,7 @@ pub fn extract_identifiers(source: &str) -> HashSet<&str> {
 }
 
 pub fn read_symbol_source(sym: &Symbol, include_context: bool) -> anyhow::Result<String> {
-    let mut file = std::fs::File::open(&*sym.file)
+    let mut file = open_regular_file(sym.file.as_ref())
         .map_err(|e| anyhow::anyhow!("Cannot open file {:?}: {}", sym.file, e))?;
 
     if include_context {
