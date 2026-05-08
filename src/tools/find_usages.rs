@@ -10,7 +10,9 @@ use crate::indexer::svelte::{collect_script_blocks, ScriptBlockLanguage};
 use crate::indexer::{
     is_supported_extension, tree_sitter_language_for_extension, warn_walkdir_error,
 };
-use crate::path_policy::{is_regular_file, regular_file_metadata, resolve_project_path};
+use crate::path_policy::{
+    is_regular_file, read_regular_file, regular_file_metadata, resolve_project_path,
+};
 use crate::tools::index_project::load_project_index;
 
 pub struct FindUsagesParams {
@@ -180,7 +182,7 @@ fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize,
         return Ok(vec![]);
     }
 
-    let source = std::fs::read(path)?;
+    let source = read_regular_file(path)?;
     let source_str = std::str::from_utf8(&source).unwrap_or("");
 
     // Fast pre-filter: if the symbol name doesn't appear anywhere in the file

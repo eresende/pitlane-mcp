@@ -11,7 +11,7 @@ use crate::indexer::{
     default_exclude_patterns, extra_excluded_dir_names, is_declaration_file,
     is_excluded_dir_name_with_custom, is_supported_extension, load_gitignore_patterns,
 };
-use crate::path_policy::{regular_file_metadata, resolve_project_path};
+use crate::path_policy::{read_regular_file, regular_file_metadata, resolve_project_path};
 use crate::tools::index_project::load_project_index;
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
@@ -101,7 +101,7 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
     let mut truncated = false;
 
     'files: for path in files {
-        let bytes = std::fs::read(&path)
+        let bytes = read_regular_file(&path)
             .with_context(|| format!("Failed to read file: {}", path.display()))?;
         let text = String::from_utf8_lossy(&bytes);
         let lines: Vec<&str> = text.lines().collect();

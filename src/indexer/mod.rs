@@ -30,7 +30,7 @@ use tracing::{debug, warn};
 use walkdir::WalkDir;
 
 use crate::index::SymbolIndex;
-use crate::path_policy::regular_file_metadata;
+use crate::path_policy::{read_regular_file, regular_file_metadata};
 use language::LanguageParser;
 
 /// Files larger than this are skipped to avoid memory exhaustion and parser hangs.
@@ -285,7 +285,7 @@ impl Indexer {
         }
 
         debug!(file = %path.display(), bytes = file_size, "parsing file");
-        let source = std::fs::read(path)?;
+        let source = read_regular_file(path)?;
         let lang_parser = &self.parsers[parser_idx];
 
         let mut ts_parser = tree_sitter::Parser::new();
@@ -1151,6 +1151,27 @@ mod tests {
         let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"inside"));
         assert!(!names.contains(&"outside_secret"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_index_project_skips_in_project_file_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempDir::new().unwrap();
+        std::fs::write(project.path().join("real.rs"), b"fn real() {}\n").unwrap();
+        symlink("real.rs", project.path().join("linked_real.rs")).unwrap();
+
+        let (index, file_count) = create_indexer().index_project(project.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 1);
+        let files: Vec<_> = index
+            .symbols
+            .values()
+            .map(|s| s.file.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(files.contains(&"real.rs".to_string()));
+        assert!(!files.contains(&"linked_real.rs".to_string()));
     }
 
     // ── load_gitignore_patterns ──────────────────────────────────────────────

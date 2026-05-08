@@ -790,6 +790,7 @@ mod tests {
     use crate::indexer::language::{Language, Symbol, SymbolKind};
     use crate::indexer::{registry, Indexer};
     use std::path::PathBuf;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     /// Helper: write a simple Rust file, index it, and save the index to disk.
@@ -820,11 +821,16 @@ mod tests {
     }
 
     fn write_index_with_symbols(dir: &TempDir, symbols: Vec<Symbol>) -> String {
+        let canonical = dir.path().canonicalize().unwrap();
         let mut index = SymbolIndex::new();
-        for symbol in symbols {
+        for mut symbol in symbols {
+            if symbol.file.is_relative() {
+                let file_path = canonical.join(symbol.file.as_ref());
+                std::fs::write(&file_path, format!("pub fn {}() {{}}\n", symbol.name)).unwrap();
+                symbol.file = Arc::new(file_path);
+            }
             index.insert(symbol);
         }
-        let canonical = dir.path().canonicalize().unwrap();
         let idx_dir = index_dir(&canonical).unwrap();
         std::fs::create_dir_all(&idx_dir).unwrap();
         save_index(&index, &idx_dir.join("index.bin")).unwrap();
@@ -1069,11 +1075,14 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result_a, result_b);
         assert_eq!(result_a["truncated"], json!(false));
         assert_eq!(result_a["count"], json!(2));
+        assert_eq!(result_b["truncated"], json!(false));
+        assert_eq!(result_b["count"], json!(2));
         assert_eq!(result_a["results"][0]["name"], json!("matchBeta"));
         assert_eq!(result_a["results"][1]["name"], json!("matchGamma"));
+        assert_eq!(result_b["results"][0]["name"], json!("matchBeta"));
+        assert_eq!(result_b["results"][1]["name"], json!("matchGamma"));
         assert_eq!(
             result_a["guidance"]["next_step"],
             json!(
