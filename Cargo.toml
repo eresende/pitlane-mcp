@@ -89,7 +89,7 @@ libc = "0.2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
-tree-sitter-swift = "0.7.1"
+tree-sitter-swift = "0.7.2"
 tree-sitter-objc = "3.0.2"
 tree-sitter-php = "0.24"
 tree-sitter-zig = "1.1.2"
