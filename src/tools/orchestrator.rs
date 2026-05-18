@@ -2723,9 +2723,20 @@ fn contains_regex_meta(query: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
     use crate::tools::index_project::{index_project, load_project_index, IndexProjectParams};
     use tempfile::TempDir;
+
+    static TEST_SESSION_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn unique_session_project(suffix: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "pitlane-orchestrator-{suffix}-{}",
+            TEST_SESSION_PROJECT_ID.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     async fn setup_project(dir: &TempDir) -> String {
         let project = dir.path().to_string_lossy().to_string();
@@ -2908,9 +2919,9 @@ mod tests {
 
     #[test]
     fn test_build_locate_session_state_reports_novelty_bias() {
-        let project = std::path::Path::new("/tmp/orchestrator-locate-session-state");
+        let project = unique_session_project("locate-session-state");
         crate::session::record_symbol(
-            project,
+            &project,
             "known_handler",
             Some(std::path::Path::new("handlers/http.rs")),
         );
@@ -2930,9 +2941,9 @@ mod tests {
                 "path_role": "handler",
             }),
         ];
-        let novelty_bias = promote_nearby_unseen_locate_candidate(&mut results, project);
+        let novelty_bias = promote_nearby_unseen_locate_candidate(&mut results, &project);
 
-        let state = build_locate_session_state(&results, project, novelty_bias).unwrap();
+        let state = build_locate_session_state(&results, &project, novelty_bias).unwrap();
 
         assert_eq!(state["novelty_bias_applied"], json!(true));
         assert_eq!(state["top_target_seen"], json!(false));
@@ -2941,7 +2952,7 @@ mod tests {
 
     #[test]
     fn test_rerank_locate_symbol_results_prefers_entrypoints_for_startup_queries() {
-        let project = std::path::Path::new("/tmp/orchestrator-rerank-startup");
+        let project = unique_session_project("rerank-startup");
         let profile = RepoProfile {
             archetype: crate::index::repo_profile::RepoArchetype::Cli,
             file_roles: HashMap::from([
@@ -2977,16 +2988,16 @@ mod tests {
             }),
         ];
 
-        rerank_locate_symbol_results(&mut results, project, "startup flow", Some(&profile));
+        rerank_locate_symbol_results(&mut results, &project, "startup flow", Some(&profile));
 
         assert_eq!(results[0]["name"], json!("main"));
     }
 
     #[test]
     fn test_rerank_locate_symbol_results_prefers_recent_symbol_in_same_subsystem() {
-        let project = std::path::Path::new("/tmp/orchestrator-rerank-session-symbol");
+        let project = unique_session_project("rerank-session-symbol");
         crate::session::record_symbol(
-            project,
+            &project,
             "config_loader",
             Some(std::path::Path::new("config/settings.rs")),
         );
@@ -3022,7 +3033,7 @@ mod tests {
             }),
         ];
 
-        rerank_locate_symbol_results(&mut results, project, "config flow", Some(&profile));
+        rerank_locate_symbol_results(&mut results, &project, "config flow", Some(&profile));
 
         assert_eq!(results[0]["name"], json!("config_loader"));
     }
@@ -3088,8 +3099,8 @@ mod tests {
 
     #[test]
     fn test_rerank_project_directories_prefers_recent_subsystem_focus() {
-        let project = std::path::Path::new("/tmp/orchestrator-rerank-session-dir");
-        crate::session::record_file(project, std::path::Path::new("handlers/http.rs"));
+        let project = unique_session_project("rerank-session-dir");
+        crate::session::record_file(&project, std::path::Path::new("handlers/http.rs"));
         let repo_map = json!({
             "top_roles": [
                 { "role": "config", "count": 1 },
@@ -3102,16 +3113,16 @@ mod tests {
             json!({ "kind": "directory", "dir": "handlers", "file": "handlers" }),
         ];
 
-        rerank_project_directories(&mut results, project, "overview", &repo_map);
+        rerank_project_directories(&mut results, &project, "overview", &repo_map);
 
         assert_eq!(results[0]["dir"], json!("handlers"));
     }
 
     #[test]
     fn test_promote_nearby_unseen_locate_candidate_prefers_unseen_sibling() {
-        let project = std::path::Path::new("/tmp/orchestrator-locate-novelty");
+        let project = unique_session_project("locate-novelty");
         crate::session::record_symbol(
-            project,
+            &project,
             "known_handler",
             Some(std::path::Path::new("handlers/http.rs")),
         );
@@ -3139,7 +3150,7 @@ mod tests {
             }),
         ];
 
-        let promoted = promote_nearby_unseen_locate_candidate(&mut results, project);
+        let promoted = promote_nearby_unseen_locate_candidate(&mut results, &project);
 
         assert!(promoted);
         assert_eq!(results[0]["name"], json!("fresh_handler"));

@@ -328,7 +328,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             // Sub-task 5: verify dimension consistency
             if store.dimension() != Some(query_vec.len()) {
                 return Err(anyhow::anyhow!(
-                    "Embedding dimension mismatch: store has dimension {:?} but query produced dimension {}. Re-run index_project to rebuild embeddings.",
+                    "Embedding dimension mismatch: store has dimension {:?} but query produced dimension {}. Re-run ensure_project_ready with force=true to rebuild embeddings.",
                     store.dimension(),
                     query_vec.len()
                 ));

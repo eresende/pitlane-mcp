@@ -7,11 +7,12 @@ use std::sync::{
 
 use serde_json::Value;
 
-use crate::sync_utils::{rw_read, rw_write};
+use crate::sync_utils::rw_write;
 
 const MAX_RECENT_ITEMS: usize = 16;
 const RECENT_QUERY_LIMIT: usize = 12;
 const MAX_INVESTIGATE_CACHE: usize = 8;
+const MAX_PROJECT_SESSIONS: usize = 128;
 
 #[derive(Default)]
 struct ProjectSessionState {
@@ -24,13 +25,18 @@ struct ProjectSessionState {
     investigate_cache: HashMap<String, (Value, u64)>,
 }
 
+struct SessionEntry {
+    state: ProjectSessionState,
+    last_tick: u64,
+}
+
 pub struct ContentObservation {
     pub content_seen: bool,
     pub target_seen: bool,
     pub changed_since_last_read: bool,
 }
 
-static SESSION: LazyLock<RwLock<HashMap<PathBuf, ProjectSessionState>>> =
+static SESSION: LazyLock<RwLock<HashMap<PathBuf, SessionEntry>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 static CLOCK: AtomicU64 = AtomicU64::new(1);
 
@@ -49,18 +55,54 @@ fn tokenize(text: &str) -> Vec<String> {
         .collect()
 }
 
+fn touch_project_entry(guard: &mut HashMap<PathBuf, SessionEntry>, project: &Path) {
+    let tick = next_tick();
+    let entry = guard
+        .entry(project.to_path_buf())
+        .or_insert_with(|| SessionEntry {
+            state: ProjectSessionState::default(),
+            last_tick: tick,
+        });
+    entry.last_tick = tick;
+}
+
+fn prune_project_sessions(guard: &mut HashMap<PathBuf, SessionEntry>) {
+    if guard.len() <= MAX_PROJECT_SESSIONS {
+        return;
+    }
+    let mut entries: Vec<(PathBuf, u64)> = guard
+        .iter()
+        .map(|(path, entry)| (path.clone(), entry.last_tick))
+        .collect();
+    entries.sort_by_key(|(_, tick)| *tick);
+    let remove_count = guard.len() - MAX_PROJECT_SESSIONS;
+    for (path, _) in entries.into_iter().take(remove_count) {
+        guard.remove(&path);
+    }
+}
+
 fn with_state_mut(project: &Path, f: impl FnOnce(&mut ProjectSessionState)) {
     let mut guard = rw_write(&SESSION);
-    let state = guard.entry(project.to_path_buf()).or_default();
+    touch_project_entry(&mut guard, project);
+    let state = &mut guard
+        .get_mut(project)
+        .expect("project session exists")
+        .state;
     f(state);
+    prune_project_sessions(&mut guard);
 }
 
 fn with_state<T>(project: &Path, f: impl FnOnce(&ProjectSessionState) -> T) -> T {
-    let guard = rw_read(&SESSION);
-    match guard.get(project) {
-        Some(state) => f(state),
+    let mut guard = rw_write(&SESSION);
+    let result = match guard.get_mut(project) {
+        Some(entry) => {
+            entry.last_tick = next_tick();
+            f(&entry.state)
+        }
         None => f(&ProjectSessionState::default()),
-    }
+    };
+    prune_project_sessions(&mut guard);
+    result
 }
 
 pub fn record_query(project: &Path, query: &str) {
@@ -393,7 +435,7 @@ mod tests {
     use super::*;
 
     fn unique_project(prefix: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(format!("/tmp/{prefix}-{}", next_tick()))
+        std::env::temp_dir().join(format!("{prefix}-{}", next_tick()))
     }
 
     #[test]
@@ -456,6 +498,21 @@ mod tests {
         assert!(!has_seen_symbol(&project, "def"));
         assert!(has_seen_file(&project, Path::new("src/lib.rs")));
         assert!(!has_seen_file(&project, Path::new("src/other.rs")));
+    }
+
+    #[test]
+    fn test_project_sessions_are_lru_pruned() {
+        for i in 0..=MAX_PROJECT_SESSIONS {
+            let project = unique_project(&format!("session-lru-{i}"));
+            record_query(&project, &format!("query-{i}"));
+        }
+
+        let guard = rw_write(&SESSION);
+        assert!(
+            guard.len() <= MAX_PROJECT_SESSIONS,
+            "expected at most {MAX_PROJECT_SESSIONS} project sessions, got {}",
+            guard.len()
+        );
     }
 
     #[test]
