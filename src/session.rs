@@ -5,10 +5,13 @@ use std::sync::{
     LazyLock, RwLock,
 };
 
+use serde_json::Value;
+
 use crate::sync_utils::{rw_read, rw_write};
 
 const MAX_RECENT_ITEMS: usize = 16;
 const RECENT_QUERY_LIMIT: usize = 12;
+const MAX_INVESTIGATE_CACHE: usize = 8;
 
 #[derive(Default)]
 struct ProjectSessionState {
@@ -18,6 +21,7 @@ struct ProjectSessionState {
     recent_queries: VecDeque<(String, u64)>,
     recent_content: HashMap<String, u64>,
     recent_target_content: HashMap<String, (String, u64)>,
+    investigate_cache: HashMap<String, (Value, u64)>,
 }
 
 pub struct ContentObservation {
@@ -120,6 +124,27 @@ pub fn record_symbols(project: &Path, symbols: impl IntoIterator<Item = (String,
 
 pub fn record_content(project: &Path, namespace: &str, identity: &str, content: &str) -> bool {
     observe_content(project, namespace, identity, content).content_seen
+}
+
+/// Return a cached `investigate` payload for this session, if one exists.
+pub fn get_investigate_cache(project: &Path, cache_key: &str) -> Option<Value> {
+    with_state(project, |state| {
+        state
+            .investigate_cache
+            .get(cache_key)
+            .map(|(response, _)| response.clone())
+    })
+}
+
+/// Store a successful `investigate` payload for repeat lookups in this session.
+pub fn store_investigate_cache(project: &Path, cache_key: &str, response: Value) {
+    let tick = next_tick();
+    with_state_mut(project, |state| {
+        state
+            .investigate_cache
+            .insert(cache_key.to_string(), (response, tick));
+        prune_investigate_cache(state);
+    });
 }
 
 pub fn observe_content(
@@ -275,6 +300,23 @@ fn score_recent(last_seen: Option<u64>, now: u64, base: i32) -> i32 {
     (base - age * 2).max(0)
 }
 
+fn prune_investigate_cache(state: &mut ProjectSessionState) {
+    if state.investigate_cache.len() <= MAX_INVESTIGATE_CACHE {
+        return;
+    }
+    let mut entries: Vec<(String, Value, u64)> = state
+        .investigate_cache
+        .iter()
+        .map(|(k, (response, tick))| (k.clone(), response.clone(), *tick))
+        .collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.2));
+    state.investigate_cache = entries
+        .into_iter()
+        .take(MAX_INVESTIGATE_CACHE)
+        .map(|(k, response, tick)| (k, (response, tick)))
+        .collect();
+}
+
 fn prune_recent(state: &mut ProjectSessionState) {
     if state.recent_files.len() > MAX_RECENT_ITEMS {
         let mut entries: Vec<(String, u64)> = state
@@ -414,5 +456,22 @@ mod tests {
         assert!(!has_seen_symbol(&project, "def"));
         assert!(has_seen_file(&project, Path::new("src/lib.rs")));
         assert!(!has_seen_file(&project, Path::new("src/other.rs")));
+    }
+
+    #[test]
+    fn test_investigate_cache_round_trip() {
+        let project = unique_project("session-test-investigate");
+        let key = "investigate:gitignore handling";
+        let payload = serde_json::json!({
+            "query": "how does gitignore work",
+            "answer": "## Investigation",
+            "symbols_read": 2,
+        });
+
+        assert!(get_investigate_cache(&project, key).is_none());
+        store_investigate_cache(&project, key, payload.clone());
+        let cached = get_investigate_cache(&project, key).expect("cached payload");
+        assert_eq!(cached["answer"], payload["answer"]);
+        assert_eq!(cached["symbols_read"], payload["symbols_read"]);
     }
 }
