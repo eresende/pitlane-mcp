@@ -211,7 +211,30 @@ fn normalize_investigate_key(query: &str) -> String {
     words.sort();
     words.dedup();
     words.truncate(6);
-    words.join(" ")
+    let key = words.join(" ");
+    if key.is_empty() {
+        query.trim().to_lowercase()
+    } else {
+        key
+    }
+}
+
+fn investigate_cache_key(query: &str) -> String {
+    format!("investigate:{}", normalize_investigate_key(query))
+}
+
+fn mark_investigate_repeated(mut response: Value) -> Value {
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("repeated".to_string(), json!(true));
+        obj.insert(
+            "guidance".to_string(),
+            json!(
+                "Returning the cached investigation from this session. \
+                 Use read_code_unit(symbol_id=...) if you need more detail on a specific symbol."
+            ),
+        );
+    }
+    response
 }
 
 pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
@@ -221,21 +244,9 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         return Err(anyhow::anyhow!("query must not be empty"));
     }
 
-    // Check if a similar question was already investigated in this session.
-    // Normalize the key to catch rephrased queries.
-    let normalized_key = normalize_investigate_key(&query);
-    let investigate_key = format!("investigate:{}", normalized_key);
-    let observation = session::observe_content(&canonical, "investigate", &investigate_key, &query);
-    if observation.content_seen {
-        return Ok(json!({
-            "query": query,
-            "answer": "You already investigated a similar question. \
-                 Use the previous answer. Do NOT call investigate again. \
-                 If you need a specific symbol, use read_code_unit(symbol_id=...) directly.",
-            "symbols_read": 0,
-            "files_covered": 0,
-            "repeated": true,
-        }));
+    let cache_key = investigate_cache_key(&query);
+    if let Some(cached) = session::get_investigate_cache(&canonical, &cache_key) {
+        return Ok(mark_investigate_repeated(cached));
     }
 
     let index = load_project_index(&params.project)?;
@@ -544,10 +555,117 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
 
     session::record_query(&canonical, &query);
 
-    Ok(json!({
+    let response = json!({
         "query": query,
         "answer": answer,
         "symbols_read": symbols_seen.len(),
         "files_covered": files_seen.len(),
-    }))
+        "repeated": false,
+    });
+    session::store_investigate_cache(&canonical, &cache_key, response.clone());
+
+    Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::index_project::{index_project, IndexProjectParams};
+    use tempfile::TempDir;
+
+    #[test]
+    fn test_normalize_investigate_key_dedupes_rephrasings() {
+        let a = normalize_investigate_key("How does gitignore handling work?");
+        let b = normalize_investigate_key("gitignore handling work");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_normalize_investigate_key_falls_back_to_raw_query() {
+        let key = normalize_investigate_key("how to");
+        assert_eq!(key, "how to");
+    }
+
+    async fn setup_project(dir: &TempDir) -> String {
+        let project = dir.path().to_string_lossy().to_string();
+        index_project(IndexProjectParams {
+            path: project.clone(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+        project
+    }
+
+    #[tokio::test]
+    async fn test_investigate_repeat_returns_cached_answer() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn gitignore_match() {}\npub fn other() {}\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let first = investigate(InvestigateParams {
+            project: project.clone(),
+            query: "gitignore_match".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(first["repeated"], json!(false));
+        assert!(first["answer"]
+            .as_str()
+            .unwrap()
+            .contains("gitignore_match"));
+
+        let second = investigate(InvestigateParams {
+            project,
+            query: "find gitignore_match".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(second["repeated"], json!(true));
+        assert_eq!(second["answer"], first["answer"]);
+        assert_eq!(second["symbols_read"], first["symbols_read"]);
+        assert!(second["guidance"].as_str().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_investigate_failure_does_not_block_retry() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+        let project = dir.path().to_string_lossy().to_string();
+
+        let err = investigate(InvestigateParams {
+            project: project.clone(),
+            query: "hello".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("indexed"));
+
+        let ready = setup_project(&dir).await;
+        let ok = investigate(InvestigateParams {
+            project: ready,
+            query: "hello".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(ok["repeated"], json!(false));
+        assert!(ok["symbols_read"].as_u64().unwrap_or(0) > 0);
+    }
 }
