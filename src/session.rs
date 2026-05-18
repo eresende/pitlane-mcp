@@ -232,21 +232,21 @@ pub fn has_seen_symbol(project: &Path, symbol_id: &str) -> bool {
 
 pub fn file_boost(project: &Path, file: &Path) -> i32 {
     with_state(project, |state| {
-        let now = CLOCK.load(Ordering::Relaxed);
+        let now = state_recent_tick(state);
         file_boost_from_state(state, file, now)
     })
 }
 
 pub fn directory_boost(project: &Path, dir: &Path) -> i32 {
     with_state(project, |state| {
-        let now = CLOCK.load(Ordering::Relaxed);
+        let now = state_recent_tick(state);
         directory_boost_from_state(state, dir, now)
     })
 }
 
 pub fn symbol_boost(project: &Path, symbol_id: &str, file: Option<&Path>) -> i32 {
     with_state(project, |state| {
-        let now = CLOCK.load(Ordering::Relaxed);
+        let now = state_recent_tick(state);
         let mut boost = score_recent(state.recent_symbols.get(symbol_id).copied(), now, 20);
         if let Some(file) = file {
             boost = boost.max(file_boost_from_state(state, file, now));
@@ -258,6 +258,21 @@ pub fn symbol_boost(project: &Path, symbol_id: &str, file: Option<&Path>) -> i32
 
 pub fn query_boost(project: &Path, current_query: &str) -> i32 {
     with_state(project, |state| query_overlap_boost(state, current_query))
+}
+
+fn state_recent_tick(state: &ProjectSessionState) -> u64 {
+    state
+        .recent_files
+        .values()
+        .chain(state.recent_symbols.values())
+        .chain(state.recent_dirs.values())
+        .chain(state.recent_queries.iter().map(|(_, tick)| tick))
+        .chain(state.recent_content.values())
+        .chain(state.recent_target_content.values().map(|(_, tick)| tick))
+        .chain(state.investigate_cache.values().map(|(_, tick)| tick))
+        .copied()
+        .max()
+        .unwrap_or_else(|| CLOCK.load(Ordering::Relaxed))
 }
 
 fn query_overlap_boost(state: &ProjectSessionState, current: &str) -> i32 {
