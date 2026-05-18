@@ -156,6 +156,27 @@ fn ensure_allowed_root(path: &Path) -> anyhow::Result<()> {
     .into())
 }
 
+/// Format a file path relative to the project root for agent-facing summaries.
+pub fn display_path_relative_to_project(project_root: &Path, file: &Path) -> String {
+    let file = file.to_string_lossy().replace('\\', "/");
+    let root = project_root
+        .to_string_lossy()
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+
+    if file == root {
+        return ".".to_string();
+    }
+
+    let prefix = format!("{root}/");
+    if let Some(rest) = file.strip_prefix(&prefix) {
+        return rest.to_string();
+    }
+
+    file
+}
+
 pub fn resolve_project_path(project: &str) -> anyhow::Result<PathBuf> {
     let canonical = Path::new(project)
         .canonicalize()
@@ -234,6 +255,14 @@ mod tests {
     use super::*;
 
     use tempfile::TempDir;
+
+    #[test]
+    fn display_path_relative_to_project_strips_root_prefix() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let file = root.join("src/lib.rs");
+        assert_eq!(display_path_relative_to_project(&root, &file), "src/lib.rs");
+    }
 
     #[test]
     fn resolve_project_path_allows_unset_env() {

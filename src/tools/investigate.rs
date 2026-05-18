@@ -12,7 +12,7 @@ use crate::embed::EmbedConfig;
 use crate::graph::read_symbol_source;
 use crate::index::format::load_project_meta;
 use crate::index::repo_profile::profile_entrypoints;
-use crate::path_policy::resolve_project_path;
+use crate::path_policy::{display_path_relative_to_project, resolve_project_path};
 use crate::session;
 use crate::tools::index_project::load_project_index;
 use crate::tools::orchestrator::{locate_code, LocateCodeParams};
@@ -479,11 +479,7 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         };
 
         let file_str = sym.file.to_string_lossy().replace('\\', "/");
-        let short_file = file_str
-            .rfind("/crates/")
-            .or_else(|| file_str.rfind("/src/"))
-            .map(|pos| &file_str[pos + 1..])
-            .unwrap_or(&file_str);
+        let short_file = display_path_relative_to_project(&canonical, sym.file.as_ref());
 
         let source = match read_symbol_source(sym, false) {
             Ok(s) => s,

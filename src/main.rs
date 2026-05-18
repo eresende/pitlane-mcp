@@ -15,7 +15,8 @@ use pitlane_mcp::tools::watch_project::WatcherRegistry;
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnsureProjectReadyRequest {
-    /// Absolute or relative path to the project root
+    /// Absolute or relative path to the project root. The MCP field `project` is accepted as an alias.
+    #[serde(alias = "project")]
     pub path: String,
     /// Glob patterns to exclude. Built-in defaults apply, and PITLANE_EXCLUDE_DIRS adds process-wide directory-name excludes.
     pub exclude: Option<Vec<String>>,

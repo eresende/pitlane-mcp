@@ -793,7 +793,7 @@ mod tests {
 
         assert_eq!(tool_err.code(), "PROJECT_NOT_INDEXED");
         assert!(tool_err.to_string().contains(project.as_str()));
-        assert_eq!(tool_err.hint(), "Call index_project first.");
+        assert_eq!(tool_err.hint(), "Call ensure_project_ready first.");
     }
 
     #[cfg(unix)]

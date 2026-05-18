@@ -299,7 +299,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             // Sub-task 3: error when store is empty
             if store.vectors.is_empty() {
                 return Err(anyhow::anyhow!(
-                    "No embeddings found for this project. Run index_project first"
+                    "No embeddings found for this project. Run ensure_project_ready first"
                 ));
             }
 
@@ -911,7 +911,7 @@ mod tests {
         let err = search_symbols(params).await.unwrap_err();
         assert_eq!(
             err.to_string(),
-            "No embeddings found for this project. Run index_project first",
+            "No embeddings found for this project. Run ensure_project_ready first",
             "error message must match Requirement 5.4 exactly"
         );
     }

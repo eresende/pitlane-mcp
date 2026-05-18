@@ -11,7 +11,7 @@ use crate::index::format::load_project_meta;
 use crate::index::repo_profile::{
     compact_repo_map, profile_entrypoints, role_label, summarize_role_counts, RepoProfile,
 };
-use crate::path_policy::resolve_project_path;
+use crate::path_policy::{display_path_relative_to_project, resolve_project_path};
 use crate::session;
 use crate::tools::get_file_outline::{get_file_outline, GetFileOutlineParams};
 use crate::tools::get_lines::{get_lines, GetLinesParams};
@@ -179,12 +179,7 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         for (i, r) in results.iter().enumerate() {
             let name = r["name"].as_str().unwrap_or("?");
             let file = r["file"].as_str().unwrap_or("?");
-            // Strip the project prefix from file paths for readability
-            let short_file = file
-                .rfind("/crates/")
-                .or_else(|| file.rfind("/src/"))
-                .map(|pos| &file[pos + 1..])
-                .unwrap_or(file);
+            let short_file = display_path_relative_to_project(&canonical, Path::new(file));
             let sig = r["signature"].as_str().unwrap_or("");
             let kind = r["symbol_kind"]
                 .as_str()
@@ -665,11 +660,7 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
         for (i, sym) in important_symbols.iter().enumerate() {
             let name = sym["name"].as_str().unwrap_or("?");
             let file = sym["file"].as_str().unwrap_or("?");
-            let short_file = file
-                .rfind("/crates/")
-                .or_else(|| file.rfind("/src/"))
-                .map(|pos| &file[pos + 1..])
-                .unwrap_or(file);
+            let short_file = display_path_relative_to_project(&canonical, Path::new(file));
             let category = sym["category"].as_str().unwrap_or("?");
             let sig = sym["signature"].as_str().unwrap_or("");
             let id = sym["id"].as_str().unwrap_or("");

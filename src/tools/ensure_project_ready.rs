@@ -32,7 +32,15 @@ pub async fn ensure_project_ready(params: EnsureProjectReadyParams) -> anyhow::R
 
     let embeddings_status = indexed["embeddings"].as_str().unwrap_or("disabled");
 
-    Ok(json!({
+    let mut ignored_parameters = Vec::new();
+    if params.poll_interval_ms.is_some() {
+        ignored_parameters.push("poll_interval_ms");
+    }
+    if params.timeout_secs.is_some() {
+        ignored_parameters.push("timeout_secs");
+    }
+
+    let mut response = json!({
         "status": "ready",
         "index": indexed,
         "waited_for_embeddings": false,
@@ -54,7 +62,16 @@ pub async fn ensure_project_ready(params: EnsureProjectReadyParams) -> anyhow::R
             },
             "avoid": "Avoid blocking startup on wait_for_embeddings unless your client explicitly needs semantic search to be ready."
         }
-    }))
+    });
+
+    if !ignored_parameters.is_empty() {
+        response["ignored_parameters"] = json!(ignored_parameters);
+        response["compatibility"] = json!({
+            "note": "poll_interval_ms and timeout_secs are accepted for compatibility but ignored; ensure_project_ready does not wait for embeddings. Use wait_for_embeddings when blocking is required."
+        });
+    }
+
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -93,5 +110,29 @@ mod tests {
             result["guidance"]["avoid"],
             json!("Avoid blocking startup on wait_for_embeddings unless your client explicitly needs semantic search to be ready.")
         );
+    }
+
+    #[tokio::test]
+    async fn test_ensure_project_ready_reports_ignored_wait_parameters() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn hello() {}\n").unwrap();
+
+        let result = ensure_project_ready(EnsureProjectReadyParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            poll_interval_ms: Some(500),
+            timeout_secs: Some(60),
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+
+        let ignored = result["ignored_parameters"].as_array().unwrap();
+        assert_eq!(ignored.len(), 2);
+        assert!(result["compatibility"]["note"].is_string());
     }
 }

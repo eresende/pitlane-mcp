@@ -6,7 +6,7 @@
 ///   "error": {
 ///     "code": "PROJECT_NOT_INDEXED",
 ///     "message": "Project '/tmp/foo' has not been indexed yet.",
-///     "hint": "Call index_project first."
+///     "hint": "Call ensure_project_ready first."
 ///   }
 /// }
 /// ```
@@ -45,7 +45,7 @@ impl ToolError {
 
     pub fn hint(&self) -> &'static str {
         match self {
-            ToolError::ProjectNotIndexed { .. } => "Call index_project first.",
+            ToolError::ProjectNotIndexed { .. } => "Call ensure_project_ready first.",
             ToolError::SymbolNotFound { .. } => {
                 "Use search_symbols or get_file_outline to obtain a valid symbol ID."
             }
@@ -56,7 +56,7 @@ impl ToolError {
                 "Narrow the project path, add exclude patterns, or raise max_files."
             }
             ToolError::IndexingInProgress { .. } => {
-                "Wait for the background index_project to complete, then retry."
+                "Wait for background indexing to complete (ensure_project_ready or index_project), then retry."
             }
             ToolError::AccessDenied { .. } => {
                 "Check PITLANE_ALLOWED_ROOTS and keep file paths inside the indexed project root."
@@ -121,7 +121,7 @@ mod tests {
             project: "/tmp/foo".to_string(),
         };
         assert_eq!(e.code(), "PROJECT_NOT_INDEXED");
-        assert_eq!(e.hint(), "Call index_project first.");
+        assert_eq!(e.hint(), "Call ensure_project_ready first.");
     }
 
     #[test]
@@ -198,7 +198,10 @@ mod tests {
         let err = &v["error"];
         assert_eq!(err["code"].as_str().unwrap(), "PROJECT_NOT_INDEXED");
         assert!(err["message"].as_str().unwrap().contains("/tmp/foo"));
-        assert_eq!(err["hint"].as_str().unwrap(), "Call index_project first.");
+        assert_eq!(
+            err["hint"].as_str().unwrap(),
+            "Call ensure_project_ready first."
+        );
     }
 
     #[test]

@@ -18,6 +18,8 @@ use crate::tools::steering::{attach_steering, build_steering, take_fallback_cand
 const DEFAULT_LIMIT: usize = 8;
 const MAX_CONTEXT_LINES: usize = 5;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_REGEX_PATTERN_LEN: usize = 512;
+const MAX_REGEX_COMPILE_SIZE: usize = 1 << 20;
 
 pub struct SearchContentParams {
     pub project: String,
@@ -70,9 +72,19 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
     let extra_excluded_dirs = extra_excluded_dir_names();
 
     let matcher = if regex {
+        if params.query.len() > MAX_REGEX_PATTERN_LEN {
+            return Err(ToolError::InvalidArgument {
+                param: "query".to_string(),
+                message: format!(
+                    "regex pattern exceeds {MAX_REGEX_PATTERN_LEN} characters; narrow the pattern or use literal search"
+                ),
+            }
+            .into());
+        }
         ContentMatcher::Regex(
             RegexBuilder::new(&params.query)
                 .case_insensitive(!case_sensitive)
+                .size_limit(MAX_REGEX_COMPILE_SIZE)
                 .build()
                 .map_err(|e| ToolError::InvalidArgument {
                     param: "query".to_string(),
