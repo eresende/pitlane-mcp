@@ -59,7 +59,7 @@ jobs:
             artifact: pitlane-mcp-windows-x86_64.zip
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
