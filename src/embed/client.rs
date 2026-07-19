@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use super::document::{document_prefix, query_prefix};
 use super::EmbedConfig;
 
 pub const MAX_CONCURRENCY: usize = 16;
@@ -69,10 +70,12 @@ impl EmbedClient {
     /// Returns one `Option<Vec<f32>>` per input — `None` on any failure.
     pub async fn embed_batch(&self, texts: &[String]) -> Vec<Option<Vec<f32>>> {
         let n = texts.len();
+        let prefix = document_prefix(&self.config.model);
+        let prepared: Vec<String> = texts.iter().map(|text| format!("{prefix}{text}")).collect();
 
         let body = EmbedRequest {
             model: &self.config.model,
-            input: EmbedInput::Batch(texts.iter().map(|s| s.as_str()).collect()),
+            input: EmbedInput::Batch(prepared.iter().map(|s| s.as_str()).collect()),
         };
 
         let response = match self
@@ -108,9 +111,10 @@ impl EmbedClient {
 
     /// Embed a single query string (used at search time).
     pub async fn embed_query(&self, text: &str) -> anyhow::Result<Vec<f32>> {
+        let prepared = format!("{}{}", query_prefix(&self.config.model), text);
         let body = EmbedRequest {
             model: &self.config.model,
-            input: EmbedInput::Single(text),
+            input: EmbedInput::Single(&prepared),
         };
 
         let response = self
@@ -212,11 +216,18 @@ pub(crate) fn parse_response(json: &serde_json::Value, n: usize) -> Vec<Option<V
             tracing::warn!("embed_batch: OpenAI response has empty data array");
             return vec![None; n];
         }
-        let mut results = Vec::with_capacity(n);
-        for i in 0..n {
-            let vec = data
-                .get(i)
-                .and_then(|item| item.get("embedding"))
+        let mut results = vec![None; n];
+        for (position, item) in data.iter().enumerate() {
+            let index = item
+                .get("index")
+                .and_then(|value| value.as_u64())
+                .and_then(|value| usize::try_from(value).ok())
+                .unwrap_or(position);
+            if index >= n {
+                continue;
+            }
+            let vec = item
+                .get("embedding")
                 .and_then(|e| e.as_array())
                 .map(|arr| {
                     arr.iter()
@@ -225,10 +236,10 @@ pub(crate) fn parse_response(json: &serde_json::Value, n: usize) -> Vec<Option<V
                 })
                 .filter(|v| !v.is_empty());
 
-            results.push(vec.map(|mut v| {
+            results[index] = vec.map(|mut v| {
                 normalise(&mut v);
                 v
-            }));
+            });
         }
         return results;
     }
@@ -289,6 +300,19 @@ mod tests {
     use proptest::num::f32::NORMAL;
     use proptest::prelude::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn openai_response_respects_explicit_indices() {
+        let json = serde_json::json!({
+            "data": [
+                { "index": 1, "embedding": [0.0, 2.0] },
+                { "index": 0, "embedding": [3.0, 0.0] }
+            ]
+        });
+        let results = parse_response(&json, 2);
+        assert_eq!(results[0], Some(vec![1.0, 0.0]));
+        assert_eq!(results[1], Some(vec![0.0, 1.0]));
+    }
 
     // Feature: ollama-lmstudio-embeddings, Property 4: OpenAI response parsing extracts correct vector
     proptest! {

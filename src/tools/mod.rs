@@ -14,6 +14,7 @@ pub mod orchestrator;
 pub mod search_content;
 pub mod search_files;
 pub mod search_symbols;
+pub mod semantic_rank;
 pub mod steering;
 pub mod trace_execution_path;
 pub mod wait_for_embeddings;

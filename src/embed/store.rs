@@ -5,6 +5,42 @@ use serde::{Deserialize, Serialize};
 
 use crate::indexer::language::SymbolId;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmbedStoreMetadata {
+    pub format_version: u32,
+    pub model: String,
+    pub dimension: usize,
+    pub document_fingerprint: String,
+}
+
+impl EmbedStoreMetadata {
+    pub fn path(store_path: &Path) -> std::path::PathBuf {
+        store_path.with_extension("meta.json")
+    }
+
+    pub fn load(store_path: &Path) -> anyhow::Result<Option<Self>> {
+        let path = Self::path(store_path);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(serde_json::from_slice(&std::fs::read(path)?)?))
+    }
+
+    pub fn save(&self, store_path: &Path) -> anyhow::Result<()> {
+        let path = Self::path(store_path);
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
+        std::fs::rename(tmp, path)?;
+        Ok(())
+    }
+
+    pub fn is_compatible(&self, model: &str, fingerprint: &str) -> bool {
+        self.format_version == crate::embed::document::DOCUMENT_FORMAT_VERSION
+            && self.model == model
+            && self.document_fingerprint == fingerprint
+    }
+}
+
 #[derive(Serialize, Deserialize, Default)]
 pub struct EmbedStore {
     pub vectors: HashMap<SymbolId, Vec<f32>>,
@@ -93,6 +129,19 @@ mod tests {
         let mut store = EmbedStore::new();
         store.update("sym".to_string(), vec![0.1, 0.2, 0.3, 0.4]);
         assert_eq!(store.dimension(), Some(4));
+    }
+
+    #[test]
+    fn metadata_rejects_model_or_document_changes() {
+        let metadata = EmbedStoreMetadata {
+            format_version: crate::embed::document::DOCUMENT_FORMAT_VERSION,
+            model: "model-a".into(),
+            dimension: 768,
+            document_fingerprint: "profile-a".into(),
+        };
+        assert!(metadata.is_compatible("model-a", "profile-a"));
+        assert!(!metadata.is_compatible("model-b", "profile-a"));
+        assert!(!metadata.is_compatible("model-a", "profile-b"));
     }
 
     // --- Property tests ---

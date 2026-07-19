@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -6,7 +6,8 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::embed::client::{cosine_similarity, EmbedClient};
-use crate::embed::store::EmbedStore;
+use crate::embed::document::document_fingerprint;
+use crate::embed::store::{EmbedStore, EmbedStoreMetadata};
 use crate::embed::EmbedConfig;
 use crate::error::ToolError;
 use crate::index::format::index_dir;
@@ -16,6 +17,7 @@ use crate::indexer::language::{Language, Symbol, SymbolKind};
 use crate::path_policy::resolve_project_path;
 use crate::session;
 use crate::tools::index_project::load_project_index;
+use crate::tools::semantic_rank::{bm25_query_terms, hybrid_score, HybridWeights};
 use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
 
 const DEFAULT_LIMIT: usize = 8;
@@ -49,7 +51,7 @@ pub struct SearchSymbolsParams {
     pub file: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
-    /// "bm25" (default), "exact", "fuzzy", or "semantic" (reserved)
+    /// "bm25" (default), "exact", "fuzzy", "semantic", or "semantic_debug"
     pub mode: Option<String>,
     /// Embedding config passed programmatically (not a serde field)
     pub embed_config: Option<Arc<EmbedConfig>>,
@@ -282,7 +284,8 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
 
     match mode {
         "exact" | "fuzzy" | "bm25" => {}
-        "semantic" => {
+        "semantic" | "semantic_debug" => {
+            let diagnostic = mode == "semantic_debug";
             // Sub-task 1: require embed_config
             let embed_cfg = params.embed_config.as_ref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -295,6 +298,15 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             // Sub-task 2: load EmbedStore
             let store_path = index_dir(&canonical)?.join("embeddings.bin");
             let store = EmbedStore::load(&store_path).unwrap_or_default();
+            let store_metadata = EmbedStoreMetadata::load(&store_path).ok().flatten();
+            if let Some(metadata) = &store_metadata {
+                let expected = document_fingerprint(&embed_cfg.model);
+                if !metadata.is_compatible(&embed_cfg.model, &expected) {
+                    return Err(anyhow::anyhow!(
+                        "Embedding cache was built with a different model, document profile, or query/document prefix. Re-run ensure_project_ready with force=true to rebuild embeddings."
+                    ));
+                }
+            }
 
             // Sub-task 3: error when store is empty
             if store.vectors.is_empty() {
@@ -334,6 +346,44 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 ));
             }
 
+            // Lexical retrieval supplies an independent rank signal. Failure is
+            // non-fatal: semantic similarity still produces a complete result set.
+            let bm25_ranks: HashMap<String, usize> = (|| -> anyhow::Result<_> {
+                let tantivy_dir = index_dir(&canonical)?.join("tantivy");
+                crate::index::bm25::ensure(&index.symbols, &tantivy_dir)?;
+                let mut fused: HashMap<String, f32> = HashMap::new();
+                for term in bm25_query_terms(&params.query) {
+                    for (rank, id) in crate::index::bm25::search(
+                        &term,
+                        &canonical,
+                        &tantivy_dir,
+                        kind_filter.as_ref(),
+                        lang_filter.as_ref(),
+                        50,
+                    )?
+                    .into_iter()
+                    .enumerate()
+                    {
+                        *fused.entry(id).or_default() += 1.0 / (60.0 + rank as f32);
+                    }
+                }
+                let mut fused: Vec<_> = fused.into_iter().collect();
+                fused.sort_by(|left, right| {
+                    right
+                        .1
+                        .partial_cmp(&left.1)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| left.0.cmp(&right.0))
+                });
+                Ok(fused
+                    .into_iter()
+                    .enumerate()
+                    .map(|(rank, (id, _))| (id, rank))
+                    .collect())
+            })()
+            .unwrap_or_default();
+            let weights = HybridWeights::from_env();
+
             // Sub-task 6: apply kind/language/file filters
             let mut scored: Vec<(f32, Value)> = index
                 .symbols
@@ -361,11 +411,42 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 // Sub-task 7: score each symbol present in the store
                 .filter_map(|sym| {
                     let vec = store.vectors.get(&sym.id)?;
-                    let score = cosine_similarity(&query_vec, vec)
-                        + session::symbol_boost(&canonical, &sym.id, Some(sym.file.as_ref()))
-                            as f32
-                            / 100.0
-                        + session::query_boost(&canonical, &params.query) as f32 / 200.0;
+                    let similarity = cosine_similarity(&query_vec, vec);
+                    let raw_session = session::symbol_boost(
+                        &canonical,
+                        &sym.id,
+                        Some(sym.file.as_ref()),
+                    ) as f32 / 100.0;
+                    let path_role = role_by_path(
+                        canonical.as_path(),
+                        sym.file.as_ref(),
+                        profile.as_ref(),
+                    );
+                    let breakdown = hybrid_score(
+                        similarity,
+                        &params.query,
+                        sym,
+                        path_role,
+                        bm25_ranks.get(&sym.id).copied(),
+                        raw_session,
+                        weights,
+                    );
+                    let score = breakdown.final_score;
+                    let diagnostics = diagnostic.then(|| {
+                        json!({
+                            "raw_similarity": breakdown.raw_similarity,
+                            "final_score": breakdown.final_score,
+                            "adjustments": {
+                                "lexical": breakdown.lexical,
+                                "bm25": breakdown.bm25,
+                                "path": breakdown.path,
+                                "symbol_kind": breakdown.symbol_kind,
+                                "session": breakdown.session,
+                            },
+                            "bm25_rank": bm25_ranks.get(&sym.id),
+                            "lexical_or_metadata_affected": (breakdown.final_score - breakdown.raw_similarity).abs() > f32::EPSILON,
+                        })
+                    });
                     Some((
                         score,
                         json!({
@@ -379,6 +460,9 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                             "line_end": sym.line_end,
                             "signature": sym.signature,
                             "doc": sym.doc,
+                            "path_role": role_label(path_role),
+                            "score": score,
+                            "semantic": diagnostics,
                         }),
                     ))
                 })
@@ -404,6 +488,25 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 "query": params.query,
                 "truncated": truncated,
             });
+            if diagnostic {
+                resp["diagnostic"] = json!({
+                    "mode": "raw_semantic",
+                    "similarity_metric": "cosine (dot product over L2-normalized vectors)",
+                    "store_dimension": store.dimension(),
+                    "stored_vectors": store.vectors.len(),
+                    "model": embed_cfg.model,
+                    "cache_metadata": store_metadata,
+                    "hybrid_weights": {
+                        "lexical": weights.lexical,
+                        "bm25": weights.bm25,
+                        "test_penalty": weights.test_penalty,
+                        "auxiliary_penalty": weights.auxiliary_penalty,
+                        "implementation_kind": weights.implementation_kind,
+                        "session": weights.session,
+                    },
+                    "note": "Results expose raw embedding similarity and every final-score adjustment.",
+                });
+            }
             if truncated {
                 resp["next_page_message"] = json!(format!(
                     "More results available. Call again with offset: {}",
@@ -419,7 +522,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             return Err(ToolError::InvalidArgument {
                 param: "mode".to_string(),
                 message: format!(
-                    "Unknown mode '{}'. Supported: bm25, exact, fuzzy, semantic",
+                    "Unknown mode '{}'. Supported: bm25, exact, fuzzy, semantic, semantic_debug",
                     other
                 ),
             }

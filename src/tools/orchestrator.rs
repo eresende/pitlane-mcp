@@ -8,9 +8,9 @@ use serde_json::{json, Value};
 
 use crate::graph::{edge_evidence_quality, navigation_edge_metrics, EdgeRelation};
 use crate::index::format::load_project_meta;
-use crate::index::repo_profile::{
-    compact_repo_map, profile_entrypoints, role_label, summarize_role_counts, RepoProfile,
-};
+use crate::index::repo_profile::{compact_repo_map, profile_entrypoints, RepoProfile};
+#[cfg(test)]
+use crate::index::repo_profile::{role_label, summarize_role_counts};
 use crate::path_policy::{display_path_relative_to_project, resolve_project_path};
 use crate::session;
 use crate::tools::get_file_outline::{get_file_outline, GetFileOutlineParams};
@@ -1891,6 +1891,9 @@ async fn locate_symbols(
                 "line_start": sym["line_start"],
                 "line_end": sym["line_end"],
                 "signature": sym["signature"],
+                "path_role": sym["path_role"],
+                "score": sym["score"],
+                "semantic": sym["semantic"],
             })
         })
         .collect::<Vec<_>>();
@@ -1931,23 +1934,23 @@ async fn locate_symbols(
                         "line_start": sym["line_start"],
                         "line_end": sym["line_end"],
                         "signature": sym["signature"],
+                        "path_role": sym["path_role"],
+                        "score": sym["score"],
+                        "semantic": sym["semantic"],
                     })
                 })
                 .collect::<Vec<_>>();
         }
     }
 
-    if mode == "semantic" && !looks_like_exact_symbol(&params.query) && !results.is_empty() {
-        let canonical = resolve_project_path(&params.project)?;
-        let profile = load_project_meta(&canonical)
-            .ok()
-            .map(|meta| meta.repo_profile);
-        rerank_locate_symbol_results(&mut results, &canonical, &params.query, profile.as_ref());
-    }
+    // Semantic search already combines vector, lexical, kind, and path-role
+    // signals. Preserve that order here; the old repo-only sort discarded the
+    // semantic score and could alphabetize otherwise tied candidates.
 
     Ok(results)
 }
 
+#[cfg(test)]
 fn rerank_locate_symbol_results(
     results: &mut [Value],
     project_path: &Path,
@@ -1988,6 +1991,7 @@ fn rerank_locate_symbol_results(
     });
 }
 
+#[cfg(test)]
 fn locate_symbol_repo_score(
     candidate: &Value,
     project_path: &Path,

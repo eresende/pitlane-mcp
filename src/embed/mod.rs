@@ -1,4 +1,5 @@
 pub mod client;
+pub mod document;
 pub mod progress;
 pub mod store;
 
@@ -12,7 +13,7 @@ use crate::index::SymbolIndex;
 use crate::indexer::language::{Symbol, SymbolId};
 
 use client::{effective_batch_size, EmbedClient, MAX_CONCURRENCY};
-use store::EmbedStore;
+use store::{EmbedStore, EmbedStoreMetadata};
 
 /// Result returned by `generate_embeddings` and `update_embeddings_for_files`.
 pub struct EmbedResult {
@@ -22,52 +23,8 @@ pub struct EmbedResult {
     pub error: Option<String>,
 }
 
-/// Build the text representation of a symbol used as input to the embedding model.
-///
-/// Always includes `name` and `qualified`; appends `signature` and `doc` when present.
-/// Parts are joined with `\n`.
-/// Maximum character length of the text sent to the embedding model.
-///
-/// `nomic-embed-text` has an 8192-token context window (~4 chars/token on average).
-/// We cap at 6000 chars to stay well within that limit regardless of tokeniser
-/// differences, and to leave headroom when batching.
-/// Override with `PITLANE_EMBED_MAX_CHARS` if your model has a different limit.
-const DEFAULT_EMBED_MAX_CHARS: usize = 6000;
-
-fn embed_max_chars() -> usize {
-    std::env::var("PITLANE_EMBED_MAX_CHARS")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_EMBED_MAX_CHARS)
-}
-
 pub fn symbol_text(sym: &Symbol) -> String {
-    let mut parts = vec![sym.name.as_str(), sym.qualified.as_str()];
-    let sig_owned;
-    let doc_owned;
-    if let Some(ref s) = sym.signature {
-        sig_owned = s.as_str();
-        parts.push(sig_owned);
-    }
-    if let Some(ref d) = sym.doc {
-        doc_owned = d.as_str();
-        parts.push(doc_owned);
-    }
-    let text = parts.join("\n");
-    let max = embed_max_chars();
-    if text.len() <= max {
-        text
-    } else {
-        // Truncate on a char boundary to avoid splitting a multi-byte sequence.
-        let truncated = text
-            .char_indices()
-            .take_while(|(i, _)| *i < max)
-            .last()
-            .map(|(i, c)| i + c.len_utf8())
-            .unwrap_or(max);
-        text[..truncated].to_string()
-    }
+    document::build_symbol_document(sym, None)
 }
 
 /// Configuration for the embedding endpoint, read from environment variables
@@ -117,8 +74,17 @@ pub async fn generate_embeddings(
     // 1. Load existing store (or empty if absent/corrupt)
     let mut store = EmbedStore::load(store_path).unwrap_or_default();
 
-    // 2. If force, clear the store
-    if force {
+    let fingerprint = document::document_fingerprint(&config.model);
+    let compatible = EmbedStoreMetadata::load(store_path)
+        .ok()
+        .flatten()
+        .is_some_and(|meta| meta.is_compatible(&config.model, &fingerprint));
+
+    // Model, prefix, or document changes must never reuse stale vectors.
+    if force || !compatible {
+        if !force && !store.vectors.is_empty() {
+            tracing::info!("embed: cache metadata changed; rebuilding all vectors");
+        }
         store = EmbedStore::new();
     }
 
@@ -153,7 +119,15 @@ pub async fn generate_embeddings(
             .map(|chunk| {
                 chunk
                     .iter()
-                    .map(|sym| (sym.id.clone(), symbol_text(sym)))
+                    .map(|sym| {
+                        (
+                            sym.id.clone(),
+                            document::build_symbol_document(
+                                sym,
+                                project_path.map(PathBuf::as_path),
+                            ),
+                        )
+                    })
                     .collect()
             })
             .collect();
@@ -227,7 +201,15 @@ pub async fn generate_embeddings(
     }
 
     // 7. Save store once after all batches
-    let error = match store.save(store_path) {
+    let error = match store.save(store_path).and_then(|_| {
+        EmbedStoreMetadata {
+            format_version: document::DOCUMENT_FORMAT_VERSION,
+            model: config.model.clone(),
+            dimension: store.dimension().unwrap_or(0),
+            document_fingerprint: fingerprint,
+        }
+        .save(store_path)
+    }) {
         Ok(()) => None,
         Err(e) => {
             let msg = format!("failed to write embeddings store: {e}");
@@ -266,6 +248,15 @@ pub async fn update_embeddings_for_files(
     // 1. Load existing store (empty if absent or corrupt)
     let mut store = EmbedStore::load(store_path).unwrap_or_default();
 
+    let fingerprint = document::document_fingerprint(&config.model);
+    let compatible = EmbedStoreMetadata::load(store_path)
+        .ok()
+        .flatten()
+        .is_some_and(|meta| meta.is_compatible(&config.model, &fingerprint));
+    if !compatible {
+        store = EmbedStore::new();
+    }
+
     // 2. Remove vectors for deleted symbols
     let removed_set: HashSet<SymbolId> = removed_ids.iter().cloned().collect();
     store.remove_ids(&removed_set);
@@ -274,7 +265,7 @@ pub async fn update_embeddings_for_files(
     let symbols_to_embed: Vec<&Symbol> = index
         .symbols
         .values()
-        .filter(|sym| changed_files.contains(sym.file.as_ref()))
+        .filter(|sym| !compatible || changed_files.contains(sym.file.as_ref()))
         .collect();
 
     if !symbols_to_embed.is_empty() {
@@ -289,7 +280,7 @@ pub async fn update_embeddings_for_files(
             .map(|chunk| {
                 chunk
                     .iter()
-                    .map(|sym| (sym.id.clone(), symbol_text(sym)))
+                    .map(|sym| (sym.id.clone(), document::build_symbol_document(sym, None)))
                     .collect()
             })
             .collect();
@@ -325,7 +316,15 @@ pub async fn update_embeddings_for_files(
     }
 
     // 6. Save updated store; log warn on failure (non-fatal)
-    if let Err(e) = store.save(store_path) {
+    if let Err(e) = store.save(store_path).and_then(|_| {
+        EmbedStoreMetadata {
+            format_version: document::DOCUMENT_FORMAT_VERSION,
+            model: config.model.clone(),
+            dimension: store.dimension().unwrap_or(0),
+            document_fingerprint: fingerprint,
+        }
+        .save(store_path)
+    }) {
         tracing::warn!("update_embeddings_for_files: failed to save store: {e}");
     }
 }
@@ -646,16 +645,15 @@ mod tests {
             "sym_a should have been re-embedded with the new vector; got {sym_a_vec:?}"
         );
 
-        // sym_b should be unchanged (file_b was not in changed_files)
+        // A legacy store without metadata is incompatible with the current
+        // document format, so the watcher safely rebuilds every live vector.
         let sym_b_vec = updated_store
             .vectors
             .get("sym_b")
             .expect("sym_b should still be in the store");
-        // sym_b was inserted directly into the store (not via embed_batch), so it keeps
-        // the raw old_vec = [0.5, 0.5, 0.0] without normalisation.
         assert!(
-            (sym_b_vec[0] - 0.5_f32).abs() < 1e-5 && (sym_b_vec[1] - 0.5_f32).abs() < 1e-5,
-            "sym_b should be unchanged; got {sym_b_vec:?}"
+            (sym_b_vec[0] - 0.0_f32).abs() < 1e-5 && (sym_b_vec[1] - 1.0_f32).abs() < 1e-5,
+            "sym_b should be rebuilt after metadata invalidation; got {sym_b_vec:?}"
         );
     }
 
@@ -699,11 +697,8 @@ mod tests {
                 prop_assert!(result.contains(d.as_str()));
             }
 
-            // parts are separated by \n
-            let parts: Vec<&str> = result.split('\n').collect();
-            prop_assert!(parts.len() >= 2);
-            prop_assert_eq!(parts[0], name.as_str());
-            prop_assert_eq!(parts[1], qualified.as_str());
+            prop_assert!(result.contains("File: test.rs"));
+            prop_assert!(result.contains("Type: function"));
         }
     }
 

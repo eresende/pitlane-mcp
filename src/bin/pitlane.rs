@@ -48,7 +48,7 @@ enum Command {
         /// Skip first N results
         #[arg(long, default_value = "0")]
         offset: usize,
-        /// Search mode: bm25 (default), exact, fuzzy, semantic
+        /// Search mode: bm25 (default), exact, fuzzy, semantic, semantic_debug
         #[arg(long)]
         mode: Option<String>,
     },
