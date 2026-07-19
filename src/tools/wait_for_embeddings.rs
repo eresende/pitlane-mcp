@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use rmcp::{
-    model::{LoggingLevel, LoggingMessageNotificationParam, ProgressNotificationParam},
-    Peer, RoleServer,
-};
+use rmcp::{model::ProgressNotificationParam, Peer, RoleServer};
 use serde_json::{json, Value};
 
 use crate::{
@@ -60,20 +57,11 @@ pub async fn wait_for_embeddings(params: WaitForEmbeddingsParams) -> anyhow::Res
 
         let msg = format!("Embeddings: {stored}/{total} symbols");
 
-        // Send MCP logging notification so the agent sees the progress bar.
-        if let Some(ref peer) = params.peer {
-            let log_notif =
-                LoggingMessageNotificationParam::new(LoggingLevel::Info, serde_json::json!(msg))
-                    .with_logger("pitlane-embed".to_string());
-            let _ = peer.notify_logging_message(log_notif).await;
-
-            // Also send a structured progress notification if the client provided a token.
-            if let Some(ref token) = params.progress_token {
-                let notif = ProgressNotificationParam::new(token.clone(), stored as f64)
-                    .with_total(total as f64)
-                    .with_message(msg.clone());
-                let _ = peer.notify_progress(notif).await;
-            }
+        if let (Some(peer), Some(token)) = (&params.peer, &params.progress_token) {
+            let notif = ProgressNotificationParam::new(token.clone(), stored as f64)
+                .with_total(total as f64)
+                .with_message(msg.clone());
+            let _ = peer.notify_progress(notif).await;
         }
 
         if stored >= total {

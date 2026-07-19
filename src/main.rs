@@ -1120,7 +1120,7 @@ impl ServerHandler for PitlaneMcp {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().enable_logging().build())
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
                 "pitlane-mcp: token-efficient code navigation. \
                 Default tool tier: ensure_project_ready, investigate, locate_code, read_code_unit, trace_path, analyze_impact, get_index_stats, and search_content. \

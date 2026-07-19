@@ -5,9 +5,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use rmcp::model::{
-    LoggingLevel, LoggingMessageNotificationParam, ProgressNotificationParam, ProgressToken,
-};
+use rmcp::model::{ProgressNotificationParam, ProgressToken};
 use rmcp::service::Peer;
 use rmcp::RoleServer;
 use serde_json::{json, Value};
@@ -197,42 +195,29 @@ async fn do_index_project(
     // into a channel; a concurrent async task drains it and sends notifications.
     // This avoids block_in_place (invalid inside tokio::spawn) while keeping
     // notifications live as parsing progresses.
-    // Two notification channels are used:
-    //   1. notifications/message (logging) — works for all clients
-    //   2. notifications/progress — only when the client sent a progress_token
+    // Progress notifications are sent when the client supplied a progress token.
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<(usize, usize, String)>(256);
 
     // Spawn the drainer task before the blocking work starts.
-    let drain_handle: Option<tokio::task::JoinHandle<()>> = if let Some(peer) = peer.clone() {
-        let token = progress_token.clone();
-        Some(tokio::spawn(async move {
-            while let Some((current, total, msg)) = progress_rx.recv().await {
-                tracing::debug!(
-                    current,
-                    total,
-                    "index_project: sending progress notification"
-                );
-                // Always send a logging message.
-                let log_notif = LoggingMessageNotificationParam::new(
-                    LoggingLevel::Info,
-                    serde_json::json!(msg),
-                )
-                .with_logger("pitlane-index".to_string());
-                let _ = peer.notify_logging_message(log_notif).await;
-
-                // Also send progress notification if the client provided a token.
-                if let Some(ref token) = token {
+    let drain_handle: Option<tokio::task::JoinHandle<()>> =
+        if let (Some(peer), Some(token)) = (peer.clone(), progress_token.clone()) {
+            Some(tokio::spawn(async move {
+                while let Some((current, total, msg)) = progress_rx.recv().await {
+                    tracing::debug!(
+                        current,
+                        total,
+                        "index_project: sending progress notification"
+                    );
                     let notif = ProgressNotificationParam::new(token.clone(), current as f64)
                         .with_total(total as f64)
                         .with_message(msg);
                     let _ = peer.notify_progress(notif).await;
                 }
-            }
-            tracing::debug!("index_project: progress drainer finished");
-        }))
-    } else {
-        None
-    };
+                tracing::debug!("index_project: progress drainer finished");
+            }))
+        } else {
+            None
+        };
 
     // Build the progress callback — sends into the channel, never blocks.
     let make_cb = {
@@ -328,9 +313,7 @@ async fn do_index_project(
     // Embedding phase (opt-in) — runs in a detached background task so the
     // MCP response returns as soon as the symbol index is ready. Semantic
     // search becomes available once the background task finishes.
-    // Progress is reported via:
-    //   1. notifications/progress (if the client sent a progress_token)
-    //   2. notifications/message (logging) — works for all clients
+    // Progress is reported when the client supplied a progress token.
     let (embed_status, embed_started_at) = if let Some(cfg) = params.embed_config.clone() {
         let store_path = idx_dir.join("embeddings.bin");
         let embed_peer = params.peer.clone();
@@ -343,60 +326,33 @@ async fn do_index_project(
             .unwrap_or_default()
             .as_secs();
 
-        // Notify the agent immediately so it knows to wait before using semantic search.
-        if let Some(ref peer) = params.peer {
-            let kickoff = LoggingMessageNotificationParam::new(
-                LoggingLevel::Info,
-                serde_json::json!(format!(
-                    "Embedding {symbol_count} symbols in background. \
-                     Call get_index_stats and wait until embeddings_percent=100 \
-                     before using mode=\"semantic\"."
-                )),
-            )
-            .with_logger("pitlane-embed".to_string());
-            let _ = peer.notify_logging_message(kickoff).await;
-        }
-
         tokio::spawn(async move {
-            let done_peer: Option<Peer<RoleServer>> = embed_peer.clone();
-            let progress_cb: Option<Box<dyn Fn(usize, usize) + Send + Sync>> = if let Some(peer) =
-                embed_peer
-            {
-                let (embed_tx, mut embed_rx) = tokio::sync::mpsc::channel::<(usize, usize)>(256);
-                let token = embed_token;
-                tokio::spawn(async move {
-                    while let Some((completed, total)) = embed_rx.recv().await {
-                        // Always send a logging message so all clients see progress.
-                        let pct = if total > 0 {
-                            (completed as f64 / total as f64 * 100.0).round() as u64
-                        } else {
-                            0
-                        };
-                        let msg = format!("Embedding symbols… {completed}/{total} ({pct}%)");
-                        let log_notif = LoggingMessageNotificationParam::new(
-                            LoggingLevel::Info,
-                            serde_json::json!(msg),
-                        )
-                        .with_logger("pitlane-embed".to_string());
-                        let _ = peer.notify_logging_message(log_notif).await;
-
-                        // Also send progress notification if the client provided a token.
-                        if let Some(ref token) = token {
+            let progress_cb: Option<Box<dyn Fn(usize, usize) + Send + Sync>> =
+                if let (Some(peer), Some(token)) = (embed_peer, embed_token) {
+                    let (embed_tx, mut embed_rx) =
+                        tokio::sync::mpsc::channel::<(usize, usize)>(256);
+                    tokio::spawn(async move {
+                        while let Some((completed, total)) = embed_rx.recv().await {
+                            let pct = if total > 0 {
+                                (completed as f64 / total as f64 * 100.0).round() as u64
+                            } else {
+                                0
+                            };
+                            let msg = format!("Embedding symbols… {completed}/{total} ({pct}%)");
                             let notif =
                                 ProgressNotificationParam::new(token.clone(), completed as f64)
                                     .with_total(total as f64)
                                     .with_message(msg);
                             let _ = peer.notify_progress(notif).await;
                         }
-                    }
-                });
-                Some(Box::new(move |completed, total| {
-                    let _ = embed_tx.try_send((completed, total));
-                })
-                    as Box<dyn Fn(usize, usize) + Send + Sync>)
-            } else {
-                None
-            };
+                    });
+                    Some(Box::new(move |completed, total| {
+                        let _ = embed_tx.try_send((completed, total));
+                    })
+                        as Box<dyn Fn(usize, usize) + Send + Sync>)
+                } else {
+                    None
+                };
 
             let result = crate::embed::generate_embeddings(
                 &index_for_embed,
@@ -410,17 +366,6 @@ async fn do_index_project(
 
             if let Some(err) = result.error {
                 tracing::error!(error = %err, "embed: background embedding failed");
-                // Notify the agent that embedding failed.
-                if let Some(peer) = done_peer {
-                    let notif = LoggingMessageNotificationParam::new(
-                        LoggingLevel::Warning,
-                        serde_json::json!(format!(
-                            "Embedding failed: {err}. Semantic search (mode=\"semantic\") is unavailable."
-                        )),
-                    )
-                    .with_logger("pitlane-embed".to_string());
-                    let _ = peer.notify_logging_message(notif).await;
-                }
             } else {
                 tracing::info!(
                     stored = result.stored,
@@ -428,19 +373,6 @@ async fn do_index_project(
                     elapsed_ms = result.elapsed_ms,
                     "embed: background embedding complete"
                 );
-                // Notify the agent that semantic search is now ready.
-                if let Some(peer) = done_peer {
-                    let notif = LoggingMessageNotificationParam::new(
-                        LoggingLevel::Info,
-                        serde_json::json!(format!(
-                            "Embedding complete: {} symbols stored in {}ms. \
-                             Semantic search (mode=\"semantic\") is now ready.",
-                            result.stored, result.elapsed_ms
-                        )),
-                    )
-                    .with_logger("pitlane-embed".to_string());
-                    let _ = peer.notify_logging_message(notif).await;
-                }
             }
         });
 
