@@ -1125,6 +1125,7 @@ mod tests {
         let embed_config = Some(Arc::new(EmbedConfig {
             url: server.url("/"),
             model: "test".to_string(),
+            headers: reqwest::header::HeaderMap::new(),
         }));
 
         let params = IndexProjectParams {
@@ -1178,6 +1179,7 @@ mod tests {
         let embed_config = Some(Arc::new(EmbedConfig {
             url: server.url("/"),
             model: "test".to_string(),
+            headers: reqwest::header::HeaderMap::new(),
         }));
 
         let params = IndexProjectParams {

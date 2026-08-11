@@ -11,8 +11,11 @@ documentation.
 documents, calls the configured OpenAI/Ollama-compatible embedding endpoint,
 L2-normalizes every returned vector, validates dimensions, and stores vectors by
 stable symbol ID in `embeddings.bin`. `embeddings.meta.json` records the model,
-dimension, document format, size settings, and query/document prefixes. A change
-to any of these invalidates the cache and causes a rebuild.
+endpoint identity, dimension, document format, size settings, and
+query/document prefixes. A change to any of these invalidates the cache and
+causes a rebuild. Credential header values are deliberately excluded from cache
+identity, so rotating credentials does not rebuild vectors. Non-secret routing
+headers, such as tenant identifiers, are included.
 
 The default `metadata_code` document includes relative file path, name,
 qualified name, kind, language, signature, documentation, identifiers extracted
@@ -41,12 +44,25 @@ uses the same search path before reading source.
 - `PITLANE_EMBED_MAX_IDENTIFIERS` (default `64`)
 - `PITLANE_EMBED_TASK_PREFIX_MODE=auto|none|nomic`
 - `PITLANE_EMBED_DOCUMENT_PREFIX` and `PITLANE_EMBED_QUERY_PREFIX` override task prefixes
+- `PITLANE_EMBED_API_KEY` adds an `Authorization: Bearer ...` header
+- `PITLANE_EMBED_HEADERS` adds arbitrary request headers from a JSON object of string values
+- `PITLANE_EMBED_MAX_CONCURRENCY` limits concurrent endpoint requests (default `16`)
+- `PITLANE_EMBED_MAX_RETRIES` retries `429` and transient `5xx` responses (default `3`)
+- `PITLANE_EMBED_RETRY_BASE_MS` sets exponential backoff when `Retry-After` is absent (default `500`)
 - `PITLANE_SEMANTIC_LEXICAL_WEIGHT` (default `0.10`)
 - `PITLANE_SEMANTIC_BM25_WEIGHT` (default `0.03`)
 - `PITLANE_SEMANTIC_TEST_PENALTY` (default `0.12`)
 - `PITLANE_SEMANTIC_AUXILIARY_PENALTY` (default `0.03`)
 - `PITLANE_SEMANTIC_KIND_WEIGHT` (default `0.01`)
 - `PITLANE_SEMANTIC_SESSION_WEIGHT` (default `0`)
+
+`PITLANE_EMBED_URL` can target any reachable OpenAI-compatible embedding endpoint,
+including company gateways. The endpoint must accept `model` and `input` fields
+and return `data[i].embedding`. Credentials are sent through environment-backed
+headers. Credential values are never included in embedding cache identity.
+
+HTTPS requests trust both public WebPKI roots and certificates installed in the
+operating system's native trust store, including company-internal CAs.
 
 ## llama.cpp benchmark
 

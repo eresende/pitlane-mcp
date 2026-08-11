@@ -433,7 +433,13 @@ impl Default for PitlaneMcp {
 impl PitlaneMcp {
     pub fn new() -> Self {
         let watcher_registry = Arc::new(WatcherRegistry::new());
-        let embed_config = EmbedConfig::from_env().map(Arc::new);
+        let embed_config = match EmbedConfig::try_from_env() {
+            Ok(config) => config.map(Arc::new),
+            Err(err) => {
+                tracing::error!("invalid embedding configuration: {err}");
+                None
+            }
+        };
         let tool_router = Self::tool_router();
         let public_tool_router = build_public_tool_router(tool_router.clone());
         Self {

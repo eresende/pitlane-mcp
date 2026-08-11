@@ -45,7 +45,7 @@ pub async fn get_index_stats(params: GetIndexStatsParams) -> anyhow::Result<Valu
 
     // Embedding progress
     let total_symbols = index.symbol_count();
-    let embed_config = EmbedConfig::from_env();
+    let embed_config = EmbedConfig::try_from_env()?;
     let canonical = resolve_project_path(&params.project)?;
     let profile = load_project_meta(&canonical)
         .ok()

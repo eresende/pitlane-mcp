@@ -8,6 +8,17 @@ use super::EmbedConfig;
 
 pub const MAX_CONCURRENCY: usize = 16;
 pub const BATCH_SIZE: usize = 256;
+pub const MAX_RETRIES: usize = 3;
+pub const RETRY_BASE_MS: u64 = 500;
+
+/// Returns the effective concurrent request limit.
+pub fn effective_max_concurrency() -> usize {
+    std::env::var("PITLANE_EMBED_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(MAX_CONCURRENCY)
+}
 
 /// Returns the effective batch size, respecting `PITLANE_EMBED_BATCH_SIZE` if set.
 pub fn effective_batch_size() -> usize {
@@ -16,6 +27,21 @@ pub fn effective_batch_size() -> usize {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or(BATCH_SIZE)
+}
+
+/// Returns the number of retries for rate-limit and transient server errors.
+pub fn effective_max_retries() -> usize {
+    std::env::var("PITLANE_EMBED_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(MAX_RETRIES)
+}
+
+fn effective_retry_base_ms() -> u64 {
+    std::env::var("PITLANE_EMBED_RETRY_BASE_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(RETRY_BASE_MS)
 }
 
 // ── HTTP request types ────────────────────────────────────────────────────────
@@ -53,6 +79,7 @@ impl EmbedClient {
         // the first one (::1) is refused, causing all requests to fail.
         let mut builder =
             reqwest::ClientBuilder::new().timeout(std::time::Duration::from_secs(timeout_secs));
+        builder = builder.default_headers(config.headers.clone());
 
         if let Ok(url) = reqwest::Url::parse(&config.url) {
             if url.host_str() == Some("localhost") {
@@ -78,23 +105,21 @@ impl EmbedClient {
             input: EmbedInput::Batch(prepared.iter().map(|s| s.as_str()).collect()),
         };
 
-        let response = match self
-            .http
-            .post(&self.config.url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-        {
+        let response = match self.send_with_retry(&body).await {
             Ok(r) => r,
             Err(e) => {
-                tracing::warn!("embed_batch: connection error: {e}");
+                tracing::warn!(error = ?e, "embed_batch: connection error");
                 return vec![None; n];
             }
         };
 
         if !response.status().is_success() {
-            tracing::warn!("embed_batch: HTTP error {}", response.status());
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                "embed_batch: HTTP error {status}: {}",
+                truncate_error_body(&body)
+            );
             return vec![None; n];
         }
 
@@ -118,15 +143,17 @@ impl EmbedClient {
         };
 
         let response = self
-            .http
-            .post(&self.config.url)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await?;
+            .send_with_retry(&body)
+            .await
+            .map_err(|err| anyhow::anyhow!("embed_query: connection error: {err:?}"))?;
 
         if !response.status().is_success() {
-            anyhow::bail!("embed_query: HTTP error {}", response.status());
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            anyhow::bail!(
+                "embed_query: HTTP error {status}: {}",
+                truncate_error_body(&body)
+            );
         }
 
         let json: serde_json::Value = response.json().await?;
@@ -187,6 +214,94 @@ impl EmbedClient {
             "embed_query: response has neither 'data', 'embeddings', nor 'embedding' field"
         )
     }
+
+    async fn send_with_retry(
+        &self,
+        body: &EmbedRequest<'_>,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let max_retries = effective_max_retries();
+
+        for attempt in 0..=max_retries {
+            let response = self
+                .http
+                .post(&self.config.url)
+                .header("Content-Type", "application/json")
+                .json(body)
+                .send()
+                .await;
+
+            match response {
+                Ok(response) if is_retryable_status(response.status()) && attempt < max_retries => {
+                    let status = response.status();
+                    let delay = retry_delay(&response, attempt);
+                    let _ = response.bytes().await;
+                    tracing::warn!(
+                        %status,
+                        attempt = attempt + 1,
+                        max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        "embedding request is rate-limited or temporarily unavailable; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+                Ok(response) => return Ok(response),
+                Err(error) if attempt < max_retries => {
+                    let delay = exponential_retry_delay(attempt);
+                    tracing::warn!(
+                        error = ?error,
+                        attempt = attempt + 1,
+                        max_retries,
+                        delay_ms = delay.as_millis() as u64,
+                        "embedding request failed; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        unreachable!("embedding retry loop always returns a response or error")
+    }
+}
+
+fn is_retryable_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status == reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        || status == reqwest::StatusCode::BAD_GATEWAY
+        || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+        || status == reqwest::StatusCode::GATEWAY_TIMEOUT
+}
+
+fn retry_delay(response: &reqwest::Response, attempt: usize) -> std::time::Duration {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| exponential_retry_delay(attempt))
+}
+
+fn exponential_retry_delay(attempt: usize) -> std::time::Duration {
+    let multiplier = 1u64 << attempt.min(6);
+    std::time::Duration::from_millis(
+        effective_retry_base_ms()
+            .saturating_mul(multiplier)
+            .min(30_000),
+    )
+}
+
+fn truncate_error_body(body: &str) -> String {
+    const MAX_ERROR_BODY_CHARS: usize = 512;
+    let body = body.trim();
+    if body.chars().count() <= MAX_ERROR_BODY_CHARS {
+        return body.to_string();
+    }
+    format!(
+        "{}...",
+        body.chars().take(MAX_ERROR_BODY_CHARS).collect::<String>()
+    )
 }
 
 /// Cosine similarity between two unit-normalised vectors (dot product).
@@ -299,7 +414,71 @@ mod tests {
     use proptest::collection::vec as pvec;
     use proptest::num::f32::NORMAL;
     use proptest::prelude::*;
+    use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
     use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn sends_configured_headers_for_batch_and_query() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let embedding = serde_json::json!({
+            "data": [
+                { "index": 0, "embedding": [1.0, 0.0] },
+                { "index": 1, "embedding": [0.0, 1.0] }
+            ]
+        });
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .header("authorization", "Bearer test-token")
+                .header("x-tenant-id", "engineering");
+            then.status(200)
+                .header("content-type", "application/json")
+                .json_body(embedding);
+        });
+
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer test-token"));
+        headers.insert("x-tenant-id", HeaderValue::from_static("engineering"));
+        let client = EmbedClient::new(Arc::new(EmbedConfig {
+            url: server.url("/v1/embeddings"),
+            model: "company-code-embedding".to_string(),
+            headers,
+        }));
+
+        let batch = client
+            .embed_batch(&["first".to_string(), "second".to_string()])
+            .await;
+        assert_eq!(batch.iter().filter(|item| item.is_some()).count(), 2);
+
+        let query = client.embed_query("find retries").await.unwrap();
+        assert_eq!(query.len(), 2);
+        assert_eq!(mock.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn retries_rate_limited_batch_using_retry_after() {
+        use httpmock::prelude::*;
+
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST);
+            then.status(429)
+                .header("retry-after", "0")
+                .body(r#"{"error":"rate limited"}"#);
+        });
+
+        let client = EmbedClient::new(Arc::new(EmbedConfig {
+            url: server.url("/v1/embeddings"),
+            model: "test-model".to_string(),
+            headers: HeaderMap::new(),
+        }));
+
+        let result = client.embed_batch(&["rate limited".to_string()]).await;
+
+        assert_eq!(result, vec![None]);
+        mock.assert_calls(effective_max_retries() + 1);
+    }
 
     #[test]
     fn openai_response_respects_explicit_indices() {

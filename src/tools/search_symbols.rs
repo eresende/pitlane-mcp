@@ -301,7 +301,11 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
             let store_metadata = EmbedStoreMetadata::load(&store_path).ok().flatten();
             if let Some(metadata) = &store_metadata {
                 let expected = document_fingerprint(&embed_cfg.model);
-                if !metadata.is_compatible(&embed_cfg.model, &expected) {
+                if !metadata.is_compatible(
+                    &embed_cfg.model,
+                    &expected,
+                    &crate::embed::endpoint_fingerprint(&embed_cfg.url, &embed_cfg.headers),
+                ) {
                     return Err(anyhow::anyhow!(
                         "Embedding cache was built with a different model, document profile, or query/document prefix. Re-run ensure_project_ready with force=true to rebuild embeddings."
                     ));
@@ -997,6 +1001,7 @@ mod tests {
         let embed_config = Some(Arc::new(EmbedConfig {
             url: "http://localhost:11434/api/embeddings".to_string(),
             model: "nomic-embed-text".to_string(),
+            headers: reqwest::header::HeaderMap::new(),
         }));
 
         let params = SearchSymbolsParams {
@@ -1053,6 +1058,7 @@ mod tests {
             let embed_config_broken = Some(Arc::new(EmbedConfig {
                 url: "http://127.0.0.1:19999/api/embeddings".to_string(),
                 model: "nomic-embed-text".to_string(),
+                headers: reqwest::header::HeaderMap::new(),
             }));
             let params_with_embed = SearchSymbolsParams {
                 project: project.clone(),
@@ -1112,6 +1118,7 @@ mod tests {
         let embed_config = Some(Arc::new(EmbedConfig {
             url: server.url("/"),
             model: "test-model".to_string(),
+            headers: reqwest::header::HeaderMap::new(),
         }));
 
         let params = SearchSymbolsParams {

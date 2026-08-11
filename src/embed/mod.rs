@@ -8,11 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::StreamExt;
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 
 use crate::index::SymbolIndex;
 use crate::indexer::language::{Symbol, SymbolId};
 
-use client::{effective_batch_size, EmbedClient, MAX_CONCURRENCY};
+use client::{effective_batch_size, effective_max_concurrency, EmbedClient};
 use store::{EmbedStore, EmbedStoreMetadata};
 
 /// Result returned by `generate_embeddings` and `update_embeddings_for_files`.
@@ -36,22 +37,111 @@ pub fn symbol_text(sym: &Symbol) -> String {
 pub struct EmbedConfig {
     pub url: String,
     pub model: String,
+    pub headers: HeaderMap,
 }
 
 impl EmbedConfig {
-    /// Returns `Some(config)` when both `PITLANE_EMBED_URL` and
-    /// `PITLANE_EMBED_MODEL` are set to non-empty strings, `None` otherwise.
-    pub fn from_env() -> Option<Self> {
-        let url = std::env::var("PITLANE_EMBED_URL").ok()?;
-        if url.is_empty() {
-            return None;
+    /// Parse embedding configuration and return an error for invalid headers.
+    pub fn try_from_env() -> anyhow::Result<Option<Self>> {
+        let url = match std::env::var("PITLANE_EMBED_URL") {
+            Ok(url) if !url.is_empty() => url,
+            _ => return Ok(None),
+        };
+        let model = match std::env::var("PITLANE_EMBED_MODEL") {
+            Ok(model) if !model.is_empty() => model,
+            _ => return Ok(None),
+        };
+
+        let mut headers = HeaderMap::new();
+        if let Ok(raw_headers) = std::env::var("PITLANE_EMBED_HEADERS") {
+            if !raw_headers.trim().is_empty() {
+                let values: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_str(&raw_headers).map_err(|err| {
+                        anyhow::anyhow!(
+                            "PITLANE_EMBED_HEADERS must be a JSON object of string values: {err}"
+                        )
+                    })?;
+
+                for (name, value) in values {
+                    let value = value.as_str().ok_or_else(|| {
+                        anyhow::anyhow!("PITLANE_EMBED_HEADERS value for '{name}' must be a string")
+                    })?;
+                    let name = HeaderName::from_bytes(name.as_bytes())
+                        .map_err(|err| anyhow::anyhow!("invalid embedding header name: {err}"))?;
+                    let value = HeaderValue::from_str(value).map_err(|err| {
+                        anyhow::anyhow!("invalid value for embedding header: {err}")
+                    })?;
+                    headers.insert(name, value);
+                }
+            }
         }
-        let model = std::env::var("PITLANE_EMBED_MODEL").ok()?;
-        if model.is_empty() {
-            return None;
+
+        if let Ok(api_key) = std::env::var("PITLANE_EMBED_API_KEY") {
+            if !api_key.is_empty() {
+                if headers.contains_key(AUTHORIZATION) {
+                    anyhow::bail!(
+                        "PITLANE_EMBED_API_KEY cannot be combined with an Authorization header in PITLANE_EMBED_HEADERS"
+                    );
+                }
+                let value = HeaderValue::from_str(&format!("Bearer {api_key}"))
+                    .map_err(|err| anyhow::anyhow!("invalid embedding API key: {err}"))?;
+                headers.insert(AUTHORIZATION, value);
+            }
         }
-        Some(Self { url, model })
+
+        Ok(Some(Self {
+            url,
+            model,
+            headers,
+        }))
     }
+
+    /// Returns `Some(config)` when configured, `None` when embeddings are
+    /// disabled. Invalid header configuration is logged and also disables
+    /// embeddings for callers that cannot propagate startup errors.
+    pub fn from_env() -> Option<Self> {
+        match Self::try_from_env() {
+            Ok(config) => config,
+            Err(err) => {
+                tracing::error!("invalid embedding configuration: {err}");
+                None
+            }
+        }
+    }
+}
+
+/// Stable identity for the configured embedding endpoint.
+///
+/// Header values that look like credentials are represented only by their
+/// names, so rotating a token does not rebuild vectors. Non-secret routing
+/// headers, such as a tenant identifier, remain part of cache identity.
+pub fn endpoint_fingerprint(url: &str, headers: &HeaderMap) -> String {
+    let mut identity = format!("url={url}\n");
+    let mut header_identity: Vec<String> = headers
+        .iter()
+        .map(|(name, value)| {
+            let name = name.as_str().to_ascii_lowercase();
+            let value = if is_credential_header(&name) {
+                "<credential>".to_string()
+            } else {
+                value
+                    .to_str()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|_| "<binary>".to_string())
+            };
+            format!("{name}={value}")
+        })
+        .collect();
+    header_identity.sort();
+    identity.push_str(&header_identity.join("\n"));
+    blake3::hash(identity.as_bytes()).to_hex().to_string()
+}
+
+fn is_credential_header(name: &str) -> bool {
+    name == "authorization"
+        || name.contains("api-key")
+        || name.contains("token")
+        || name.contains("secret")
 }
 
 /// Generate embeddings for all symbols in `index` and save to `store_path`.
@@ -78,7 +168,13 @@ pub async fn generate_embeddings(
     let compatible = EmbedStoreMetadata::load(store_path)
         .ok()
         .flatten()
-        .is_some_and(|meta| meta.is_compatible(&config.model, &fingerprint));
+        .is_some_and(|meta| {
+            meta.is_compatible(
+                &config.model,
+                &fingerprint,
+                &endpoint_fingerprint(&config.url, &config.headers),
+            )
+        });
 
     // Model, prefix, or document changes must never reuse stale vectors.
     if force || !compatible {
@@ -110,6 +206,7 @@ pub async fn generate_embeddings(
         let client = Arc::new(EmbedClient::new(Arc::new(EmbedConfig {
             url: config.url.clone(),
             model: config.model.clone(),
+            headers: config.headers.clone(),
         })));
 
         // 4. Chunk into batch slices (size configurable via PITLANE_EMBED_BATCH_SIZE)
@@ -147,7 +244,8 @@ pub async fn generate_embeddings(
         });
 
         let mut completed_symbols = 0usize;
-        let mut stream = futures::stream::iter(chunk_futures).buffer_unordered(MAX_CONCURRENCY);
+        let mut stream =
+            futures::stream::iter(chunk_futures).buffer_unordered(effective_max_concurrency());
 
         while let Some((chunk_idx, batch)) = stream.next().await {
             let batch_size = batch.len();
@@ -207,6 +305,7 @@ pub async fn generate_embeddings(
             model: config.model.clone(),
             dimension: store.dimension().unwrap_or(0),
             document_fingerprint: fingerprint,
+            endpoint_fingerprint: endpoint_fingerprint(&config.url, &config.headers),
         }
         .save(store_path)
     }) {
@@ -252,7 +351,13 @@ pub async fn update_embeddings_for_files(
     let compatible = EmbedStoreMetadata::load(store_path)
         .ok()
         .flatten()
-        .is_some_and(|meta| meta.is_compatible(&config.model, &fingerprint));
+        .is_some_and(|meta| {
+            meta.is_compatible(
+                &config.model,
+                &fingerprint,
+                &endpoint_fingerprint(&config.url, &config.headers),
+            )
+        });
     if !compatible {
         store = EmbedStore::new();
     }
@@ -272,6 +377,7 @@ pub async fn update_embeddings_for_files(
         let client = Arc::new(EmbedClient::new(Arc::new(EmbedConfig {
             url: config.url.clone(),
             model: config.model.clone(),
+            headers: config.headers.clone(),
         })));
 
         // 4. Chunk into batch slices and dispatch via buffer_unordered
@@ -296,7 +402,7 @@ pub async fn update_embeddings_for_files(
         });
 
         let results: Vec<Vec<(String, Option<Vec<f32>>)>> = futures::stream::iter(chunk_futures)
-            .buffer_unordered(MAX_CONCURRENCY)
+            .buffer_unordered(effective_max_concurrency())
             .collect()
             .await;
 
@@ -322,6 +428,7 @@ pub async fn update_embeddings_for_files(
             model: config.model.clone(),
             dimension: store.dimension().unwrap_or(0),
             document_fingerprint: fingerprint,
+            endpoint_fingerprint: endpoint_fingerprint(&config.url, &config.headers),
         }
         .save(store_path)
     }) {
@@ -376,6 +483,7 @@ mod tests {
         let embed_config = Some(Arc::new(EmbedConfig {
             url: server.url("/"),
             model: "test".to_string(),
+            headers: HeaderMap::new(),
         }));
 
         // Call index_project with embeddings enabled
@@ -480,6 +588,7 @@ mod tests {
         let embed_config = Some(Arc::new(EmbedConfig {
             url: server.url("/"),
             model: "test".to_string(),
+            headers: HeaderMap::new(),
         }));
 
         // First call: force=true — must embed all symbols
@@ -613,6 +722,7 @@ mod tests {
         let config = EmbedConfig {
             url: server.url("/"),
             model: "test".to_string(),
+            headers: HeaderMap::new(),
         };
 
         // changed_files = {file_a}, removed_ids = ["sym_removed"]
@@ -831,6 +941,103 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parses_bearer_and_arbitrary_headers() {
+        with_env(
+            &[
+                (
+                    "PITLANE_EMBED_URL",
+                    Some("https://embed.example/v1/embeddings"),
+                ),
+                ("PITLANE_EMBED_MODEL", Some("company-code-embedding")),
+                ("PITLANE_EMBED_API_KEY", Some("secret-token")),
+                (
+                    "PITLANE_EMBED_HEADERS",
+                    Some(r#"{"x-tenant-id":"engineering","x-region":"us"}"#),
+                ),
+            ],
+            || {
+                let config = EmbedConfig::try_from_env()
+                    .unwrap()
+                    .expect("embedding config should be enabled");
+                assert_eq!(config.headers[AUTHORIZATION], "Bearer secret-token");
+                assert_eq!(config.headers["x-tenant-id"], "engineering");
+                assert_eq!(config.headers["x-region"], "us");
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_headers() {
+        with_env(
+            &[
+                (
+                    "PITLANE_EMBED_URL",
+                    Some("https://embed.example/v1/embeddings"),
+                ),
+                ("PITLANE_EMBED_MODEL", Some("company-code-embedding")),
+                ("PITLANE_EMBED_API_KEY", None),
+                ("PITLANE_EMBED_HEADERS", Some("not-json")),
+            ],
+            || {
+                let error = match EmbedConfig::try_from_env() {
+                    Ok(_) => panic!("malformed headers should be rejected"),
+                    Err(error) => error,
+                };
+                assert!(error.to_string().contains("PITLANE_EMBED_HEADERS"));
+            },
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_authorization_configuration() {
+        with_env(
+            &[
+                (
+                    "PITLANE_EMBED_URL",
+                    Some("https://embed.example/v1/embeddings"),
+                ),
+                ("PITLANE_EMBED_MODEL", Some("company-code-embedding")),
+                ("PITLANE_EMBED_API_KEY", Some("secret-token")),
+                (
+                    "PITLANE_EMBED_HEADERS",
+                    Some(r#"{"Authorization":"Bearer another-token"}"#),
+                ),
+            ],
+            || {
+                let error = match EmbedConfig::try_from_env() {
+                    Ok(_) => panic!("duplicate authorization should be rejected"),
+                    Err(error) => error,
+                };
+                assert!(error.to_string().contains("cannot be combined"));
+            },
+        );
+    }
+
+    #[test]
+    fn endpoint_identity_excludes_credentials_but_includes_routing_headers() {
+        let mut first = HeaderMap::new();
+        first.insert(AUTHORIZATION, HeaderValue::from_static("Bearer first"));
+        first.insert("x-tenant-id", HeaderValue::from_static("engineering"));
+
+        let mut rotated = HeaderMap::new();
+        rotated.insert(AUTHORIZATION, HeaderValue::from_static("Bearer rotated"));
+        rotated.insert("x-tenant-id", HeaderValue::from_static("engineering"));
+
+        let mut different_tenant = HeaderMap::new();
+        different_tenant.insert(AUTHORIZATION, HeaderValue::from_static("Bearer first"));
+        different_tenant.insert("x-tenant-id", HeaderValue::from_static("research"));
+
+        assert_eq!(
+            endpoint_fingerprint("https://embed.example/v1/embeddings", &first),
+            endpoint_fingerprint("https://embed.example/v1/embeddings", &rotated)
+        );
+        assert_ne!(
+            endpoint_fingerprint("https://embed.example/v1/embeddings", &first),
+            endpoint_fingerprint("https://embed.example/v1/embeddings", &different_tenant)
+        );
+    }
+
     // Feature: ollama-lmstudio-embeddings, Property 3: Batch count equals ceil(N / BATCH_SIZE)
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(50))]
@@ -882,6 +1089,7 @@ mod tests {
             let config = EmbedConfig {
                 url: server.url("/"),
                 model: "test-model".to_string(),
+                headers: HeaderMap::new(),
             };
 
             let dir = tempdir().expect("tempdir");

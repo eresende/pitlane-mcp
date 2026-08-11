@@ -1827,7 +1827,7 @@ async fn locate_symbols(
     limit: usize,
     mode: &str,
 ) -> anyhow::Result<Vec<Value>> {
-    let semantic_cfg = EmbedConfig::from_env().map(Arc::new);
+    let semantic_cfg = EmbedConfig::try_from_env()?.map(Arc::new);
     let query_mode = if mode == "semantic" {
         if semantic_cfg.is_some() {
             "semantic"
