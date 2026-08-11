@@ -11,6 +11,7 @@ pub struct EmbedStoreMetadata {
     pub model: String,
     pub dimension: usize,
     pub document_fingerprint: String,
+    pub endpoint_fingerprint: String,
 }
 
 impl EmbedStoreMetadata {
@@ -34,10 +35,16 @@ impl EmbedStoreMetadata {
         Ok(())
     }
 
-    pub fn is_compatible(&self, model: &str, fingerprint: &str) -> bool {
+    pub fn is_compatible(
+        &self,
+        model: &str,
+        fingerprint: &str,
+        endpoint_fingerprint: &str,
+    ) -> bool {
         self.format_version == crate::embed::document::DOCUMENT_FORMAT_VERSION
             && self.model == model
             && self.document_fingerprint == fingerprint
+            && self.endpoint_fingerprint == endpoint_fingerprint
     }
 }
 
@@ -138,10 +145,12 @@ mod tests {
             model: "model-a".into(),
             dimension: 768,
             document_fingerprint: "profile-a".into(),
+            endpoint_fingerprint: "endpoint-a".into(),
         };
-        assert!(metadata.is_compatible("model-a", "profile-a"));
-        assert!(!metadata.is_compatible("model-b", "profile-a"));
-        assert!(!metadata.is_compatible("model-a", "profile-b"));
+        assert!(metadata.is_compatible("model-a", "profile-a", "endpoint-a"));
+        assert!(!metadata.is_compatible("model-b", "profile-a", "endpoint-a"));
+        assert!(!metadata.is_compatible("model-a", "profile-b", "endpoint-a"));
+        assert!(!metadata.is_compatible("model-a", "profile-a", "endpoint-b"));
     }
 
     // --- Property tests ---

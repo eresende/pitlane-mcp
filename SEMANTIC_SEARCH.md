@@ -2,21 +2,13 @@
 
 Semantic search lets you find symbols by meaning rather than by name. Instead of matching keywords, pitlane-mcp generates embedding vectors for every indexed symbol and ranks results by cosine similarity to your query.
 
-> **Experimental:** This feature requires a locally-running embedding server and adds significant indexing time for large codebases. The API and behaviour may change in future releases.
+> **Experimental:** This feature requires a reachable embedding server and adds significant indexing time for large codebases. The API and behaviour may change in future releases.
 
 ## How It Works
 
 When `PITLANE_EMBED_URL` and `PITLANE_EMBED_MODEL` are set, `index_project` generates an embedding vector for every symbol and stores them in `embeddings.bin` alongside the regular index. Subsequent `search_symbols` calls with `"mode": "semantic"` embed the query and return symbols ranked by cosine similarity.
 
 When the env vars are absent, pitlane-mcp behaves exactly as before — zero overhead, zero network calls.
-
-## Prerequisites
-
-Install [Ollama](https://ollama.com) and pull an embedding model:
-
-```bash
-ollama pull nomic-embed-text
-```
 
 ## Quick Start
 
@@ -40,10 +32,29 @@ pitlane search /your/project "error handling when file cannot be read" --mode se
 |---|---|---|---|
 | `PITLANE_EMBED_URL` | yes | — | Full URL of the embedding endpoint (e.g. `http://localhost:11434/api/embed`) |
 | `PITLANE_EMBED_MODEL` | yes | — | Model identifier to pass in requests (e.g. `nomic-embed-text`) |
+| `PITLANE_EMBED_API_KEY` | no | — | Bearer token sent as `Authorization: Bearer ...` |
+| `PITLANE_EMBED_HEADERS` | no | — | JSON object of additional string request headers, such as `{"x-tenant-id":"engineering"}` |
 | `PITLANE_EMBED_BATCH_SIZE` | no | `256` | Number of symbols per HTTP request. Reduce for large/slow models. |
 | `PITLANE_EMBED_TIMEOUT` | no | `120` | Per-request timeout in seconds. Increase for large models. |
+| `PITLANE_EMBED_MAX_CONCURRENCY` | no | `16` | Maximum number of concurrent embedding requests. Reduce for rate-limited gateways. |
+| `PITLANE_EMBED_MAX_RETRIES` | no | `3` | Retries for `429` and transient `5xx` responses. |
+| `PITLANE_EMBED_RETRY_BASE_MS` | no | `500` | Initial exponential-backoff delay when `Retry-After` is absent. |
 
 Both `PITLANE_EMBED_URL` and `PITLANE_EMBED_MODEL` must be set to non-empty strings for embeddings to be enabled. Either absent or empty disables the feature entirely.
+
+`PITLANE_EMBED_URL` may point to a local server or an external OpenAI-compatible endpoint. External endpoints should accept the standard `model` and `input` request fields and return `data[i].embedding` responses. Keep credentials in environment variables rather than putting them in the endpoint URL.
+
+HTTPS connections trust both public WebPKI roots and certificates installed in
+the operating system's native trust store, including company-internal CAs.
+
+```bash
+export PITLANE_EMBED_URL=https://embeddings.company.example/v1/embeddings
+export PITLANE_EMBED_MODEL=company-code-embedding
+export PITLANE_EMBED_API_KEY="$COMPANY_EMBEDDING_TOKEN"
+export PITLANE_EMBED_HEADERS='{"x-tenant-id":"engineering"}'
+export PITLANE_EMBED_MAX_CONCURRENCY=4
+export PITLANE_EMBED_MAX_RETRIES=5
+```
 
 ## Model Recommendations
 
@@ -129,7 +140,7 @@ Environment="OLLAMA_MAX_QUEUE=512"
 - **Indexing speed** — embedding generation is bottlenecked by the Ollama HTTP API, not by GPU compute. Each request has fixed overhead regardless of batch size. This is a fundamental limitation of the HTTP interface.
 - **Model switching** — switching models invalidates all stored embeddings. Re-index with `--force` after changing `PITLANE_EMBED_MODEL`.
 - **Dimension mismatch** — if the embedding model changes dimension (e.g. switching from nomic to qwen3), semantic search returns an error until you re-index with `--force`.
-- **Connection errors** — Ollama may drop connections under heavy load. Affected symbols are skipped and reported in `embeddings_skipped`. Re-run without `--force` to fill in the gaps.
+- **Connection and gateway errors** — Affected symbols are skipped and reported in `embeddings_skipped`. Re-run without `--force` to fill in the gaps. Reduce `PITLANE_EMBED_MAX_CONCURRENCY` for rate-limited external gateways.
 - **Large codebases** — the Linux kernel (~311k symbols) takes ~26 minutes with nomic-embed-text. Consider filtering to specific subdirectories for very large repos.
 
 ## LLM Usage Guide

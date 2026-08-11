@@ -282,7 +282,7 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
 
     // Phase 2: Run semantic/bm25 search with each sub-query to fill gaps.
     if discovered_ids.len() < MAX_INLINE_SYMBOLS {
-        let semantic_cfg = EmbedConfig::from_env().map(Arc::new);
+        let semantic_cfg = EmbedConfig::try_from_env()?.map(Arc::new);
         let mode = if semantic_cfg.is_some() {
             "semantic"
         } else {

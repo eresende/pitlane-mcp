@@ -254,7 +254,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Watch { project } => {
-            let embed_config = pitlane_mcp::embed::EmbedConfig::from_env().map(Arc::new);
+            let embed_config = pitlane_mcp::embed::EmbedConfig::try_from_env()?.map(Arc::new);
             let registry = tools::watch_project::WatcherRegistry::new();
             let params = tools::watch_project::WatchProjectParams {
                 project: project.clone(),
@@ -284,7 +284,7 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
             exclude,
             max_files,
         } => {
-            let embed_config = pitlane_mcp::embed::EmbedConfig::from_env();
+            let embed_config = pitlane_mcp::embed::EmbedConfig::try_from_env()?;
 
             // Pass embed_config=None so index_project doesn't spawn a background
             // embedding task that would be killed when the CLI process exits.
@@ -354,7 +354,8 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
             offset,
             mode,
         } => {
-            let embed_config = pitlane_mcp::embed::EmbedConfig::from_env().map(std::sync::Arc::new);
+            let embed_config =
+                pitlane_mcp::embed::EmbedConfig::try_from_env()?.map(std::sync::Arc::new);
             let params = tools::search_symbols::SearchSymbolsParams {
                 project,
                 query,
@@ -476,7 +477,7 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
             poll_interval_ms,
             timeout_secs,
         } => {
-            let embed_config = pitlane_mcp::embed::EmbedConfig::from_env().map(Arc::new);
+            let embed_config = pitlane_mcp::embed::EmbedConfig::try_from_env()?.map(Arc::new);
             let params = tools::wait_for_embeddings::WaitForEmbeddingsParams {
                 project,
                 poll_interval_ms,
