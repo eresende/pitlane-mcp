@@ -39,6 +39,7 @@ pitlane search /your/project "error handling when file cannot be read" --mode se
 | `PITLANE_EMBED_MAX_CONCURRENCY` | no | `16` | Maximum number of concurrent embedding requests. Reduce for rate-limited gateways. |
 | `PITLANE_EMBED_MAX_RETRIES` | no | `3` | Retries for `429` and transient `5xx` responses. |
 | `PITLANE_EMBED_RETRY_BASE_MS` | no | `500` | Initial exponential-backoff delay when `Retry-After` is absent. |
+| `PITLANE_EMBED_REQUEST_DELAY_MS` | no | `0` | Minimum delay in milliseconds between consecutive requests. Set to `700` for endpoints limited to 100 RPM. |
 
 Both `PITLANE_EMBED_URL` and `PITLANE_EMBED_MODEL` must be set to non-empty strings for embeddings to be enabled. Either absent or empty disables the feature entirely.
 
@@ -54,6 +55,7 @@ export PITLANE_EMBED_API_KEY="$COMPANY_EMBEDDING_TOKEN"
 export PITLANE_EMBED_HEADERS='{"x-tenant-id":"engineering"}'
 export PITLANE_EMBED_MAX_CONCURRENCY=4
 export PITLANE_EMBED_MAX_RETRIES=5
+export PITLANE_EMBED_REQUEST_DELAY_MS=700
 ```
 
 ## Model Recommendations

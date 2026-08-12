@@ -13,7 +13,9 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use crate::index::SymbolIndex;
 use crate::indexer::language::{Symbol, SymbolId};
 
-use client::{effective_batch_size, effective_max_concurrency, EmbedClient};
+use client::{
+    effective_batch_size, effective_max_concurrency, effective_request_delay_ms, EmbedClient,
+};
 use store::{EmbedStore, EmbedStoreMetadata};
 
 /// Result returned by `generate_embeddings` and `update_embeddings_for_files`.
@@ -233,9 +235,14 @@ pub async fn generate_embeddings(
 
         // 5. Dispatch concurrently via buffer_unordered, collecting results with
         //    chunk index so we can report progress in order.
+        let request_delay_ms = effective_request_delay_ms();
         let chunk_futures = chunks.into_iter().enumerate().map(|(i, chunk)| {
             let client = Arc::clone(&client);
             async move {
+                // Proactive throttle: wait before sending to stay within external rate limits.
+                if request_delay_ms > 0 && i > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(request_delay_ms)).await;
+                }
                 let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
                 let ids: Vec<String> = chunk.iter().map(|(id, _)| id.clone()).collect();
                 let results = client.embed_batch(&texts).await;
@@ -391,9 +398,14 @@ pub async fn update_embeddings_for_files(
             })
             .collect();
 
-        let chunk_futures = chunks.into_iter().map(|chunk| {
+        let chunk_futures = chunks.into_iter().enumerate().map(|(i, chunk)| {
             let client = Arc::clone(&client);
             async move {
+                // Proactive throttle: wait before sending to stay within external rate limits.
+                let request_delay_ms = effective_request_delay_ms();
+                if request_delay_ms > 0 && i > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(request_delay_ms)).await;
+                }
                 let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
                 let ids: Vec<String> = chunk.iter().map(|(id, _)| id.clone()).collect();
                 let results = client.embed_batch(&texts).await;

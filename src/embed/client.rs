@@ -44,6 +44,18 @@ fn effective_retry_base_ms() -> u64 {
         .unwrap_or(RETRY_BASE_MS)
 }
 
+/// Returns the minimum delay in milliseconds between consecutive embedding requests.
+///
+/// When set, this throttles outbound requests to stay within external API rate limits
+/// (e.g. 100 RPM). A value of 700 limits throughput to ~85 req/min.
+/// Defaults to 0 (no delay).
+pub fn effective_request_delay_ms() -> u64 {
+    std::env::var("PITLANE_EMBED_REQUEST_DELAY_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 // ── HTTP request types ────────────────────────────────────────────────────────
 
 #[derive(Serialize)]

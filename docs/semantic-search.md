@@ -49,6 +49,7 @@ uses the same search path before reading source.
 - `PITLANE_EMBED_MAX_CONCURRENCY` limits concurrent endpoint requests (default `16`)
 - `PITLANE_EMBED_MAX_RETRIES` retries `429` and transient `5xx` responses (default `3`)
 - `PITLANE_EMBED_RETRY_BASE_MS` sets exponential backoff when `Retry-After` is absent (default `500`)
+- `PITLANE_EMBED_REQUEST_DELAY_MS` minimum delay between consecutive requests to avoid hitting RPM limits (default `0`, disabled)
 - `PITLANE_SEMANTIC_LEXICAL_WEIGHT` (default `0.10`)
 - `PITLANE_SEMANTIC_BM25_WEIGHT` (default `0.03`)
 - `PITLANE_SEMANTIC_TEST_PENALTY` (default `0.12`)
