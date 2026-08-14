@@ -4,7 +4,10 @@ use pitlane_mcp::embed::EmbedConfig;
 use pitlane_mcp::tools;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ListToolsResult, Meta, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool},
+    model::{
+        CacheScope, ListToolsResult, MetaObject, PaginatedRequestParams, ProtocolVersion,
+        RequestMetaObject, ServerCapabilities, ServerInfo, Tool,
+    },
     schemars,
     service::RequestContext,
     tool, tool_handler, tool_router, Peer, RoleServer, ServerHandler,
@@ -457,8 +460,8 @@ impl PitlaneMcp {
 /// `alwaysLoad` is a vendor hint (used by some MCP hosts) that the tool should
 /// always be included in the active toolset without explicit opt-in.
 /// `searchHint` provides keywords the host can use for tool discovery matching.
-fn tool_meta(search_hint: &'static str) -> Meta {
-    let mut meta = Meta::new();
+fn tool_meta(search_hint: &'static str) -> MetaObject {
+    let mut meta = MetaObject::new();
     meta.insert("alwaysLoad".to_string(), serde_json::Value::Bool(true));
     meta.insert(
         "searchHint".to_string(),
@@ -511,7 +514,7 @@ impl PitlaneMcp {
         &self,
         Parameters(req): Parameters<IndexProjectRequest>,
         peer: Peer<RoleServer>,
-        meta: rmcp::model::Meta,
+        meta: RequestMetaObject,
     ) -> String {
         let params = tools::index_project::IndexProjectParams {
             path: req.path,
@@ -542,7 +545,7 @@ impl PitlaneMcp {
         &self,
         Parameters(req): Parameters<EnsureProjectReadyRequest>,
         peer: Peer<RoleServer>,
-        meta: rmcp::model::Meta,
+        meta: RequestMetaObject,
     ) -> String {
         let params = tools::ensure_project_ready::EnsureProjectReadyParams {
             path: req.path,
@@ -1083,7 +1086,7 @@ impl PitlaneMcp {
         &self,
         Parameters(req): Parameters<WaitForEmbeddingsRequest>,
         peer: Peer<RoleServer>,
-        meta: rmcp::model::Meta,
+        meta: RequestMetaObject,
     ) -> String {
         let params = tools::wait_for_embeddings::WaitForEmbeddingsParams {
             project: req.project,
@@ -1105,17 +1108,22 @@ impl ServerHandler for PitlaneMcp {
     fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> impl Future<Output = Result<ListToolsResult, rmcp::ErrorData>> + '_ {
         let tools = match self.tool_exposure_tier {
             ToolExposureTier::Default => self.public_tool_router.list_all(),
             ToolExposureTier::All => self.tool_router.list_all(),
         };
-        std::future::ready(Ok(ListToolsResult {
-            tools,
-            next_cursor: None,
-            meta: None,
-        }))
+        let supports_cache_hints = context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+        let result = ListToolsResult::with_all_items(tools);
+        let result = if supports_cache_hints {
+            result.with_ttl_ms(0).with_cache_scope(CacheScope::Public)
+        } else {
+            result
+        };
+        std::future::ready(Ok(result))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
