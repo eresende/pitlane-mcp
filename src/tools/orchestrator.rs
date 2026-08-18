@@ -1364,6 +1364,16 @@ fn suggest_sharper_query(
         );
     }
 
+    // If the query looks like a natural-language behavioral question (multiple words
+    // describing intent rather than naming a symbol), suggest investigate instead.
+    let word_count = query.split_whitespace().count();
+    if word_count >= 4 && !looks_like_exact_symbol(query) && !looks_like_path(query) {
+        return Some(
+            "This looks like a behavior or intent question. Try investigate(query=\"...\") instead — it discovers relevant symbols and inlines their source for natural-language questions about what the code does."
+                .to_string(),
+        );
+    }
+
     // Generic fallback based on route
     match route_used {
         "search_symbols" => Some(
