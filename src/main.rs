@@ -790,6 +790,8 @@ impl PitlaneMcp {
             progress_token: meta.get_progress_token(),
             peer: Some(peer),
             embed_config: self.embed_config.clone(),
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
         match tools::index_project::index_project(params).await {
             Ok(v) => value_to_text(v),

@@ -124,6 +124,8 @@ fn prepare(path: &str, rt: &Runtime) -> Option<Setup> {
         progress_token: None,
         peer: None,
         embed_config: None,
+        on_index_progress: None,
+        on_phase3_progress: None,
     }))
     .ok()?;
 
