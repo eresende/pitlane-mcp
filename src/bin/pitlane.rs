@@ -1,6 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use pitlane_mcp::indexer::Phase3Progress;
 use pitlane_mcp::path_policy::resolve_project_path;
 use pitlane_mcp::tools;
 
@@ -322,6 +325,90 @@ fn embeddings_count_in_store(path: &std::path::Path) -> usize {
         .unwrap_or(0)
 }
 
+type ProgressCallback = Box<dyn Fn(usize, usize) + Send + Sync>;
+type Phase3ProgressCallback = Box<dyn Fn(Phase3Progress) + Send + Sync>;
+
+fn spinner_style() -> ProgressStyle {
+    ProgressStyle::with_template("[{elapsed_precise}] {spinner:.cyan} {msg}").unwrap()
+}
+
+fn bar_style(template: &'static str) -> ProgressStyle {
+    ProgressStyle::with_template(template)
+        .unwrap()
+        .progress_chars("##-")
+}
+
+/// Create one progress bar shared by all sequential indexing phases.
+fn make_index_progress_bar() -> (ProgressBar, ProgressCallback, Phase3ProgressCallback) {
+    let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+    pb.set_style(spinner_style());
+    pb.enable_steady_tick(Duration::from_millis(200));
+    pb.set_message("Walking files…");
+
+    let parse_pb = pb.clone();
+    let parse_cb = move |current: usize, total: usize| {
+        if current == 0 {
+            parse_pb.set_style(bar_style(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:>7} ({eta}) {msg}",
+            ));
+            parse_pb.set_length(total as u64);
+            parse_pb.set_position(0);
+            parse_pb.set_message("Parsing files…");
+        } else {
+            parse_pb.set_position(current as u64);
+        }
+    };
+
+    let phase3_pb = pb.clone();
+    let phase3_cb = move |progress: Phase3Progress| match progress {
+        Phase3Progress::InsertingSymbols { current, total } => {
+            if current == 0 {
+                phase3_pb.set_style(bar_style(
+                    "[{elapsed_precise}] {bar:40.magenta/blue} {pos:>7}/{len:>7} ({eta}) {msg}",
+                ));
+                phase3_pb.set_length(total as u64);
+                phase3_pb.set_position(0);
+                phase3_pb.set_message("Inserting symbols…");
+            } else {
+                phase3_pb.set_position(current as u64);
+            }
+        }
+        Phase3Progress::RebuildingGraph { .. } => {
+            phase3_pb.unset_length();
+            phase3_pb.set_style(spinner_style());
+            phase3_pb.set_message("Rebuilding graph…");
+        }
+    };
+
+    (pb, Box::new(parse_cb), Box::new(phase3_cb))
+}
+
+/// Create a progress bar and callback for the embedding phase.
+fn make_embed_progress_bar() -> (ProgressBar, ProgressCallback) {
+    let pb = ProgressBar::with_draw_target(None, ProgressDrawTarget::stderr());
+    pb.set_style(spinner_style());
+    pb.enable_steady_tick(Duration::from_millis(200));
+    pb.set_message("Preparing embeddings…");
+
+    let pb_clone = pb.clone();
+    let cb = move |current: usize, total: usize| {
+        if current == 0 {
+            pb_clone.set_style(bar_style(
+                "[{elapsed_precise}] {bar:40.green/yellow} {pos:>7}/{len:>7} ({eta}) {msg}",
+            ));
+            pb_clone.set_length(total as u64);
+            pb_clone.set_message(if total == 0 {
+                "Embeddings up to date"
+            } else {
+                "Embedding symbols…"
+            });
+        }
+        pb_clone.set_position(current as u64);
+    };
+
+    (pb, Box::new(cb))
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -408,8 +495,8 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
         } => {
             let embed_config = pitlane_mcp::embed::EmbedConfig::try_from_env()?;
 
-            // Pass embed_config=None so index_project doesn't spawn a background
-            // embedding task that would be killed when the CLI process exits.
+            // ── Phase 1: symbol indexing with progress bar ──────────────
+            let (index_pb, index_cb, phase3_cb) = make_index_progress_bar();
             let params = tools::index_project::IndexProjectParams {
                 path: path.clone(),
                 exclude: if exclude.is_empty() {
@@ -422,25 +509,33 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
                 progress_token: None,
                 peer: None,
                 embed_config: None,
+                on_index_progress: Some(index_cb),
+                on_phase3_progress: Some(phase3_cb),
             };
-            let mut result = tools::index_project::index_project(params).await?;
+            let index_result = tools::index_project::index_project(params).await;
+            index_pb.finish_and_clear();
+            let mut result = index_result?;
 
-            // Run embeddings synchronously so the CLI waits for them to finish.
+            // ── Phase 2: embeddings with progress bar (if configured) ──
             if let Some(cfg) = embed_config {
                 let canonical = resolve_project_path(&path)?;
                 let idx_dir = pitlane_mcp::index::format::index_dir(&canonical)?;
                 let store_path = idx_dir.join("embeddings.bin");
                 let index = tools::index_project::load_project_index(&path)?;
                 let force_embed = force;
+
+                let (embed_pb, embed_cb) = make_embed_progress_bar();
                 let embed_result = pitlane_mcp::embed::generate_embeddings(
                     &index,
                     &cfg,
                     &store_path,
                     force_embed,
-                    None,
+                    Some(&*embed_cb),
                     Some(&canonical),
                 )
                 .await;
+                embed_pb.finish_and_clear();
+
                 let embed_status = if embed_result.error.is_some() {
                     "error"
                 } else {
@@ -807,6 +902,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
         tools::index_project::index_project(params).await.unwrap();
         project

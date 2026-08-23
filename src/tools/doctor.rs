@@ -336,6 +336,8 @@ pub async fn doctor(params: DoctorParams) -> anyhow::Result<Value> {
                 progress_token: None,
                 peer: None,
                 embed_config: None,
+                on_index_progress: None,
+                on_phase3_progress: None,
             })
             .await?;
             repairs_applied.push(json!({
@@ -359,6 +361,8 @@ pub async fn doctor(params: DoctorParams) -> anyhow::Result<Value> {
                     progress_token: None,
                     peer: None,
                     embed_config: Some(std::sync::Arc::new(cfg)),
+                    on_index_progress: None,
+                    on_phase3_progress: None,
                 })
                 .await?;
                 repairs_applied.push(json!({
@@ -409,6 +413,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         })
         .await
         .unwrap();
