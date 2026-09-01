@@ -401,7 +401,10 @@ pub fn search(
 fn escape_query(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
-        if "+-&|!(){}[]^\"~*?:\\/".contains(c) {
+        // Note: `'` must be escaped too — tantivy's QueryParser treats it as a
+        // phrase delimiter, so an unbalanced apostrophe (e.g. "file's") would
+        // otherwise open an unterminated quoted phrase and fail to parse.
+        if "+-&|!(){}[]^\"'~*?:\\/".contains(c) {
             out.push('\\');
         }
         out.push(c);
@@ -415,7 +418,10 @@ fn escape_query(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::tokenize_code;
+    use tantivy::query::QueryParser;
+    use tantivy::Index;
+
+    use super::{build_schema, escape_query, register_tokenizer, tokenize_code, Bm25Fields};
 
     fn tokens(s: &str) -> Vec<String> {
         tokenize_code(s).into_iter().map(|t| t.text).collect()
@@ -462,5 +468,41 @@ mod tests {
     #[test]
     fn test_empty() {
         assert!(tokens("").is_empty());
+    }
+
+    #[test]
+    fn test_escape_query_escapes_apostrophe() {
+        // Regression: unescaped apostrophes made tantivy parse the query as an
+        // unterminated single-quoted phrase, failing with "failed to parse BM25 query".
+        assert_eq!(escape_query("file's"), r"file\'s");
+    }
+
+    #[test]
+    fn test_apostrophe_query_parses_after_escape() {
+        let schema = build_schema();
+        let index = Index::create_in_ram(schema);
+        register_tokenizer(&index);
+        let fields = Bm25Fields::load(&index.schema()).unwrap();
+        let mut parser = QueryParser::for_index(
+            &index,
+            vec![fields.name, fields.qualified, fields.signature, fields.doc],
+        );
+        parser.set_conjunction_by_default();
+
+        // Regression: before `'` was added to the escape set, tantivy treated the
+        // apostrophe as an unterminated single-quoted phrase delimiter and this
+        // query failed with "failed to parse BM25 query".
+        let raw = "search a file's text for lines";
+        assert!(parser.parse_query(&escape_query(raw)).is_ok());
+    }
+
+    #[test]
+    fn test_escape_query_escapes_double_quote() {
+        assert_eq!(escape_query(r#"say "hi""#), r#"say \"hi\""#);
+    }
+
+    #[test]
+    fn test_escape_query_plain_text_unchanged() {
+        assert_eq!(escape_query("hello world_foo"), "hello world_foo");
     }
 }
