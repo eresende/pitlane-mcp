@@ -88,7 +88,7 @@ fn build_selector(source: &[u8], node: Node) -> String {
     let child_count = node.child_count();
     let mut selector = String::new();
     for i in 0..child_count {
-        let child = node.child(i as u32).unwrap();
+        let child = node.child(i).unwrap();
         if child.kind() != "identifier" {
             continue;
         }
@@ -97,7 +97,7 @@ fn build_selector(source: &[u8], node: Node) -> String {
         // Append ':' if the next sibling is a method_parameter.
         let next_is_param = (i + 1 < child_count)
             && node
-                .child((i + 1) as u32)
+                .child(i + 1)
                 .map(|n| n.kind() == "method_parameter")
                 .unwrap_or(false);
         if next_is_param {
