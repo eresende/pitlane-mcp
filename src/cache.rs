@@ -37,6 +37,9 @@ pub fn insert(path: PathBuf, index: SymbolIndex) -> Arc<SymbolIndex> {
 /// reload from disk and repopulate the cache.
 pub fn invalidate(path: &Path) {
     rw_write(&CACHE).remove(path);
+    // The symbol index changed: cached investigate answers for this project
+    // may now reference stale source or outdated symbol sets.
+    crate::session::invalidate_investigate_cache(path);
 }
 
 #[cfg(test)]
