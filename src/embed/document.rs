@@ -4,7 +4,10 @@ use std::path::Path;
 use crate::graph::read_symbol_source;
 use crate::indexer::language::Symbol;
 
-pub const DOCUMENT_FORMAT_VERSION: u32 = 2;
+/// Bumped to 3 when per-symbol document hashes were added to the embed store
+/// (issue #75): stores written by older versions have no hashes, so forcing a
+/// full rebuild avoids decoding problems and stale vectors.
+pub const DOCUMENT_FORMAT_VERSION: u32 = 3;
 const DEFAULT_MAX_CHARS: usize = 6000;
 const DEFAULT_BODY_CHARS: usize = 3000;
 const DEFAULT_IDENTIFIERS: usize = 64;
@@ -87,6 +90,14 @@ fn identifiers(source: &str, limit: usize) -> Vec<String> {
         .take(limit)
         .map(ToOwned::to_owned)
         .collect()
+}
+
+/// 64-bit blake3 hash of an embedding document. Stored per symbol so the
+/// embedding pipeline can detect that a symbol's document changed even when
+/// the symbol ID stayed the same.
+pub fn document_hash(text: &str) -> u64 {
+    let bytes = blake3::hash(text.as_bytes());
+    u64::from_le_bytes(bytes.as_bytes()[..8].try_into().expect("8 bytes"))
 }
 
 pub fn document_fingerprint(model: &str) -> String {
