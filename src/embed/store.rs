@@ -51,6 +51,11 @@ impl EmbedStoreMetadata {
 #[derive(Serialize, Deserialize, Default)]
 pub struct EmbedStore {
     pub vectors: HashMap<SymbolId, Vec<f32>>,
+    /// blake3 (first 8 bytes, LE) of the embedding document each vector was
+    /// computed from. A stable symbol ID does NOT prove the vector is current:
+    /// when the document changes (docs, body) the vector must be regenerated.
+    #[serde(default)]
+    pub hashes: HashMap<SymbolId, u64>,
 }
 
 impl EmbedStore {
@@ -86,6 +91,14 @@ impl EmbedStore {
 
     pub fn remove_ids(&mut self, ids: &HashSet<SymbolId>) {
         self.vectors.retain(|k, _| !ids.contains(k));
+        self.hashes.retain(|k, _| !ids.contains(k));
+    }
+
+    /// Keep only entries whose ID is in `keep`; drops vectors and document
+    /// hashes for symbols that no longer exist in the index.
+    pub fn retain_ids(&mut self, keep: &HashSet<SymbolId>) {
+        self.vectors.retain(|k, _| keep.contains(k));
+        self.hashes.retain(|k, _| keep.contains(k));
     }
 
     pub fn dimension(&self) -> Option<usize> {
@@ -139,6 +152,49 @@ mod tests {
     }
 
     #[test]
+    fn retain_ids_drops_vectors_and_hashes_for_deleted_symbols() {
+        let mut store = EmbedStore::new();
+        store.update("a".to_string(), vec![1.0]);
+        store.update("b".to_string(), vec![2.0]);
+        store.hashes.insert("a".to_string(), 10);
+        store.hashes.insert("b".to_string(), 20);
+
+        let keep: HashSet<SymbolId> = ["b".to_string()].into();
+        store.retain_ids(&keep);
+
+        assert!(!store.vectors.contains_key("a"));
+        assert!(!store.hashes.contains_key("a"));
+        assert!(store.vectors.contains_key("b"));
+        assert_eq!(store.hashes.get("b"), Some(&20));
+    }
+
+    #[test]
+    fn hashes_survive_serialisation_round_trip() {
+        let mut store = EmbedStore::new();
+        store.update("a".to_string(), vec![1.0]);
+        store.hashes.insert("a".to_string(), 0xDEADBEEF);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        store.save(tmp.path()).unwrap();
+        let loaded = EmbedStore::load(tmp.path()).unwrap();
+
+        assert_eq!(loaded.hashes.get("a"), Some(&0xDEADBEEF));
+    }
+
+    #[test]
+    fn remove_ids_also_removes_document_hashes() {
+        let mut store = EmbedStore::new();
+        store.update("a".to_string(), vec![1.0]);
+        store.hashes.insert("a".to_string(), 7);
+
+        let remove: HashSet<SymbolId> = ["a".to_string()].into();
+        store.remove_ids(&remove);
+
+        assert!(store.vectors.is_empty());
+        assert!(store.hashes.is_empty());
+    }
+
+    #[test]
     fn metadata_rejects_model_or_document_changes() {
         let metadata = EmbedStoreMetadata {
             format_version: crate::embed::document::DOCUMENT_FORMAT_VERSION,
@@ -176,7 +232,7 @@ mod tests {
                 .filter_map(|&i| keys.get(i).cloned())
                 .collect();
 
-            let mut store = EmbedStore { vectors: vectors.clone() };
+            let mut store = EmbedStore { vectors: vectors.clone(), hashes: HashMap::new() };
             store.remove_ids(&ids_to_remove);
 
             // None of the removed IDs should remain
@@ -209,7 +265,7 @@ mod tests {
             )
         ) {
             // Validates: Requirements 6.1, 6.2
-            let store = EmbedStore { vectors: vectors.clone() };
+            let store = EmbedStore { vectors: vectors.clone(), hashes: HashMap::new() };
 
             let tmp = tempfile::NamedTempFile::new().unwrap();
             let path = tmp.path();

@@ -186,11 +186,27 @@ pub async fn generate_embeddings(
         store = EmbedStore::new();
     }
 
-    // 3. Collect symbols to embed: those NOT already in store
-    let symbols_to_embed: Vec<&Symbol> = index
+    // 3. Drop vectors and document hashes for symbols that no longer exist.
+    let live_ids: HashSet<SymbolId> = index.symbols.keys().cloned().collect();
+    store.retain_ids(&live_ids);
+
+    // 4. Build each symbol's document and hash it. A symbol must be re-embedded
+    //    when it is new, when its vector is missing, or when its document hash
+    //    changed (docs/body edited without renaming the symbol).
+    let symbol_docs: Vec<(&Symbol, String, u64)> = index
         .symbols
         .values()
-        .filter(|sym| force || !store.vectors.contains_key(&sym.id))
+        .map(|sym| {
+            let doc = document::build_symbol_document(sym, project_path.map(PathBuf::as_path));
+            let hash = document::document_hash(&doc);
+            (sym, doc, hash)
+        })
+        .collect();
+    let symbols_to_embed: Vec<(&Symbol, String, u64)> = symbol_docs
+        .into_iter()
+        .filter(|(sym, _doc, hash)| {
+            force || !store.vectors.contains_key(&sym.id) || store.hashes.get(&sym.id) != Some(hash)
+        })
         .collect();
 
     let total = symbols_to_embed.len();
@@ -211,22 +227,14 @@ pub async fn generate_embeddings(
             headers: config.headers.clone(),
         })));
 
-        // 4. Chunk into batch slices (size configurable via PITLANE_EMBED_BATCH_SIZE)
+        // 5. Chunk into batch slices (size configurable via PITLANE_EMBED_BATCH_SIZE)
         let batch_size = effective_batch_size();
-        let chunks: Vec<Vec<(String, String)>> = symbols_to_embed
+        let chunks: Vec<Vec<(String, String, u64)>> = symbols_to_embed
             .chunks(batch_size)
             .map(|chunk| {
                 chunk
                     .iter()
-                    .map(|sym| {
-                        (
-                            sym.id.clone(),
-                            document::build_symbol_document(
-                                sym,
-                                project_path.map(PathBuf::as_path),
-                            ),
-                        )
-                    })
+                    .map(|(sym, doc, hash)| (sym.id.clone(), doc.clone(), *hash))
                     .collect()
             })
             .collect();
@@ -243,10 +251,14 @@ pub async fn generate_embeddings(
                 if request_delay_ms > 0 && i > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(request_delay_ms)).await;
                 }
-                let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
-                let ids: Vec<String> = chunk.iter().map(|(id, _)| id.clone()).collect();
+                let texts: Vec<String> = chunk.iter().map(|(_, t, _)| t.clone()).collect();
+                let ids: Vec<String> = chunk.iter().map(|(id, _, _)| id.clone()).collect();
+                let hashes: Vec<u64> = chunk.iter().map(|(_, _, h)| *h).collect();
                 let results = client.embed_batch(&texts).await;
-                (i, ids.into_iter().zip(results).collect::<Vec<_>>())
+                (
+                    i,
+                    ids.into_iter().zip(results).zip(hashes).collect::<Vec<_>>(),
+                )
             }
         });
 
@@ -256,7 +268,7 @@ pub async fn generate_embeddings(
 
         while let Some((chunk_idx, batch)) = stream.next().await {
             let batch_size = batch.len();
-            for (id, maybe_vec) in batch {
+            for ((id, maybe_vec), hash) in batch {
                 match maybe_vec {
                     Some(vec) => {
                         // Check dimension consistency
@@ -270,7 +282,8 @@ pub async fn generate_embeddings(
                                 continue;
                             }
                         }
-                        store.update(id, vec);
+                        store.update(id.clone(), vec);
+                        store.hashes.insert(id, hash);
                         stored += 1;
                     }
                     None => {
@@ -373,11 +386,24 @@ pub async fn update_embeddings_for_files(
     let removed_set: HashSet<SymbolId> = removed_ids.iter().cloned().collect();
     store.remove_ids(&removed_set);
 
-    // 3. Collect symbols whose file is in changed_files
-    let symbols_to_embed: Vec<&Symbol> = index
+    // 3. Collect symbols whose file is in changed_files and whose document
+    //    actually changed (new, missing vector, or changed document hash).
+    let symbols_to_embed: Vec<(&Symbol, String, u64)> = index
         .symbols
         .values()
         .filter(|sym| !compatible || changed_files.contains(sym.file.as_ref()))
+        .filter_map(|sym| {
+            let doc = document::build_symbol_document(sym, None);
+            let hash = document::document_hash(&doc);
+            if !compatible
+                || !store.vectors.contains_key(&sym.id)
+                || store.hashes.get(&sym.id) != Some(&hash)
+            {
+                Some((sym, doc, hash))
+            } else {
+                None
+            }
+        })
         .collect();
 
     if !symbols_to_embed.is_empty() {
@@ -388,12 +414,12 @@ pub async fn update_embeddings_for_files(
         })));
 
         // 4. Chunk into batch slices and dispatch via buffer_unordered
-        let chunks: Vec<Vec<(String, String)>> = symbols_to_embed
+        let chunks: Vec<Vec<(String, String, u64)>> = symbols_to_embed
             .chunks(effective_batch_size())
             .map(|chunk| {
                 chunk
                     .iter()
-                    .map(|sym| (sym.id.clone(), document::build_symbol_document(sym, None)))
+                    .map(|(sym, doc, hash)| (sym.id.clone(), doc.clone(), *hash))
                     .collect()
             })
             .collect();
@@ -406,23 +432,26 @@ pub async fn update_embeddings_for_files(
                 if request_delay_ms > 0 && i > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(request_delay_ms)).await;
                 }
-                let texts: Vec<String> = chunk.iter().map(|(_, t)| t.clone()).collect();
-                let ids: Vec<String> = chunk.iter().map(|(id, _)| id.clone()).collect();
+                let texts: Vec<String> = chunk.iter().map(|(_, t, _)| t.clone()).collect();
+                let ids: Vec<String> = chunk.iter().map(|(id, _, _)| id.clone()).collect();
+                let hashes: Vec<u64> = chunk.iter().map(|(_, _, h)| *h).collect();
                 let results = client.embed_batch(&texts).await;
-                ids.into_iter().zip(results).collect::<Vec<_>>()
+                ids.into_iter().zip(results).zip(hashes).collect::<Vec<_>>()
             }
         });
 
-        let results: Vec<Vec<(String, Option<Vec<f32>>)>> = futures::stream::iter(chunk_futures)
+        type EmbedBatch = ((String, Option<Vec<f32>>), u64);
+        let results: Vec<Vec<EmbedBatch>> = futures::stream::iter(chunk_futures)
             .buffer_unordered(effective_max_concurrency())
             .collect()
             .await;
 
-        // 5. Update store: Some → update, None → log warn and skip
+        // 5. Update store: Some → update (vector + hash), None → log warn and skip
         for batch in results {
-            for (id, maybe_vec) in batch {
+            for ((id, maybe_vec), hash) in batch {
                 match maybe_vec {
                     Some(vec) => {
+                        store.hashes.insert(id.clone(), hash);
                         store.update(id, vec);
                     }
                     None => {
@@ -1125,5 +1154,159 @@ mod tests {
                 actual_hits
             );
         }
+    }
+
+    // ── Issue #75: regenerate vectors when a symbol's document changes ──
+
+    fn make_symbol(file: std::sync::Arc<PathBuf>, id: &str, name: &str) -> Symbol {
+        let len = std::fs::metadata(file.as_ref()).unwrap().len() as usize;
+        Symbol {
+            id: id.to_string(),
+            name: name.to_string(),
+            qualified: name.to_string(),
+            kind: SymbolKind::Function,
+            language: Language::Rust,
+            file,
+            byte_start: 0,
+            byte_end: len,
+            line_start: 1,
+            line_end: 1,
+            signature: Some(format!("fn {name}()")),
+            doc: None,
+        }
+    }
+
+    async fn embed_index(index: &SymbolIndex, server_url: &str, store_path: &Path) -> EmbedResult {
+        let config = EmbedConfig {
+            url: server_url.to_string(),
+            model: "test".to_string(),
+            headers: HeaderMap::new(),
+        };
+        generate_embeddings(index, &config, store_path, false, None, None).await
+    }
+
+    fn mock_embedding_server(server: &httpmock::MockServer) -> httpmock::Mock<'_> {
+        use httpmock::prelude::*;
+        let embedding: Vec<f32> = vec![1.0_f32, 0.0_f32, 0.0_f32];
+        let data_items: Vec<serde_json::Value> = (0..crate::embed::client::BATCH_SIZE)
+            .map(|_| serde_json::json!({ "embedding": embedding }))
+            .collect();
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(serde_json::json!({ "data": data_items }).to_string());
+        })
+    }
+
+    #[tokio::test]
+    async fn test_document_change_with_stable_id_is_re_embedded() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        std::fs::write(&file_path, b"fn alpha() { old_body(); }").unwrap();
+
+        let server = httpmock::MockServer::start();
+        let mock = mock_embedding_server(&server);
+        let server_url = server.url("/");
+        let store_path = dir.path().join("embeddings.bin");
+
+        // First pass: embed the initial document.
+        let mut index = SymbolIndex::new();
+        index.insert(make_symbol(
+            Arc::new(file_path.clone()),
+            "lib.rs::alpha#function",
+            "alpha",
+        ));
+        let first = embed_index(&index, &server_url, &store_path).await;
+        assert_eq!(first.error, None);
+        assert_eq!(first.stored, 1);
+
+        let store_after_first = EmbedStore::load(&store_path).unwrap();
+        let hash_after_first = *store_after_first
+            .hashes
+            .get("lib.rs::alpha#function")
+            .unwrap();
+        let hits_after_first = mock.calls();
+
+        // Second pass with NO changes: nothing to do, zero HTTP requests.
+        let second = embed_index(&index, &server_url, &store_path).await;
+        assert_eq!(second.stored, 0, "unchanged document must not re-embed");
+        assert_eq!(mock.calls(), hits_after_first);
+
+        // Third pass: edit the body WITHOUT renaming the symbol. The ID is
+        // stable, so the old code skipped it and served a stale vector.
+        std::fs::write(&file_path, b"fn alpha() { new_body(); }").unwrap();
+        let mut index2 = SymbolIndex::new();
+        index2.insert(make_symbol(
+            Arc::new(file_path.clone()),
+            "lib.rs::alpha#function",
+            "alpha",
+        ));
+
+        let third = embed_index(&index2, &server_url, &store_path).await;
+        assert_eq!(third.error, None);
+        assert_eq!(
+            third.stored, 1,
+            "changed document must be re-embedded even with a stable symbol ID"
+        );
+        assert!(mock.calls() > hits_after_first);
+
+        let store_after_third = EmbedStore::load(&store_path).unwrap();
+        let hash_after_third = *store_after_third
+            .hashes
+            .get("lib.rs::alpha#function")
+            .unwrap();
+        assert_ne!(
+            hash_after_first, hash_after_third,
+            "document hash must reflect the content change"
+        );
+        assert!(store_after_third
+            .vectors
+            .contains_key("lib.rs::alpha#function"));
+    }
+
+    #[tokio::test]
+    async fn test_deleted_symbols_are_pruned_from_store() {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        std::fs::write(&file_path, b"fn alpha() {}\nfn beta() {}").unwrap();
+
+        let server = httpmock::MockServer::start();
+        let _mock = mock_embedding_server(&server);
+        let server_url = server.url("/");
+        let store_path = dir.path().join("embeddings.bin");
+
+        let mut index = SymbolIndex::new();
+        index.insert(make_symbol(
+            Arc::new(file_path.clone()),
+            "lib.rs::alpha#function",
+            "alpha",
+        ));
+        index.insert(make_symbol(
+            Arc::new(file_path.clone()),
+            "lib.rs::beta#function",
+            "beta",
+        ));
+        let first = embed_index(&index, &server_url, &store_path).await;
+        assert_eq!(first.stored, 2);
+
+        // beta disappears from the project.
+        let mut smaller = SymbolIndex::new();
+        smaller.insert(make_symbol(
+            Arc::new(file_path.clone()),
+            "lib.rs::alpha#function",
+            "alpha",
+        ));
+        let second = embed_index(&smaller, &server_url, &store_path).await;
+        assert_eq!(second.error, None);
+
+        let store = EmbedStore::load(&store_path).unwrap();
+        assert!(store.vectors.contains_key("lib.rs::alpha#function"));
+        assert!(!store.vectors.contains_key("lib.rs::beta#function"));
+        assert!(!store.hashes.contains_key("lib.rs::beta#function"));
     }
 }
