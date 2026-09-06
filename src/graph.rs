@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tree_sitter::{Node, Parser};
 
 use crate::index::SymbolIndex;
-use crate::indexer::language::{Language, Symbol, SymbolKind};
+use crate::indexer::language::{Language, Symbol, SymbolId, SymbolKind};
 use crate::path_policy::open_regular_file;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,18 +93,55 @@ pub fn read_symbol_source(sym: &Symbol, include_context: bool) -> anyhow::Result
     }
 }
 
+/// Name-to-candidate lookup built once per graph build. Replaces scanning
+/// every indexed symbol for each source symbol (O(N²)) with O(1) lookups.
+pub(crate) struct CandidateIndex {
+    by_name: HashMap<(Language, String), Vec<SymbolId>>,
+}
+
+impl CandidateIndex {
+    pub fn build(index: &SymbolIndex) -> Self {
+        let mut by_name: HashMap<(Language, String), Vec<SymbolId>> = HashMap::new();
+        for sym in index.symbols.values() {
+            by_name
+                .entry((sym.language.clone(), sym.name.clone()))
+                .or_default()
+                .push(sym.id.clone());
+        }
+        Self { by_name }
+    }
+
+    /// Same-language candidates for `name`, excluding `excluding_id`.
+    fn lookup<'a>(
+        &self,
+        index: &'a SymbolIndex,
+        language: Language,
+        name: &str,
+        excluding_id: &str,
+    ) -> Vec<&'a Symbol> {
+        self.by_name
+            .get(&(language, name.to_string()))
+            .into_iter()
+            .flatten()
+            .filter(|id| id.as_str() != excluding_id)
+            .filter_map(|id| index.symbols.get(id))
+            .collect()
+    }
+}
+
 pub fn build_navigation_graph(index: &SymbolIndex) -> NavigationGraph {
     let mut graph = NavigationGraph {
         built: true,
         ..Default::default()
     };
 
+    let candidates = CandidateIndex::build(index);
     for sym in index.symbols.values() {
         let source_text = match read_symbol_source(sym, false) {
             Ok(source) => source,
             Err(_) => continue,
         };
-        for reference in scan_direct_references(index, sym, &source_text) {
+        for reference in scan_direct_references(index, sym, &source_text, &candidates) {
             let Some(target) = index.symbols.get(&reference.id) else {
                 continue;
             };
@@ -163,7 +200,7 @@ pub fn collect_direct_references(
             &owned_source
         }
     };
-    scan_direct_references(index, sym, source_text)
+    scan_direct_references(index, sym, source_text, &CandidateIndex::build(index))
 }
 
 pub fn collect_direct_callable_references(
@@ -246,10 +283,11 @@ fn scan_direct_references(
     index: &SymbolIndex,
     sym: &Symbol,
     source_text: &str,
+    candidates: &CandidateIndex,
 ) -> Vec<DirectReference> {
     let mut refs = Vec::new();
     let cap_generic_confidence = if sym.language == Language::Rust {
-        match scan_rust_direct_references(index, sym, source_text) {
+        match scan_rust_direct_references(index, sym, source_text, candidates) {
             Some(mut rust_refs) => {
                 refs.append(&mut rust_refs);
                 Some(0.84)
@@ -265,6 +303,7 @@ fn scan_direct_references(
         sym,
         source_text,
         cap_generic_confidence,
+        candidates,
     ));
     sort_direct_references(&mut refs);
     refs
@@ -391,37 +430,26 @@ fn scan_generic_direct_references(
     sym: &Symbol,
     source_text: &str,
     max_confidence: Option<f32>,
+    candidates: &CandidateIndex,
 ) -> Vec<DirectReference> {
     // Comments and strings must not contribute call evidence: strip them
     // before extracting identifiers or searching for evidence lines.
     let cleaned = strip_comments_and_strings(source_text);
     let identifiers = extract_identifiers(&cleaned);
 
-    // A name that resolves to multiple same-language candidates is ambiguous:
-    // a name match cannot distinguish which one (if any) is actually called.
-    let mut name_counts: HashMap<&str, usize> = HashMap::new();
-    for candidate in index
-        .symbols
-        .values()
-        .filter(|candidate| candidate.language == sym.language)
-    {
-        *name_counts.entry(candidate.name.as_str()).or_default() += 1;
-    }
-
-    index
-        .symbols
-        .values()
+    identifiers
+        .into_iter()
         // Candidate resolution is restricted to the referencing symbol's
         // language: a name match in another language is not a call.
-        .filter(|candidate| {
-            candidate.language == sym.language
-                && candidate.id != sym.id
-                && identifiers.contains(candidate.name.as_str())
-        })
+        .flat_map(|name| candidates.lookup(index, sym.language.clone(), name, &sym.id))
         .map(|candidate| {
-            let ambiguous = name_counts
-                .get(candidate.name.as_str())
-                .is_some_and(|count| *count > 1);
+            // A name that resolves to multiple same-language candidates is
+            // ambiguous: a name match cannot distinguish which one (if any)
+            // is actually called.
+            let ambiguous = candidates
+                .lookup(index, sym.language.clone(), &candidate.name, &sym.id)
+                .len()
+                > 1;
             let (evidence, mut confidence) = reference_evidence(
                 source_text,
                 &cleaned,
@@ -622,51 +650,32 @@ fn scan_rust_direct_references(
     index: &SymbolIndex,
     sym: &Symbol,
     source_text: &str,
+    candidates: &CandidateIndex,
 ) -> Option<Vec<DirectReference>> {
     let matches = collect_rust_call_matches(source_text)?;
 
-    // Resolve call targets within the same language only, and treat a name
-    // shared by multiple Rust candidates as ambiguous.
-    let mut name_counts: HashMap<&str, usize> = HashMap::new();
-    for candidate in index
-        .symbols
-        .values()
-        .filter(|candidate| candidate.language == Language::Rust)
-    {
-        *name_counts.entry(candidate.name.as_str()).or_default() += 1;
-    }
-
     let mut refs = Vec::new();
     for matched in matches {
-        let ambiguous = name_counts
-            .get(matched.name.as_str())
-            .is_some_and(|count| *count > 1);
-        refs.extend(
-            index
-                .symbols
-                .values()
-                .filter(|candidate| {
-                    candidate.language == Language::Rust
-                        && candidate.id != sym.id
-                        && candidate.name == matched.name
-                })
-                .map(|candidate| {
-                    let confidence = if ambiguous {
-                        matched.confidence.min(AMBIGUOUS_CONFIDENCE_CAP)
-                    } else {
-                        matched.confidence
-                    };
-                    DirectReference {
-                        id: candidate.id.clone(),
-                        name: candidate.name.clone(),
-                        kind: candidate.kind.to_string(),
-                        file: candidate.file.to_string_lossy().replace('\\', "/"),
-                        line_start: candidate.line_start,
-                        evidence: matched.evidence.clone(),
-                        confidence,
-                    }
-                }),
-        );
+        // Resolve call targets within the same language only, and treat a
+        // name shared by multiple Rust candidates as ambiguous.
+        let resolved = candidates.lookup(index, Language::Rust, &matched.name, &sym.id);
+        let ambiguous = resolved.len() > 1;
+        refs.extend(resolved.into_iter().map(|candidate| {
+            let confidence = if ambiguous {
+                matched.confidence.min(AMBIGUOUS_CONFIDENCE_CAP)
+            } else {
+                matched.confidence
+            };
+            DirectReference {
+                id: candidate.id.clone(),
+                name: candidate.name.clone(),
+                kind: candidate.kind.to_string(),
+                file: candidate.file.to_string_lossy().replace('\\', "/"),
+                line_start: candidate.line_start,
+                evidence: matched.evidence.clone(),
+                confidence,
+            }
+        }));
     }
     sort_direct_references(&mut refs);
     Some(refs)
