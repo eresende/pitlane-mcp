@@ -219,8 +219,34 @@ fn normalize_investigate_key(query: &str) -> String {
     }
 }
 
-fn investigate_cache_key(query: &str) -> String {
-    format!("investigate:{}", normalize_investigate_key(query))
+fn investigate_cache_key(
+    query: &str,
+    language: Option<&str>,
+    scope: Option<&str>,
+    epoch: u64,
+) -> String {
+    // Language and scope filters change which symbols an investigation may
+    // consider, so they must be part of the key. The epoch changes whenever
+    // the index is rebuilt (reindex or watcher update), invalidating answers
+    // that may reference stale source.
+    let mut key = format!("investigate:v2:{}", epoch);
+    if let Some(lang) = language {
+        let lang = lang.trim().to_lowercase();
+        if !lang.is_empty() {
+            key.push_str(";lang=");
+            key.push_str(&lang);
+        }
+    }
+    if let Some(scope) = scope {
+        let scope = scope.trim();
+        if !scope.is_empty() {
+            key.push_str(";scope=");
+            key.push_str(scope);
+        }
+    }
+    key.push(';');
+    key.push_str(&normalize_investigate_key(query));
+    key
 }
 
 fn mark_investigate_repeated(mut response: Value) -> Value {
@@ -244,7 +270,12 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         return Err(anyhow::anyhow!("query must not be empty"));
     }
 
-    let cache_key = investigate_cache_key(&query);
+    let cache_key = investigate_cache_key(
+        &query,
+        params.language.as_deref(),
+        params.scope.as_deref(),
+        session::investigate_epoch(&canonical),
+    );
     if let Some(cached) = session::get_investigate_cache(&canonical, &cache_key) {
         return Ok(mark_investigate_repeated(cached));
     }
@@ -634,6 +665,118 @@ mod tests {
         assert_eq!(second["answer"], first["answer"]);
         assert_eq!(second["symbols_read"], first["symbols_read"]);
         assert!(second["guidance"].as_str().is_some());
+    }
+
+    #[test]
+    fn test_investigate_cache_key_separates_filters_and_epochs() {
+        let base = investigate_cache_key("gitignore", None, None, 0);
+        assert!(base.contains("gitignore"));
+        // Language filter changes the key.
+        assert_ne!(
+            investigate_cache_key("gitignore", Some("rust"), None, 0),
+            base
+        );
+        // Scope filter changes the key.
+        assert_ne!(
+            investigate_cache_key("gitignore", None, Some("src/tools"), 0),
+            base
+        );
+        // A new epoch (index rebuild) changes the key.
+        assert_ne!(investigate_cache_key("gitignore", None, None, 1), base);
+        // Filters are normalized so casing/whitespace alone cannot bypass the cache.
+        assert_eq!(
+            investigate_cache_key("gitignore", Some(" Rust "), None, 0),
+            investigate_cache_key("gitignore", Some("rust"), None, 0)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_investigate_cache_distinguishes_language_filter() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn alpha() {}\n").unwrap();
+        std::fs::write(dir.path().join("mod.py"), "def alpha():\n    pass\n").unwrap();
+        let project = setup_project(&dir).await;
+
+        let unfiltered = investigate(InvestigateParams {
+            project: project.clone(),
+            query: "alpha".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(unfiltered["repeated"], json!(false));
+
+        // Same query but scoped to Python must not reuse the unfiltered answer.
+        let py = investigate(InvestigateParams {
+            project: project.clone(),
+            query: "alpha".to_string(),
+            language: Some("python".to_string()),
+            scope: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(py["repeated"], json!(false));
+
+        // And the exact same filter still hits the cache.
+        let py_repeat = investigate(InvestigateParams {
+            project,
+            query: "alpha".to_string(),
+            language: Some("python".to_string()),
+            scope: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(py_repeat["repeated"], json!(true));
+        assert_eq!(py_repeat["answer"], py["answer"]);
+    }
+
+    #[tokio::test]
+    async fn test_investigate_cache_invalidated_by_reindex_after_content_change() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn stale_symbol() {}\n").unwrap();
+        let project = setup_project(&dir).await;
+
+        let first = investigate(InvestigateParams {
+            project: project.clone(),
+            query: "stale_symbol".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(first["repeated"], json!(false));
+
+        // Repeating before any change is a cache hit.
+        let repeat = investigate(InvestigateParams {
+            project: project.clone(),
+            query: "stale_symbol".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(repeat["repeated"], json!(true));
+
+        // Edit the source and reindex; the cached answer is now stale and
+        // must not be returned.
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn fresh_symbol() {}\npub fn unrelated() {}\n",
+        )
+        .unwrap();
+        setup_project(&dir).await;
+
+        let after = investigate(InvestigateParams {
+            project,
+            query: "stale_symbol".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(after["repeated"], json!(false));
+        assert!(after["answer"].as_str().unwrap().contains("fresh_symbol"));
     }
 
     #[tokio::test]

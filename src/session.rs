@@ -23,6 +23,9 @@ struct ProjectSessionState {
     recent_content: HashMap<String, u64>,
     recent_target_content: HashMap<String, (String, u64)>,
     investigate_cache: HashMap<String, (Value, u64)>,
+    /// Bumped whenever indexed content changes so stale investigate answers
+    /// are never served, even if the cache map itself still holds entries.
+    investigate_epoch: u64,
 }
 
 struct SessionEntry {
@@ -357,6 +360,23 @@ fn score_recent(last_seen: Option<u64>, now: u64, base: i32) -> i32 {
     (base - age * 2).max(0)
 }
 
+/// Drop every cached `investigate` answer for this project and bump the
+/// epoch so any key computed before this point can no longer hit.
+///
+/// Called by `crate::cache::invalidate` whenever the symbol index changes
+/// (reindexing via `index_project`, or watcher-driven updates).
+pub fn invalidate_investigate_cache(project: &Path) {
+    with_state_mut(project, |state| {
+        state.investigate_cache.clear();
+        state.investigate_epoch = state.investigate_epoch.wrapping_add(1);
+    });
+}
+
+/// Current investigate-cache epoch for this project. Part of the cache key.
+pub fn investigate_epoch(project: &Path) -> u64 {
+    with_state(project, |state| state.investigate_epoch)
+}
+
 fn prune_investigate_cache(state: &mut ProjectSessionState) {
     if state.investigate_cache.len() <= MAX_INVESTIGATE_CACHE {
         return;
@@ -545,5 +565,19 @@ mod tests {
         let cached = get_investigate_cache(&project, key).expect("cached payload");
         assert_eq!(cached["answer"], payload["answer"]);
         assert_eq!(cached["symbols_read"], payload["symbols_read"]);
+    }
+
+    #[test]
+    fn test_invalidate_investigate_cache_drops_entries_and_bumps_epoch() {
+        let project = unique_project("session-test-invalidate");
+        let key = "investigate:v2:0;gitignore";
+        store_investigate_cache(&project, key, serde_json::json!({"answer": "old"}));
+        assert!(get_investigate_cache(&project, key).is_some());
+
+        let epoch_before = investigate_epoch(&project);
+        invalidate_investigate_cache(&project);
+
+        assert!(get_investigate_cache(&project, key).is_none());
+        assert_ne!(investigate_epoch(&project), epoch_before);
     }
 }

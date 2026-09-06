@@ -308,7 +308,10 @@ async fn do_index_project(
         tracing::warn!(error = %e, "BM25 index build failed; search will fall back to exact");
     }
 
-    let cached_index = crate::cache::insert(canonical_for_meta, index);
+    let cached_index = crate::cache::insert(canonical_for_meta.clone(), index);
+    // The indexed content may have changed: stale cached investigate answers
+    // must not be served for the fresh index.
+    crate::session::invalidate_investigate_cache(&canonical_for_meta);
 
     // Embedding phase (opt-in) — runs in a detached background task so the
     // MCP response returns as soon as the symbol index is ready. Semantic
