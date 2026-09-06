@@ -353,6 +353,7 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
 
     // Phase 3: For struct/class results, also pull their key methods.
     let mut extra_ids: Vec<String> = Vec::new();
+    let mut omitted_ids: Vec<String> = Vec::new();
     for id in &discovered_ids {
         if let Some(sym) = index.symbols.get(id.as_str()) {
             let is_container = matches!(
@@ -394,7 +395,12 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         }
     }
     discovered_ids.extend(extra_ids);
-    discovered_ids.truncate(MAX_INLINE_SYMBOLS);
+    // Symbols beyond the inline cap are reported as omissions rather than
+    // silently dropped, so callers know the answer is not exhaustive.
+    if discovered_ids.len() > MAX_INLINE_SYMBOLS {
+        omitted_ids.extend(discovered_ids[MAX_INLINE_SYMBOLS..].iter().cloned());
+        discovered_ids.truncate(MAX_INLINE_SYMBOLS);
+    }
 
     // Phase 3b: If the query mentions tests, prioritize test functions.
     let query_lower = query.to_lowercase();
@@ -487,10 +493,14 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         if !test_ids.is_empty() {
             // Replace some implementation symbols with test symbols
             // Keep at most 2 implementation symbols, fill rest with tests
-            discovered_ids.truncate(2);
+            if discovered_ids.len() > 2 {
+                omitted_ids.extend(discovered_ids[2..].iter().cloned());
+                discovered_ids.truncate(2);
+            }
             for id in test_ids {
                 if discovered_ids.len() >= MAX_INLINE_SYMBOLS {
-                    break;
+                    omitted_ids.push(id);
+                    continue;
                 }
                 if !discovered_ids.contains(&id) {
                     discovered_ids.push(id);
@@ -503,6 +513,8 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
     let mut sections: Vec<String> = Vec::new();
     let mut files_seen: Vec<String> = Vec::new();
     let mut symbols_seen: Vec<Value> = Vec::new();
+    let mut truncated_symbols: Vec<Value> = Vec::new();
+    let mut unreadable_ids: Vec<String> = Vec::new();
 
     for symbol_id in &discovered_ids {
         let Some(sym) = index.symbols.get(symbol_id.as_str()) else {
@@ -514,16 +526,20 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
 
         let source = match read_symbol_source(sym, false) {
             Ok(s) => s,
-            Err(_) => continue,
+            Err(_) => {
+                unreadable_ids.push(sym.id.clone());
+                continue;
+            }
         };
 
         let lines: Vec<&str> = source.lines().collect();
-        let truncated = lines.len() > MAX_INLINE_LINES;
+        let total_lines = lines.len();
+        let truncated = total_lines > MAX_INLINE_LINES;
         let body = if truncated {
             let mut t = lines[..MAX_INLINE_LINES].join("\n");
             t.push_str(&format!(
                 "\n// ... ({} more lines)",
-                lines.len() - MAX_INLINE_LINES
+                total_lines - MAX_INLINE_LINES
             ));
             t
         } else {
@@ -531,9 +547,18 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         };
 
         sections.push(format!(
-            "### {} `{}` in {}\n```{}\n{}\n```",
-            sym.kind, sym.qualified, short_file, sym.language, body,
+            "### {} `{}` in {} (lines {}-{})\n```{}\n{}\n```",
+            sym.kind, sym.qualified, short_file, sym.line_start, sym.line_end, sym.language, body,
         ));
+
+        if truncated {
+            truncated_symbols.push(json!({
+                "id": sym.id,
+                "name": sym.name,
+                "lines_shown": MAX_INLINE_LINES,
+                "lines_total": total_lines,
+            }));
+        }
 
         if !files_seen.contains(&file_str) {
             files_seen.push(file_str.clone());
@@ -543,11 +568,46 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
             "name": sym.name,
             "file": file_str,
             "kind": sym.kind.to_string(),
+            "line_start": sym.line_start,
+            "line_end": sym.line_end,
+            "lines_shown": total_lines.min(MAX_INLINE_LINES),
+            "lines_total": total_lines,
         }));
 
         session::record_symbol(&canonical, &sym.id, Some(sym.file.as_ref()));
         session::record_file(&canonical, &sym.file);
     }
+
+    // Omission metadata: discovered symbols that did not fit inline, plus
+    // symbols whose source could not be read.
+    let omitted_symbols: Vec<Value> = omitted_ids
+        .iter()
+        .filter_map(|id| index.symbols.get(id.as_str()))
+        .map(|sym| {
+            json!({
+                "id": sym.id,
+                "name": sym.name,
+                "file": sym.file.to_string_lossy().replace('\\', "/"),
+                "kind": sym.kind.to_string(),
+                "line_start": sym.line_start,
+                "reason": "inline symbol cap reached",
+            })
+        })
+        .chain(unreadable_ids.iter().filter_map(|id| {
+            index.symbols.get(id.as_str()).map(|sym| {
+                json!({
+                    "id": sym.id,
+                    "name": sym.name,
+                    "file": sym.file.to_string_lossy().replace('\\', "/"),
+                    "kind": sym.kind.to_string(),
+                    "line_start": sym.line_start,
+                    "reason": "source could not be read",
+                })
+            })
+        }))
+        .collect();
+
+    let is_complete = truncated_symbols.is_empty() && omitted_symbols.is_empty();
 
     // Phase 5: Build prose response.
     let mut answer = String::new();
@@ -571,13 +631,25 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
             files_seen.len(),
         ));
         answer.push_str(&sections.join("\n\n"));
-        answer.push_str(
-            "\n\n---\n\
-             **IMPORTANT: Answer the user's question NOW from the code above.** \
-             Do NOT call investigate again. Do NOT call locate_code or read_code_unit \
-             unless the code above is clearly insufficient. \
-             The source code shown is the complete relevant implementation.",
-        );
+        answer.push_str("\n\n---\n");
+        if is_complete {
+            answer.push_str(
+                "**IMPORTANT: Answer the user's question NOW from the code above.** \
+                 Do NOT call investigate again. Do NOT call locate_code or read_code_unit \
+                 unless the code above is clearly insufficient. \
+                 The bodies shown above are complete for every symbol included.",
+            );
+        } else {
+            answer.push_str(&format!(
+                "**NOTE: This response is capped and may be incomplete.** {} symbol body(s) \
+                 were truncated and {} discovered symbol(s) were omitted due to response limits. \
+                 The claims below hold only for the lines shown. \
+                 Use read_code_unit(symbol_id=...) for any symbol listed in `truncated_symbols` \
+                 or `omitted_symbols` before concluding that something is absent.",
+                truncated_symbols.len(),
+                omitted_symbols.len(),
+            ));
+        }
     }
 
     session::record_query(&canonical, &query);
@@ -587,6 +659,14 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         "answer": answer,
         "symbols_read": symbols_seen.len(),
         "files_covered": files_seen.len(),
+        "symbols": symbols_seen,
+        "truncated_symbols": truncated_symbols,
+        "omitted_symbols": omitted_symbols,
+        "complete": is_complete,
+        "limits": {
+            "max_symbols": MAX_INLINE_SYMBOLS,
+            "max_lines_per_symbol": MAX_INLINE_LINES,
+        },
         "repeated": false,
     });
     session::store_investigate_cache(&canonical, &cache_key, response.clone());
@@ -806,5 +886,139 @@ mod tests {
         .unwrap();
         assert_eq!(ok["repeated"], json!(false));
         assert!(ok["symbols_read"].as_u64().unwrap_or(0) > 0);
+    }
+
+    #[tokio::test]
+    async fn test_investigate_reports_line_ranges_and_completeness() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn small_thing() {\n    let x = 1;\n    let _ = x;\n}\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let resp = investigate(InvestigateParams {
+            project,
+            query: "small_thing".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(resp["complete"], json!(true));
+        assert!(resp["truncated_symbols"].as_array().unwrap().is_empty());
+        assert!(resp["omitted_symbols"].as_array().unwrap().is_empty());
+        assert_eq!(resp["limits"]["max_lines_per_symbol"], json!(120));
+
+        let symbols = resp["symbols"].as_array().unwrap();
+        let sym = symbols
+            .iter()
+            .find(|s| s["name"] == "small_thing")
+            .expect("symbol metadata present");
+        assert!(sym["line_start"].as_u64().unwrap() >= 1);
+        assert!(sym["line_end"].as_u64().unwrap() >= sym["line_start"].as_u64().unwrap());
+        assert_eq!(sym["lines_total"], json!(4));
+        assert_eq!(sym["lines_shown"], json!(4));
+    }
+
+    #[tokio::test]
+    async fn test_investigate_flags_truncated_bodies_instead_of_claiming_completeness() {
+        // One symbol with far more than MAX_INLINE_LINES (120) lines of body.
+        let mut body = String::from("pub fn very_long_function() {\n");
+        for i in 0..200 {
+            body.push_str(&format!("    let _v{i} = {i}; // padding line\n"));
+        }
+        body.push_str("}\n");
+        body.push_str("pub fn tiny() {}\n");
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), body).unwrap();
+        let project = setup_project(&dir).await;
+
+        let resp = investigate(InvestigateParams {
+            project,
+            query: "very_long_function".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(resp["complete"], json!(false));
+
+        let truncated = resp["truncated_symbols"].as_array().unwrap();
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0]["name"], "very_long_function");
+        assert_eq!(truncated[0]["lines_shown"], json!(120));
+        assert_eq!(truncated[0]["lines_total"], json!(202));
+
+        let answer = resp["answer"].as_str().unwrap();
+        assert!(
+            answer.contains("capped and may be incomplete"),
+            "answer must not claim completeness when source was truncated"
+        );
+        assert!(!answer.contains("complete relevant implementation"));
+        assert!(answer.contains("read_code_unit"));
+
+        // The inlined symbol metadata still preserves line ranges.
+        let symbols = resp["symbols"].as_array().unwrap();
+        let sym = symbols
+            .iter()
+            .find(|s| s["name"] == "very_long_function")
+            .expect("truncated symbol present in symbols");
+        assert_eq!(sym["lines_shown"], json!(120));
+        assert_eq!(sym["lines_total"], json!(202));
+    }
+
+    #[tokio::test]
+    async fn test_investigate_reports_omitted_symbols_beyond_inline_cap() {
+        // A container struct pulls in its key methods as extras; when the
+        // inline cap (6) is exceeded, the dropped symbols must be reported
+        // as omissions instead of silently disappearing.
+        let mut src = String::from("pub struct Widget;\n\nimpl Widget {\n");
+        for name in [
+            "widget_alpha",
+            "widget_beta",
+            "widget_gamma",
+            "widget_delta",
+            "widget_epsilon",
+            "widget_zeta",
+        ] {
+            src.push_str(&format!(
+                "    pub fn {name}(&self) {{\n        let a = 1;\n        let b = 2;\n        let _ = (a, b);\n    }}\n\n"
+            ));
+        }
+        src.push_str("}\n\n");
+        for name in ["widget_one", "widget_two", "widget_three", "widget_four"] {
+            src.push_str(&format!("pub fn {name}() {{}}\n"));
+        }
+
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), src).unwrap();
+        let project = setup_project(&dir).await;
+
+        let resp = investigate(InvestigateParams {
+            project,
+            query: "widget".to_string(),
+            language: None,
+            scope: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(resp["symbols_read"].as_u64().unwrap(), 6);
+        let omitted = resp["omitted_symbols"].as_array().unwrap();
+        assert!(
+            !omitted.is_empty(),
+            "dropped symbols must be reported as omissions, resp={resp}"
+        );
+        assert_eq!(resp["complete"], json!(false));
+        // Every omission carries an actionable pointer.
+        for entry in omitted {
+            assert!(entry["id"].as_str().unwrap().contains("::"));
+            assert!(entry["reason"].as_str().is_some());
+        }
     }
 }
