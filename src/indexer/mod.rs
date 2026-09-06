@@ -54,7 +54,7 @@ impl Indexer {
         Self { parsers, ext_map }
     }
 
-    fn build_exclude_set(patterns: &[String]) -> anyhow::Result<GlobSet> {
+    pub fn build_exclude_set(patterns: &[String]) -> anyhow::Result<GlobSet> {
         let mut builder = GlobSetBuilder::new();
         for pat in patterns {
             builder.add(Glob::new(pat)?);
@@ -578,6 +578,35 @@ pub fn is_excluded_dir_name_with_custom(name: &str, extra_excluded_dirs: &HashSe
 pub fn is_excluded_dir_name(name: &str) -> bool {
     let extra_excluded_dirs = extra_excluded_dir_names();
     is_excluded_dir_name_with_custom(name, &extra_excluded_dirs)
+}
+
+/// Mirrors the walk filter of `index_project_with_progress`: a path is
+/// excluded when an exclude glob matches its project-relative path, or any
+/// path component is an excluded directory name (built-in or custom).
+///
+/// The watcher uses this so incremental updates apply the same exclusion
+/// policy as initial indexing.
+pub fn path_is_excluded(
+    path: &Path,
+    root: &Path,
+    exclude_set: &GlobSet,
+    extra_excluded_dirs: &HashSet<String>,
+) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else {
+        return false;
+    };
+    if rel == Path::new("") {
+        return true;
+    }
+    let rel_str = rel.to_string_lossy();
+    if exclude_set.is_match(rel_str.as_ref()) {
+        return true;
+    }
+    rel.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .is_some_and(|name| is_excluded_dir_name_with_custom(name, extra_excluded_dirs))
+    })
 }
 
 #[cfg(test)]

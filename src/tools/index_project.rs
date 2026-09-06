@@ -71,8 +71,25 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
     let index_path = idx_dir.join("index.bin");
     let meta_path = idx_dir.join("meta.json");
 
+    // The cached path is only valid when the persisted effective exclusions
+    // still match what this invocation would compute; otherwise a changed
+    // exclude set would silently keep serving symbols that are now excluded.
+    let cached_excludes_match = !force
+        && index_path.exists()
+        && meta_path.exists()
+        && load_meta(&meta_path)
+            .map(|m| m.effective_excludes)
+            .map(|persisted| {
+                let mut a = persisted.clone();
+                a.sort();
+                let mut b = exclude.clone();
+                b.sort();
+                a == b
+            })
+            .unwrap_or(false);
+
     // Check if we can use the up-to-date on-disk index.
-    if !force && index_path.exists() && meta_path.exists() {
+    if cached_excludes_match && meta_path.exists() {
         if let Ok(meta) = load_meta(&meta_path) {
             if is_index_up_to_date(&canonical, &meta, &exclude) {
                 if let Ok(index) = crate::index::format::load_index(&index_path) {
@@ -298,6 +315,9 @@ async fn do_index_project(
     meta.file_mtimes = snapshot.file_mtimes;
     meta.dir_mtimes = snapshot.dir_mtimes;
     meta.source_file_count = file_count;
+    // Persist the effective exclusions so watcher updates and full resyncs
+    // apply the same policy (issue #74).
+    meta.effective_excludes = exclude.clone();
     save_meta(&meta, &meta_path)?;
 
     // Build the BM25 index. Invalidate any stale cached reader first so the
@@ -971,6 +991,65 @@ mod tests {
             "adding a new supported file must invalidate the cached index"
         );
         assert_eq!(refreshed["file_count"], json!(2));
+    }
+
+    fn clone_params(p: &IndexProjectParams) -> IndexProjectParams {
+        IndexProjectParams {
+            path: p.path.clone(),
+            exclude: p.exclude.clone(),
+            force: p.force,
+            max_files: p.max_files,
+            progress_token: p.progress_token.clone(),
+            peer: p.peer.clone(),
+            embed_config: p.embed_config.clone(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_index_project_cached_path_invalidated_by_changed_excludes() {
+        // Issue #74: a changed exclude set must not be served from the cache,
+        // otherwise symbols that are now excluded would remain visible.
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn foo() {}").unwrap();
+        std::fs::write(dir.path().join("vendor/dep.rs"), b"pub fn dep_fn() {}").unwrap();
+
+        let base = IndexProjectParams {
+            path: dir.path().to_string_lossy().to_string(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        };
+        let initial = index_project(clone_params(&base)).await.unwrap();
+        assert_eq!(initial["file_count"], json!(2));
+
+        // Same content, but a different effective exclusion set.
+        let narrowed = IndexProjectParams {
+            exclude: Some(vec!["vendor/**".to_string()]),
+            force: Some(false),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+            path: base.path.clone(),
+        };
+        let resp = index_project(narrowed).await.unwrap();
+        assert_eq!(
+            resp["status"],
+            json!("indexed"),
+            "changed excludes must invalidate the cached path, resp={resp}"
+        );
+        assert_eq!(resp["file_count"], json!(1));
+
+        // And restoring the unchanged excludes re-indexes (the narrowed run
+        // stopped tracking vendor/dep.rs's mtime, so it correctly counts as
+        // new again).
+        let restored = index_project(clone_params(&base)).await.unwrap();
+        assert_eq!(restored["status"], json!("indexed"));
+        assert_eq!(restored["file_count"], json!(2));
     }
 
     #[tokio::test]

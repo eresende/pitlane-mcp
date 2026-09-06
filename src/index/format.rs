@@ -32,6 +32,12 @@ pub struct IndexMeta {
     pub dir_mtimes: HashMap<String, u64>,
     #[serde(default)]
     pub source_file_count: usize,
+    /// Effective exclusion patterns used at indexing time (custom patterns,
+    /// defaults, and `.gitignore` entries). The watcher reuses these so
+    /// incremental updates and full resyncs apply the same policy as the
+    /// initial indexing.
+    #[serde(default)]
+    pub effective_excludes: Vec<String>,
     pub repo_profile: RepoProfile,
 }
 
@@ -44,6 +50,7 @@ impl IndexMeta {
             file_mtimes: HashMap::new(),
             dir_mtimes: HashMap::new(),
             source_file_count: 0,
+            effective_excludes: Vec::new(),
             repo_profile: RepoProfile::default(),
         }
     }
