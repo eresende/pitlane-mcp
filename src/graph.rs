@@ -270,21 +270,165 @@ fn scan_direct_references(
     refs
 }
 
+/// Confidence cap for references whose target name is ambiguous (multiple
+/// same-language candidates). Below the `Calls` thresholds in
+/// `classify_relation`, so ambiguous name matches stay `References`.
+const AMBIGUOUS_CONFIDENCE_CAP: f32 = 0.84;
+
+/// Remove comments and string-literal contents from source, preserving
+/// newlines so cleaned text stays line-aligned with the original.
+///
+/// Call evidence must never be inferred from text inside comments or
+/// strings: a Python comment like `# authenticate_user()` previously
+/// produced ~0.98-confidence `calls` edges.
+fn strip_comments_and_strings(source: &str) -> String {
+    #[derive(PartialEq)]
+    enum State {
+        Normal,
+        LineComment,
+        BlockComment,
+        String(char),
+        TripleString(char),
+    }
+
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars().peekable();
+    let mut state = State::Normal;
+
+    while let Some(c) = chars.next() {
+        match state {
+            State::Normal => match c {
+                '"' | '\'' => {
+                    let q = c;
+                    if chars.peek() == Some(&q) {
+                        chars.next();
+                        if chars.peek() == Some(&q) {
+                            chars.next();
+                            state = State::TripleString(q);
+                            out.push_str("   ");
+                            continue;
+                        }
+                        // Empty string literal.
+                        out.push(q);
+                        out.push(q);
+                        continue;
+                    }
+                    state = State::String(q);
+                    out.push(q);
+                }
+                '/' if chars.peek() == Some(&'/') => {
+                    chars.next();
+                    state = State::LineComment;
+                    out.push_str("  ");
+                }
+                '/' if chars.peek() == Some(&'*') => {
+                    chars.next();
+                    state = State::BlockComment;
+                    out.push_str("  ");
+                }
+                '#' => {
+                    state = State::LineComment;
+                    out.push(' ');
+                }
+                _ => out.push(c),
+            },
+            State::LineComment => {
+                if c == '\n' {
+                    state = State::Normal;
+                    out.push('\n');
+                } else {
+                    out.push(' ');
+                }
+            }
+            State::BlockComment => {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    state = State::Normal;
+                    out.push_str("  ");
+                } else if c == '\n' {
+                    out.push('\n');
+                } else {
+                    out.push(' ');
+                }
+            }
+            State::String(q) => {
+                if c == '\\' {
+                    chars.next();
+                    out.push_str("  ");
+                } else if c == q || c == '\n' {
+                    // Unterminated single-line strings (e.g. Rust lifetimes
+                    // like &'a T) end at the newline rather than swallowing
+                    // the rest of the file.
+                    state = State::Normal;
+                    out.push(c);
+                } else {
+                    out.push(' ');
+                }
+            }
+            State::TripleString(q) => {
+                if c == q && chars.peek() == Some(&q) {
+                    chars.next();
+                    if chars.peek() == Some(&q) {
+                        chars.next();
+                        state = State::Normal;
+                        out.push_str("   ");
+                        continue;
+                    }
+                    out.push(q);
+                } else if c == '\n' {
+                    out.push('\n');
+                } else {
+                    out.push(' ');
+                }
+            }
+        }
+    }
+    out
+}
+
 fn scan_generic_direct_references(
     index: &SymbolIndex,
     sym: &Symbol,
     source_text: &str,
     max_confidence: Option<f32>,
 ) -> Vec<DirectReference> {
-    let identifiers = extract_identifiers(source_text);
-    let lines: Vec<&str> = source_text.lines().collect();
+    // Comments and strings must not contribute call evidence: strip them
+    // before extracting identifiers or searching for evidence lines.
+    let cleaned = strip_comments_and_strings(source_text);
+    let identifiers = extract_identifiers(&cleaned);
+
+    // A name that resolves to multiple same-language candidates is ambiguous:
+    // a name match cannot distinguish which one (if any) is actually called.
+    let mut name_counts: HashMap<&str, usize> = HashMap::new();
+    for candidate in index
+        .symbols
+        .values()
+        .filter(|candidate| candidate.language == sym.language)
+    {
+        *name_counts.entry(candidate.name.as_str()).or_default() += 1;
+    }
+
     index
         .symbols
         .values()
-        .filter(|candidate| candidate.id != sym.id && identifiers.contains(candidate.name.as_str()))
+        // Candidate resolution is restricted to the referencing symbol's
+        // language: a name match in another language is not a call.
+        .filter(|candidate| {
+            candidate.language == sym.language
+                && candidate.id != sym.id
+                && identifiers.contains(candidate.name.as_str())
+        })
         .map(|candidate| {
-            let (evidence, mut confidence) =
-                reference_evidence(&lines, candidate.name.as_str(), &candidate.kind);
+            let ambiguous = name_counts
+                .get(candidate.name.as_str())
+                .is_some_and(|count| *count > 1);
+            let (evidence, mut confidence) = reference_evidence(
+                source_text,
+                &cleaned,
+                candidate.name.as_str(),
+                &candidate.kind,
+                ambiguous,
+            );
             if let Some(max_confidence) = max_confidence {
                 confidence = confidence.min(max_confidence);
             }
@@ -431,11 +575,20 @@ fn sort_direct_references(refs: &mut Vec<DirectReference>) {
     refs.dedup_by(|a, b| a.id == b.id);
 }
 
-fn reference_evidence(lines: &[&str], name: &str, kind: &SymbolKind) -> (String, f32) {
-    for line in lines {
-        if line.contains(name) {
-            let trimmed = line.trim();
-            let confidence = if trimmed.contains('(') && !trimmed.starts_with("//") {
+fn reference_evidence(
+    source_text: &str,
+    cleaned: &str,
+    name: &str,
+    kind: &SymbolKind,
+    ambiguous: bool,
+) -> (String, f32) {
+    // Search the cleaned text (comments and string contents removed) so a
+    // name that only appears in a comment or string produces no call-grade
+    // evidence.
+    for (line, cleaned_line) in source_text.lines().zip(cleaned.lines()) {
+        if cleaned_line.contains(name) {
+            let trimmed = cleaned_line.trim();
+            let mut confidence: f32 = if trimmed.contains('(') {
                 if matches!(kind, SymbolKind::Function | SymbolKind::Method) {
                     0.98
                 } else {
@@ -446,13 +599,22 @@ fn reference_evidence(lines: &[&str], name: &str, kind: &SymbolKind) -> (String,
             } else {
                 0.8
             };
-            return (trimmed.chars().take(240).collect::<String>(), confidence);
+            if ambiguous {
+                confidence = confidence.min(AMBIGUOUS_CONFIDENCE_CAP);
+            }
+            let evidence = line.trim().chars().take(240).collect::<String>();
+            return (evidence, confidence);
         }
     }
 
+    let confidence = 0.72_f32.min(if ambiguous {
+        AMBIGUOUS_CONFIDENCE_CAP
+    } else {
+        1.0
+    });
     (
         format!("identifier `{name}` was extracted from the source text"),
-        0.72,
+        confidence,
     )
 }
 
@@ -462,21 +624,47 @@ fn scan_rust_direct_references(
     source_text: &str,
 ) -> Option<Vec<DirectReference>> {
     let matches = collect_rust_call_matches(source_text)?;
+
+    // Resolve call targets within the same language only, and treat a name
+    // shared by multiple Rust candidates as ambiguous.
+    let mut name_counts: HashMap<&str, usize> = HashMap::new();
+    for candidate in index
+        .symbols
+        .values()
+        .filter(|candidate| candidate.language == Language::Rust)
+    {
+        *name_counts.entry(candidate.name.as_str()).or_default() += 1;
+    }
+
     let mut refs = Vec::new();
     for matched in matches {
+        let ambiguous = name_counts
+            .get(matched.name.as_str())
+            .is_some_and(|count| *count > 1);
         refs.extend(
             index
                 .symbols
                 .values()
-                .filter(|candidate| candidate.id != sym.id && candidate.name == matched.name)
-                .map(|candidate| DirectReference {
-                    id: candidate.id.clone(),
-                    name: candidate.name.clone(),
-                    kind: candidate.kind.to_string(),
-                    file: candidate.file.to_string_lossy().replace('\\', "/"),
-                    line_start: candidate.line_start,
-                    evidence: matched.evidence.clone(),
-                    confidence: matched.confidence,
+                .filter(|candidate| {
+                    candidate.language == Language::Rust
+                        && candidate.id != sym.id
+                        && candidate.name == matched.name
+                })
+                .map(|candidate| {
+                    let confidence = if ambiguous {
+                        matched.confidence.min(AMBIGUOUS_CONFIDENCE_CAP)
+                    } else {
+                        matched.confidence
+                    };
+                    DirectReference {
+                        id: candidate.id.clone(),
+                        name: candidate.name.clone(),
+                        kind: candidate.kind.to_string(),
+                        file: candidate.file.to_string_lossy().replace('\\', "/"),
+                        line_start: candidate.line_start,
+                        evidence: matched.evidence.clone(),
+                        confidence,
+                    }
                 }),
         );
     }
@@ -657,6 +845,42 @@ mod tests {
         index
     }
 
+    fn build_index_files(files: &[(&str, &str)]) -> SymbolIndex {
+        let dir = TempDir::new().unwrap();
+        for (name, source) in files {
+            std::fs::write(dir.path().join(name), source).unwrap();
+        }
+        let indexer = Indexer::new(registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        index
+    }
+
+    fn outgoing_ids(index: &SymbolIndex, from_name: &str) -> Vec<(String, EdgeRelation, f32)> {
+        let from = index
+            .symbols
+            .values()
+            .find(|symbol| symbol.name == from_name)
+            .unwrap();
+        index
+            .graph
+            .outgoing
+            .get(&from.id)
+            .into_iter()
+            .flatten()
+            .map(|edge| {
+                (
+                    index
+                        .symbols
+                        .get(&edge.symbol_id)
+                        .map(|s| s.name.clone())
+                        .unwrap_or_default(),
+                    edge.relation,
+                    edge.confidence,
+                )
+            })
+            .collect()
+    }
+
     fn outgoing_edge<'a>(
         index: &'a SymbolIndex,
         from_name: &str,
@@ -705,5 +929,109 @@ mod tests {
         let run_edge = outgoing_edge(&index, "root", "run").unwrap();
         assert_eq!(run_edge.relation, EdgeRelation::Calls);
         assert!(run_edge.evidence.contains("worker.run();"));
+    }
+
+    // ── Issue #76 fixtures ──────────────────────────────────────────────
+
+    #[test]
+    fn test_comment_mentioning_call_produces_no_calls_edge() {
+        // A Python comment containing `authenticate_user()` previously
+        // produced ~0.98-confidence `calls` edges to the Python function
+        // and an unrelated same-name Rust function.
+        let index = build_index_files(&[
+            (
+                "svc.py",
+                "def authenticate_user():\n    pass\n\ndef caller():\n    # authenticate_user() handles login\n    return None\n",
+            ),
+            ("auth.rs", "fn authenticate_user() {}\n"),
+        ]);
+
+        let edges = outgoing_ids(&index, "caller");
+        assert!(
+            edges.is_empty(),
+            "comment-only mention must produce no edges, got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn test_string_mentioning_call_produces_no_calls_edge() {
+        let index =
+            build_index("fn helper() {}\nfn root() { let msg = \"please call helper() now\"; }\n");
+
+        let edges = outgoing_ids(&index, "root");
+        assert!(
+            edges.is_empty(),
+            "string-only mention must produce no edges, got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn test_python_docstring_mention_does_not_become_call() {
+        let index = build_index_files(&[
+            (
+                "svc.py",
+                "def helper():\n    pass\n\ndef documented():\n    \"\"\"\n    Use helper() before closing.\n    \"\"\"\n    return None\n",
+            ),
+        ]);
+
+        let edges = outgoing_ids(&index, "documented");
+        assert!(
+            !edges
+                .iter()
+                .any(|(_, relation, _)| *relation == EdgeRelation::Calls),
+            "docstring mention must not become a calls edge, got {edges:?}"
+        );
+    }
+
+    #[test]
+    fn test_cross_language_name_match_is_not_resolved() {
+        // A Rust call to `handler` must not create edges to the unrelated
+        // same-name Python symbol.
+        let index = build_index_files(&[
+            ("lib.rs", "fn handler() {}\nfn root() { handler(); }\n"),
+            ("mod.py", "def handler():\n    pass\n"),
+        ]);
+
+        let edges = outgoing_ids(&index, "root");
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        assert_eq!(edges[0].0, "handler");
+        assert_eq!(edges[0].1, EdgeRelation::Calls);
+
+        // And the referenced target must be the Rust symbol.
+        let root = index.symbols.values().find(|s| s.name == "root").unwrap();
+        let edge = &index.graph.outgoing.get(&root.id).unwrap()[0];
+        let target = index.symbols.get(&edge.symbol_id).unwrap();
+        assert_eq!(target.language, Language::Rust);
+    }
+
+    #[test]
+    fn test_ambiguous_name_match_is_reference_not_call() {
+        // Two same-language candidates share the name `process`: the call
+        // site cannot distinguish them, so both stay `References`.
+        let index = build_index_files(&[
+            ("lib.rs", "fn process() {}\nfn root() { process(); }\n"),
+            ("other.rs", "fn process() {}\n"),
+        ]);
+
+        let edges = outgoing_ids(&index, "root");
+        assert_eq!(edges.len(), 2, "got {edges:?}");
+        for (_, relation, confidence) in &edges {
+            assert_eq!(*relation, EdgeRelation::References);
+            assert!(*confidence <= 0.84, "got {confidence}");
+        }
+    }
+
+    #[test]
+    fn test_unambiguous_call_still_classified_as_calls() {
+        // Guard: the ambiguity cap must not degrade genuine calls.
+        let index = build_index_files(&[
+            ("lib.rs", "fn process() {}\nfn root() { process(); }\n"),
+            ("mod.py", "def process():\n    pass\n"),
+        ]);
+
+        let edges = outgoing_ids(&index, "root");
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        assert_eq!(edges[0].0, "process");
+        assert_eq!(edges[0].1, EdgeRelation::Calls);
     }
 }
