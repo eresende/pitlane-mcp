@@ -282,6 +282,15 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
         })
         .transpose()?;
 
+    // Symbol paths are absolute, but users pass project-relative globs like
+    // `auth.py` or `src/**`. Match against the project-relative path first,
+    // then fall back to the absolute path so deliberately absolute patterns
+    // keep working — the same contract as `matches_scope` in orchestrator.
+    let file_glob_matches = |matcher: &globset::GlobMatcher, file: &Path| -> bool {
+        let rel = file.strip_prefix(&canonical).unwrap_or(file);
+        matcher.is_match(rel) || matcher.is_match(file)
+    };
+
     match mode {
         "exact" | "fuzzy" | "bm25" => {}
         "semantic" | "semantic_debug" => {
@@ -582,9 +591,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                     }
                 }
                 if let Some(ref matcher) = file_glob {
-                    let file_str = sym.file.to_string_lossy();
-                    let file_path: &Path = file_str.as_ref().as_ref();
-                    if !matcher.is_match(file_path) {
+                    if !file_glob_matches(matcher, sym.file.as_ref()) {
                         continue;
                     }
                 }
@@ -688,9 +695,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 }
             }
             if let Some(ref matcher) = file_glob {
-                let file_str = sym.file.to_string_lossy();
-                let file_path: &Path = file_str.as_ref().as_ref();
-                if !matcher.is_match(file_path) {
+                if !file_glob_matches(matcher, sym.file.as_ref()) {
                     continue;
                 }
             }
@@ -788,9 +793,7 @@ pub async fn search_symbols(params: SearchSymbolsParams) -> anyhow::Result<Value
                 }
             }
             if let Some(ref matcher) = file_glob {
-                let file_str = sym.file.to_string_lossy();
-                let file_path: &Path = file_str.as_ref().as_ref();
-                if !matcher.is_match(file_path) {
+                if !file_glob_matches(matcher, sym.file.as_ref()) {
                     return false;
                 }
             }
@@ -945,6 +948,90 @@ mod tests {
         save_meta(&meta, &idx_dir.join("meta.json")).unwrap();
         crate::cache::invalidate(&canonical);
         dir.path().to_string_lossy().to_string()
+    }
+
+    /// Issue #78: `file` filters must match project-relative paths, so a
+    /// bare name like `auth.py` works without a `**/` prefix, while
+    /// deliberately absolute patterns keep matching the absolute path.
+    #[tokio::test]
+    async fn test_file_filter_matches_project_relative_paths() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("services")).unwrap();
+        let auth_sym = Symbol {
+            id: "auth.py::authenticate#function".into(),
+            name: "authenticate".into(),
+            qualified: "authenticate".into(),
+            kind: SymbolKind::Function,
+            language: Language::Python,
+            file: Arc::new(PathBuf::from("auth.py")),
+            byte_start: 0,
+            byte_end: 0,
+            line_start: 1,
+            line_end: 1,
+            signature: Some("def authenticate()".into()),
+            doc: None,
+        };
+        let other_sym = Symbol {
+            id: "services/other.py::authenticate#function".into(),
+            name: "authenticate".into(),
+            qualified: "authenticate".into(),
+            kind: SymbolKind::Function,
+            language: Language::Python,
+            file: Arc::new(PathBuf::from("services/other.py")),
+            byte_start: 0,
+            byte_end: 0,
+            line_start: 1,
+            line_end: 1,
+            signature: Some("def authenticate()".into()),
+            doc: None,
+        };
+        let project = write_index_with_symbols(&dir, vec![auth_sym, other_sym]);
+
+        let base = |file: Option<String>| SearchSymbolsParams {
+            project: project.clone(),
+            query: "authenticate".to_string(),
+            kind: None,
+            language: None,
+            file,
+            limit: None,
+            offset: None,
+            mode: Some("exact".to_string()),
+            embed_config: None,
+        };
+        let result_files = |params| async move {
+            search_symbols(params).await.unwrap()["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["file"].as_str().unwrap().to_string())
+                .collect::<Vec<String>>()
+        };
+
+        // Bare file name at the project root: the issue's failing case.
+        let files = result_files(base(Some("auth.py".to_string()))).await;
+        assert_eq!(files.len(), 1, "files={files:?}");
+        assert!(files[0].ends_with("auth.py"), "files={files:?}");
+
+        // Glob form keeps working.
+        let files = result_files(base(Some("**/auth.py".to_string()))).await;
+        assert_eq!(files.len(), 1, "files={files:?}");
+
+        // Directory-scoped glob relative to the project root.
+        let files = result_files(base(Some("services/*".to_string()))).await;
+        assert_eq!(files.len(), 1, "files={files:?}");
+
+        // Absolute patterns keep matching the absolute path.
+        let abs_pattern = format!(
+            "{}/**/auth.py",
+            dir.path().canonicalize().unwrap().display()
+        );
+        let files = result_files(base(Some(abs_pattern))).await;
+        assert_eq!(files.len(), 1, "files={files:?}");
+
+        // And a filter for a different file excludes the auth symbol.
+        let files = result_files(base(Some("services/other.py".to_string()))).await;
+        assert_eq!(files.len(), 1, "files={files:?}");
+        assert!(files[0].ends_with("other.py"), "files={files:?}");
     }
 
     fn make_symbol(id: &str, name: &str, file: &str, line_start: u32) -> Symbol {
