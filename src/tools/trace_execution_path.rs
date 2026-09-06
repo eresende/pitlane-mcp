@@ -17,6 +17,7 @@ use crate::indexer::language::Symbol;
 use crate::path_policy::resolve_project_path;
 use crate::session;
 use crate::tools::index_project::load_project_index;
+use crate::tools::orchestrator::truncate_chars;
 use crate::tools::search_symbols::{search_symbols, SearchSymbolsParams};
 use crate::tools::steering::{attach_steering, build_steering};
 
@@ -1104,10 +1105,9 @@ fn build_snippet(sym: &Symbol) -> Option<String> {
         .join("\n");
     if snippet.is_empty() {
         None
-    } else if snippet.len() > 240 {
-        Some(format!("{}...", &snippet[..240]))
     } else {
-        Some(snippet)
+        // Char-safe: byte slicing here would panic on multibyte characters.
+        Some(format!("{}...", truncate_chars(&snippet, 240)))
     }
 }
 
