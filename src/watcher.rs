@@ -11,11 +11,27 @@ use crate::embed::EmbedConfig;
 use crate::index::format::{index_dir, load_meta, save_index, save_meta, IndexMeta};
 use crate::index::SymbolIndex;
 use crate::indexer::is_supported_extension;
-use crate::indexer::{registry, Indexer};
+use crate::indexer::{
+    default_exclude_patterns, load_gitignore_patterns, path_is_excluded, registry, Indexer,
+};
 use crate::tools::index_project::current_source_snapshot;
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
 const CHANNEL_CAPACITY: usize = 1024;
+
+/// Effective exclusion patterns for the project: the patterns persisted by
+/// the last indexing run, falling back to defaults plus `.gitignore` for
+/// indexes created before exclusions were persisted.
+fn effective_exclude_patterns(root: &Path, meta_path: &Path) -> Vec<String> {
+    if let Ok(meta) = load_meta(meta_path) {
+        if !meta.effective_excludes.is_empty() {
+            return meta.effective_excludes;
+        }
+    }
+    let mut patterns = default_exclude_patterns();
+    patterns.extend(load_gitignore_patterns(root));
+    patterns
+}
 
 pub struct ProjectWatcher {
     _watcher: RecommendedWatcher,
@@ -157,7 +173,16 @@ async fn flush_pending(
     overflowed: &Arc<AtomicBool>,
 ) {
     if overflowed.swap(false, Ordering::AcqRel) {
-        full_resync(root, indexer, index, index_path, meta_path, embed_config).await;
+        full_resync(
+            root,
+            indexer,
+            index,
+            index_path,
+            meta_path,
+            embed_config,
+            effective_exclude_patterns(root, meta_path),
+        )
+        .await;
         pending.clear();
         return;
     }
@@ -186,6 +211,7 @@ async fn full_resync(
     index_path: &Path,
     meta_path: &Path,
     embed_config: Option<Arc<EmbedConfig>>,
+    exclude_patterns: Vec<String>,
 ) {
     let old_removed_ids = {
         let idx = index.read().await;
@@ -194,7 +220,11 @@ async fn full_resync(
 
     let root_buf = root.to_path_buf();
     let indexer = Arc::clone(indexer);
-    let rebuilt = tokio::task::spawn_blocking(move || indexer.index_project(&root_buf, &[])).await;
+    // Reuse the effective exclusions from initial indexing (issue #74): an
+    // empty pattern list would silently re-index excluded directories.
+    let rebuilt =
+        tokio::task::spawn_blocking(move || indexer.index_project(&root_buf, &exclude_patterns))
+            .await;
 
     let (rebuilt_index, source_file_count) = match rebuilt {
         Ok(Ok(result)) => result,
@@ -272,8 +302,28 @@ async fn reindex_batch(
             .iter()
             .flat_map(|p| idx.by_file.get(p).cloned().unwrap_or_default())
             .collect();
+
+        // Apply the same exclusion policy as initial indexing (issue #74):
+        // edits or new files inside excluded directories must not re-enter
+        // the index, and previously indexed files that are now excluded are
+        // dropped.
+        let exclude_patterns = effective_exclude_patterns(root, meta_path);
+        let exclude_set = Indexer::build_exclude_set(&exclude_patterns).unwrap_or_else(|_| {
+            tracing::warn!("watcher: invalid persisted exclude patterns; applying none");
+            globset::GlobSetBuilder::new().build().unwrap()
+        });
+        let extra_excluded_dirs = crate::indexer::extra_excluded_dir_names();
+        let mut accepted: HashSet<PathBuf> = HashSet::new();
+        for path in paths {
+            if path_is_excluded(path, root, &exclude_set, &extra_excluded_dirs) {
+                idx.remove_file(path);
+                continue;
+            }
+            accepted.insert(path.clone());
+        }
+
         // One graph rebuild for the whole batch, not one per changed file.
-        indexer.reindex_files(paths, root, &mut idx);
+        indexer.reindex_files(&accepted, root, &mut idx);
 
         // Flush updated index to disk while holding the write lock for consistency.
         if let Err(e) = save_index(&idx, index_path) {
@@ -619,5 +669,152 @@ mod tests {
         assert!(names.contains(&"a_new"));
         assert!(names.contains(&"b_new"));
         assert!(!names.contains(&"a_old"));
+    }
+
+    // ── Issue #74: watcher applies the same exclusion policy as initial indexing ──
+
+    fn write_meta_with_excludes(dir: &TempDir, excludes: &[&str]) {
+        let mut meta = IndexMeta::new(dir.path());
+        meta.effective_excludes = excludes.iter().map(|s| s.to_string()).collect();
+        save_meta(&meta, &dir.path().join("meta.json")).unwrap();
+    }
+
+    async fn symbol_names(index: &Arc<RwLock<SymbolIndex>>) -> Vec<String> {
+        index
+            .read()
+            .await
+            .symbols
+            .values()
+            .map(|s| s.name.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_watcher_ignores_edits_inside_excluded_directory() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("ignored")).unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"fn kept() {}").unwrap();
+        std::fs::write(dir.path().join("ignored/secret.rs"), b"fn secret_old() {}").unwrap();
+
+        let indexer = Arc::new(Indexer::new(registry::build_default_registry()));
+        let (idx, _) = indexer
+            .index_project(dir.path(), &["ignored/**".to_string()])
+            .unwrap();
+        assert!(!idx.symbols.values().any(|s| s.name == "secret_old"));
+        let index = Arc::new(RwLock::new(idx));
+        write_meta_with_excludes(&dir, &["ignored/**"]);
+
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_loop(rx, &dir, indexer, index.clone());
+
+        // Edit inside the excluded directory: must not re-enter the index.
+        std::fs::write(dir.path().join("ignored/secret.rs"), b"fn secret_new() {}").unwrap();
+        // New file inside the excluded directory: must be ignored too.
+        let added = dir.path().join("ignored/added.rs");
+        std::fs::write(&added, b"fn added_fn() {}").unwrap();
+        tx.send(dir.path().join("ignored/secret.rs")).await.unwrap();
+        tx.send(added).await.unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let names = symbol_names(&index).await;
+        assert!(names.iter().any(|n| n == "kept"));
+        assert!(!names.iter().any(|n| n == "secret_new"), "names={names:?}");
+        assert!(!names.iter().any(|n| n == "added_fn"), "names={names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_watcher_drops_previously_indexed_file_now_excluded() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("legacy.rs");
+        std::fs::write(&file, b"fn legacy_old() {}").unwrap();
+
+        // Indexed WITHOUT exclusions, so the symbol is in the index...
+        let (index, indexer) = setup(&dir);
+        assert!(symbol_names(&index).await.iter().any(|n| n == "legacy_old"));
+
+        // ...but the effective policy now excludes it.
+        write_meta_with_excludes(&dir, &["legacy.rs"]);
+
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_loop(rx, &dir, indexer, index.clone());
+
+        std::fs::write(&file, b"fn legacy_new() {}").unwrap();
+        tx.send(file).await.unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let names = symbol_names(&index).await;
+        assert!(!names.iter().any(|n| n == "legacy_old"), "names={names:?}");
+        assert!(!names.iter().any(|n| n == "legacy_new"), "names={names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_full_resync_respects_persisted_excludes() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("ignored")).unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"fn kept() {}").unwrap();
+        std::fs::write(dir.path().join("ignored/secret.rs"), b"fn secret_fn() {}").unwrap();
+
+        let indexer = Arc::new(Indexer::new(registry::build_default_registry()));
+        let (idx, _) = indexer
+            .index_project(dir.path(), &["ignored/**".to_string()])
+            .unwrap();
+        let index = Arc::new(RwLock::new(idx));
+        write_meta_with_excludes(&dir, &["ignored/**"]);
+
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_loop_with_overflow(
+            rx,
+            &dir,
+            indexer,
+            index.clone(),
+            Arc::new(AtomicBool::new(true)), // force full resync
+        );
+
+        std::fs::write(dir.path().join("ignored/secret.rs"), b"fn secret_fn2() {}").unwrap();
+        tx.send(dir.path().join("ignored/secret.rs")).await.unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let names = symbol_names(&index).await;
+        assert!(names.iter().any(|n| n == "kept"), "names={names:?}");
+        assert!(!names.iter().any(|n| n == "secret_fn"), "names={names:?}");
+        assert!(!names.iter().any(|n| n == "secret_fn2"), "names={names:?}");
+    }
+
+    #[tokio::test]
+    async fn test_watcher_falls_back_to_defaults_without_persisted_excludes() {
+        // node_modules is a built-in excluded directory name: a file edited
+        // there must be ignored even when no meta excludes were persisted.
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("node_modules/pkg")).unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"fn kept() {}").unwrap();
+        std::fs::write(
+            dir.path().join("node_modules/pkg/vendor.rs"),
+            b"fn vendor_old() {}",
+        )
+        .unwrap();
+
+        let (index, indexer) = setup(&dir);
+        write_meta_with_excludes(&dir, &[]); // empty: fall back to defaults
+
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_loop(rx, &dir, indexer, index.clone());
+
+        std::fs::write(
+            dir.path().join("node_modules/pkg/vendor.rs"),
+            b"fn vendor_new() {}",
+        )
+        .unwrap();
+        tx.send(dir.path().join("node_modules/pkg/vendor.rs"))
+            .await
+            .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let names = symbol_names(&index).await;
+        assert!(names.iter().any(|n| n == "kept"));
+        assert!(!names.iter().any(|n| n == "vendor_new"), "names={names:?}");
     }
 }
