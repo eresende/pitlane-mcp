@@ -267,16 +267,13 @@ async fn reindex_batch(
     let removed_ids: Vec<crate::indexer::language::SymbolId>;
     {
         let mut idx = index.write().await;
-        // Capture symbol IDs for changed files BEFORE reindex_file mutates by_file
+        // Capture symbol IDs for changed files BEFORE reindex mutates by_file
         removed_ids = paths
             .iter()
             .flat_map(|p| idx.by_file.get(p).cloned().unwrap_or_default())
             .collect();
-        for path in paths {
-            if let Err(e) = indexer.reindex_file(path, root, &mut idx) {
-                eprintln!("Error re-indexing {:?}: {}", path, e);
-            }
-        }
+        // One graph rebuild for the whole batch, not one per changed file.
+        indexer.reindex_files(paths, root, &mut idx);
 
         // Flush updated index to disk while holding the write lock for consistency.
         if let Err(e) = save_index(&idx, index_path) {

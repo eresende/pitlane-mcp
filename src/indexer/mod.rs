@@ -231,7 +231,11 @@ impl Indexer {
         Ok((index, file_count))
     }
 
-    /// Re-index a single file
+    /// Re-index a single file.
+    ///
+    /// Note: this invalidates the navigation graph (`remove_file` resets it)
+    /// but does NOT rebuild it. Use [`Self::reindex_files`] for batched
+    /// updates, which rebuilds the graph exactly once after all files.
     pub fn reindex_file(
         &self,
         file_path: &Path,
@@ -254,9 +258,26 @@ impl Indexer {
                 index.insert(symbol);
             }
         }
-        index.rebuild_navigation_graph();
 
         Ok(())
+    }
+
+    /// Re-index a batch of files and rebuild the navigation graph exactly
+    /// once. Rebuilding per file made watcher updates quadratic: each
+    /// `reindex_file` discarded the graph and the rebuild rescanned every
+    /// symbol's source from disk.
+    pub fn reindex_files(
+        &self,
+        paths: &HashSet<std::path::PathBuf>,
+        root: &Path,
+        index: &mut SymbolIndex,
+    ) {
+        for path in paths {
+            if let Err(e) = self.reindex_file(path, root, index) {
+                tracing::warn!(file = %path.display(), error = %e, "reindex_file failed");
+            }
+        }
+        index.rebuild_navigation_graph();
     }
 
     fn parse_file(&self, path: &Path, root: &Path) -> anyhow::Result<Vec<language::Symbol>> {
@@ -1131,6 +1152,83 @@ mod tests {
 
         // Previous symbols removed, oversized file produces no new symbols
         assert_eq!(index.symbol_count(), 0);
+    }
+
+    #[test]
+    fn test_reindex_files_rebuilds_graph_once_and_keeps_edges_correct() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"fn callee() {}\nfn root() { callee(); }\n",
+        )
+        .unwrap();
+        let other = dir.path().join("other.rs");
+        std::fs::write(&other, b"fn other_root() { callee(); }\n").unwrap();
+
+        let indexer = create_indexer();
+        let (mut index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        assert!(index.graph.built);
+        assert_eq!(index.symbol_count(), 3);
+
+        // Edit both files: callee renames, both callers change.
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            b"fn renamed_callee() {}\nfn root() { renamed_callee(); }\n",
+        )
+        .unwrap();
+        std::fs::write(&other, b"fn other_root() { renamed_callee(); }\n").unwrap();
+
+        let changed: HashSet<std::path::PathBuf> =
+            [dir.path().join("lib.rs"), other.clone()].into();
+        indexer.reindex_files(&changed, dir.path(), &mut index);
+
+        // Graph is rebuilt and consistent with the new content.
+        assert!(index.graph.built);
+        assert_eq!(index.symbol_count(), 3);
+        let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"renamed_callee"));
+        assert!(!names.contains(&"callee"));
+
+        // Edges point at the renamed symbol, not a stale one.
+        let callee_id = index
+            .symbols
+            .values()
+            .find(|s| s.name == "renamed_callee")
+            .unwrap()
+            .id
+            .clone();
+        let incoming_count = index
+            .graph
+            .incoming
+            .get(&callee_id)
+            .map(|edges| edges.len())
+            .unwrap_or(0);
+        assert_eq!(
+            incoming_count, 2,
+            "both callers must reference the renamed symbol"
+        );
+    }
+
+    #[test]
+    fn test_reindex_file_leaves_graph_unbuilt_until_explicit_rebuild() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("lib.rs");
+        std::fs::write(&file_path, b"fn alpha() {}\n").unwrap();
+
+        let indexer = create_indexer();
+        let (mut index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        assert!(index.graph.built);
+
+        std::fs::write(&file_path, b"fn beta() {}\n").unwrap();
+        indexer
+            .reindex_file(&file_path, dir.path(), &mut index)
+            .unwrap();
+
+        // reindex_file invalidates but does not rebuild the graph; callers
+        // doing single-file updates must call rebuild_navigation_graph().
+        assert!(!index.graph.built);
+        index.rebuild_navigation_graph();
+        assert!(index.graph.built);
     }
 
     #[cfg(unix)]
