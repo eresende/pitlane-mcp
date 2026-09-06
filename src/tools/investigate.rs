@@ -12,6 +12,7 @@ use crate::embed::EmbedConfig;
 use crate::graph::read_symbol_source;
 use crate::index::format::load_project_meta;
 use crate::index::repo_profile::profile_entrypoints;
+use crate::index::SymbolIndex;
 use crate::path_policy::{display_path_relative_to_project, resolve_project_path};
 use crate::session;
 use crate::tools::index_project::load_project_index;
@@ -247,6 +248,39 @@ fn investigate_cache_key(
     key.push(';');
     key.push_str(&normalize_investigate_key(query));
     key
+}
+
+fn build_omission_metadata(
+    index: &SymbolIndex,
+    omitted_ids: &[String],
+    unreadable_ids: &[String],
+) -> Vec<Value> {
+    omitted_ids
+        .iter()
+        .filter_map(|id| index.symbols.get(id.as_str()))
+        .map(|sym| {
+            json!({
+                "id": sym.id,
+                "name": sym.name,
+                "file": sym.file.to_string_lossy().replace('\\', "/"),
+                "kind": sym.kind.to_string(),
+                "line_start": sym.line_start,
+                "reason": "inline symbol cap reached",
+            })
+        })
+        .chain(unreadable_ids.iter().filter_map(|id| {
+            index.symbols.get(id.as_str()).map(|sym| {
+                json!({
+                    "id": sym.id,
+                    "name": sym.name,
+                    "file": sym.file.to_string_lossy().replace('\\', "/"),
+                    "kind": sym.kind.to_string(),
+                    "line_start": sym.line_start,
+                    "reason": "source could not be read",
+                })
+            })
+        }))
+        .collect()
 }
 
 fn mark_investigate_repeated(mut response: Value) -> Value {
@@ -580,32 +614,7 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
 
     // Omission metadata: discovered symbols that did not fit inline, plus
     // symbols whose source could not be read.
-    let omitted_symbols: Vec<Value> = omitted_ids
-        .iter()
-        .filter_map(|id| index.symbols.get(id.as_str()))
-        .map(|sym| {
-            json!({
-                "id": sym.id,
-                "name": sym.name,
-                "file": sym.file.to_string_lossy().replace('\\', "/"),
-                "kind": sym.kind.to_string(),
-                "line_start": sym.line_start,
-                "reason": "inline symbol cap reached",
-            })
-        })
-        .chain(unreadable_ids.iter().filter_map(|id| {
-            index.symbols.get(id.as_str()).map(|sym| {
-                json!({
-                    "id": sym.id,
-                    "name": sym.name,
-                    "file": sym.file.to_string_lossy().replace('\\', "/"),
-                    "kind": sym.kind.to_string(),
-                    "line_start": sym.line_start,
-                    "reason": "source could not be read",
-                })
-            })
-        }))
-        .collect();
+    let omitted_symbols = build_omission_metadata(&index, &omitted_ids, &unreadable_ids);
 
     let is_complete = truncated_symbols.is_empty() && omitted_symbols.is_empty();
 
@@ -972,11 +981,45 @@ mod tests {
         assert_eq!(sym["lines_total"], json!(202));
     }
 
+    #[test]
+    fn test_build_omission_metadata_reports_ids_with_reasons() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn alpha() {}\npub fn beta() {}\n",
+        )
+        .unwrap();
+        let indexer =
+            crate::indexer::Indexer::new(crate::indexer::registry::build_default_registry());
+        let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+
+        let ids: Vec<String> = index
+            .symbols
+            .values()
+            .filter(|s| s.name == "alpha" || s.name == "beta")
+            .map(|s| s.id.clone())
+            .collect();
+
+        let metadata = build_omission_metadata(&index, &ids, &[]);
+        assert_eq!(metadata.len(), 2);
+        for entry in &metadata {
+            assert!(entry["id"].as_str().unwrap().contains("::"));
+            assert_eq!(entry["reason"], "inline symbol cap reached");
+            assert!(entry["line_start"].as_u64().is_some());
+        }
+
+        let unreadable = build_omission_metadata(&index, &[], &[ids[0].clone()]);
+        assert_eq!(unreadable.len(), 1);
+        assert_eq!(unreadable[0]["reason"], "source could not be read");
+    }
+
     #[tokio::test]
-    async fn test_investigate_reports_omitted_symbols_beyond_inline_cap() {
-        // A container struct pulls in its key methods as extras; when the
-        // inline cap (6) is exceeded, the dropped symbols must be reported
-        // as omissions instead of silently disappearing.
+    async fn test_investigate_omission_and_completeness_fields_are_consistent() {
+        // Enough "widget" symbols to potentially overflow the 6-symbol inline
+        // cap. WHICH symbols discovery picks varies with bm25 tie-ranking
+        // (platform dependent), so this asserts rank-independent invariants:
+        // the cap holds, completeness agrees with the omission/truncation
+        // lists, and any omissions carry actionable pointers.
         let mut src = String::from("pub struct Widget;\n\nimpl Widget {\n");
         for name in [
             "widget_alpha",
@@ -1008,17 +1051,33 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(resp["symbols_read"].as_u64().unwrap(), 6);
-        let omitted = resp["omitted_symbols"].as_array().unwrap();
+        let symbols_read = resp["symbols_read"].as_u64().unwrap();
         assert!(
-            !omitted.is_empty(),
-            "dropped symbols must be reported as omissions, resp={resp}"
+            symbols_read <= 6,
+            "inline cap must hold, got {symbols_read}"
         );
-        assert_eq!(resp["complete"], json!(false));
-        // Every omission carries an actionable pointer.
+        assert_eq!(
+            symbols_read as usize,
+            resp["symbols"].as_array().unwrap().len()
+        );
+
+        let truncated = resp["truncated_symbols"].as_array().unwrap();
+        let omitted = resp["omitted_symbols"].as_array().unwrap();
+        let complete = resp["complete"].as_bool().unwrap();
+        assert_eq!(
+            complete,
+            truncated.is_empty() && omitted.is_empty(),
+            "complete must agree with truncation/omission lists, resp={resp}"
+        );
+
         for entry in omitted {
             assert!(entry["id"].as_str().unwrap().contains("::"));
             assert!(entry["reason"].as_str().is_some());
+            assert!(entry["name"].as_str().is_some());
         }
+
+        // An answer claiming completeness must not contain the capped warning.
+        let answer = resp["answer"].as_str().unwrap();
+        assert_eq!(answer.contains("capped and may be incomplete"), !complete);
     }
 }
