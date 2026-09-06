@@ -231,6 +231,18 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
     Ok(response)
 }
 
+/// Character-safe truncation to at most `max_chars` characters.
+///
+/// Byte slicing like `&s[..100]` panics when the boundary lands inside a
+/// multibyte character (e.g. `é` spanning bytes 99–100). This helper cuts
+/// at a char boundary instead.
+pub(crate) fn truncate_chars(s: &str, max_chars: usize) -> &str {
+    match s.char_indices().nth(max_chars) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
 #[allow(dead_code)]
 fn build_locate_session_state(
     results: &[Value],
@@ -489,7 +501,7 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
             "- {} `{}` — `{}`\n  → read_code_unit(symbol_id=\"{}\")\n",
             kind,
             name,
-            if sig.len() > 90 { &sig[..90] } else { sig },
+            truncate_chars(sig, 90),
             id
         ));
     }
@@ -2742,6 +2754,40 @@ mod tests {
     use super::*;
     use crate::tools::index_project::{index_project, load_project_index, IndexProjectParams};
     use tempfile::TempDir;
+
+    // ── Issue #77: UTF-8-safe truncation ────────────────────────────
+
+    #[test]
+    fn test_truncate_chars_handles_multibyte_boundaries() {
+        // The issue's exact scenario: `é` (2 bytes) spanning bytes 99–100.
+        let sig = format!("{}é rest", "a".repeat(99));
+        // Byte slicing `&sig[..100]` panics here; the helper must not.
+        let cut = truncate_chars(&sig, 100);
+        // Byte slicing `&sig[..100]` panics here; the helper must cut at a
+        // valid boundary instead.
+        assert!(sig.is_char_boundary(cut.len()), "cut boundary invalid");
+        assert_eq!(cut.chars().count(), 100);
+
+        // Multi-byte chars at every offset stay valid.
+        let s = "é界🚀x".repeat(50);
+        for max in 0..=s.chars().count() {
+            let cut = truncate_chars(&s, max);
+            assert!(
+                s.is_char_boundary(cut.len()),
+                "max={max} cut at non-boundary"
+            );
+            assert!(cut.chars().count() <= max);
+            assert!(s.starts_with(cut));
+        }
+    }
+
+    #[test]
+    fn test_truncate_chars_matches_byte_slicing_for_ascii() {
+        let s = "x".repeat(250);
+        assert_eq!(truncate_chars(&s, 100).len(), 100);
+        assert_eq!(truncate_chars(&s, 1000), s);
+        assert_eq!(truncate_chars("", 100), "");
+    }
 
     static TEST_SESSION_PROJECT_ID: AtomicU64 = AtomicU64::new(1);
 
