@@ -277,7 +277,7 @@ async fn do_index_project(
 
     let canonical_clone = canonical.clone();
     let exclude_for_indexing = exclude.clone();
-    let (index, file_count) = tokio::task::spawn_blocking(move || {
+    let (mut index, file_count) = tokio::task::spawn_blocking(move || {
         let cb = make_cb();
         indexer.index_project_with_progress(
             &canonical_clone,
@@ -318,6 +318,14 @@ async fn do_index_project(
     // Persist the effective exclusions so watcher updates and full resyncs
     // apply the same policy (issue #74).
     meta.effective_excludes = exclude.clone();
+    // Fresh indexing is a content change (issue #82): carry over the previous
+    // revision and let record_change assign the next one. The baseline is
+    // recorded as a change whose `added` list is every indexed symbol (capped
+    // per RevisionChange).
+    meta.revision = load_meta(&meta_path).map(|prev| prev.revision).unwrap_or(0);
+    let all_ids: Vec<String> = index.symbols.keys().cloned().collect();
+    meta.record_change(all_ids, Vec::new(), Vec::new());
+    index.revision = meta.revision;
     save_meta(&meta, &meta_path)?;
 
     // Build the BM25 index. Invalidate any stale cached reader first so the
@@ -618,6 +626,10 @@ pub fn load_project_index(project: &str) -> anyhow::Result<Arc<SymbolIndex>> {
     }
 
     let mut index = crate::index::format::load_index(&index_path)?;
+    // Surface the persisted revision (issue #82); default 0 for pre-revision indexes.
+    index.revision = crate::index::format::load_meta(&idx_dir.join("meta.json"))
+        .map(|meta| meta.revision)
+        .unwrap_or(0);
     let before = index.symbol_count();
     index.symbols.retain(|_, sym| {
         let Ok(Some(canonical_file)) = canonical_regular_file(sym.file.as_ref()) else {

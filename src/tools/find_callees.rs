@@ -83,6 +83,7 @@ pub async fn find_callees(params: FindCalleesParams) -> anyhow::Result<Value> {
         )
     };
     attach_steering(&mut response, steering);
+    response["index_revision"] = json!(index.revision);
     Ok(response)
 }
 

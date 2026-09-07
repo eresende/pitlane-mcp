@@ -31,6 +31,8 @@ pub struct EnsureProjectReadyRequest {
     pub poll_interval_ms: Option<u64>,
     /// Accepted for compatibility but currently ignored; ensure_project_ready no longer waits for embeddings.
     pub timeout_secs: Option<u64>,
+    /// Start a background watcher so file edits update the index incrementally (default: true). Set false to index once and exit.
+    pub watch: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -372,6 +374,16 @@ pub struct GetIndexStatsRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetIndexChangesRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// Return revisions strictly newer than this index revision
+    pub since_revision: Option<u64>,
+    /// Maximum number of revisions returned, newest first (default: 20)
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetUsageStatsRequest {
     /// Filter to a single project path (default: return all projects + global total)
     pub project: Option<String>,
@@ -396,6 +408,7 @@ const DEFAULT_PUBLIC_TOOL_NAMES: &[&str] = &[
     "trace_path",
     "analyze_impact",
     "analyze_changes",
+    "get_index_changes",
     "get_index_stats",
     "search_content",
 ];
@@ -572,6 +585,8 @@ impl PitlaneMcp {
             progress_token: meta.get_progress_token(),
             peer: Some(peer),
             embed_config: self.embed_config.clone(),
+            watch: req.watch,
+            watcher_registry: Some(self.watcher_registry.clone()),
         };
         match tools::ensure_project_ready::ensure_project_ready(params).await {
             Ok(v) => value_to_text(v),
@@ -1089,6 +1104,31 @@ impl PitlaneMcp {
             project: req.project,
         };
         match tools::get_index_stats::get_index_stats(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "List symbols changed since an index revision. Poll after edits to learn which symbols the index picked up without re-reading files.",
+        meta = tool_meta("freshness changed symbols revision feed delta index"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn get_index_changes(
+        &self,
+        Parameters(req): Parameters<GetIndexChangesRequest>,
+    ) -> String {
+        let params = tools::index_changes::GetIndexChangesParams {
+            project: req.project,
+            since_revision: req.since_revision,
+            limit: req.limit,
+        };
+        match tools::index_changes::get_index_changes(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }

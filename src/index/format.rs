@@ -38,10 +38,82 @@ pub struct IndexMeta {
     /// initial indexing.
     #[serde(default)]
     pub effective_excludes: Vec<String>,
+    /// Monotonic index revision: bumped on every persisted content change
+    /// (fresh index, watcher batch flush, full resync). Zero means the index
+    /// predates revision tracking; the next write assigns revision 1.
+    #[serde(default)]
+    pub revision: u64,
+    /// Bounded per-revision change log backing `get_index_changes` (issue #82).
+    /// Oldest entries are dropped as new revisions are recorded.
+    #[serde(default)]
+    pub change_log: Vec<RevisionChange>,
     pub repo_profile: RepoProfile,
 }
 
+/// Symbol-level diff recorded for one index revision.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+pub struct RevisionChange {
+    pub revision: u64,
+    /// Symbol IDs present in this revision but not the previous one.
+    #[serde(default)]
+    pub added: Vec<String>,
+    /// Symbol IDs present in the previous revision but not this one.
+    #[serde(default)]
+    pub removed: Vec<String>,
+    /// Symbol IDs present in both revisions whose defining file was reindexed
+    /// (content may or may not have changed; IDs are file/name/kind based).
+    #[serde(default)]
+    pub modified: Vec<String>,
+    /// True if any list was capped and the entry is not exhaustive.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// Per-list cap for recorded change entries; keeps meta.json bounded for
+/// large refactors while preserving the most recent revisions.
+const CHANGE_LOG_MAX_REVISIONS: usize = 50;
+const CHANGE_LIST_CAP: usize = 200;
+
+impl RevisionChange {
+    fn from_diff(added: Vec<String>, removed: Vec<String>, modified: Vec<String>) -> Self {
+        let truncated = added.len() > CHANGE_LIST_CAP
+            || removed.len() > CHANGE_LIST_CAP
+            || modified.len() > CHANGE_LIST_CAP;
+        let cap = |mut v: Vec<String>| {
+            if v.len() > CHANGE_LIST_CAP {
+                v.truncate(CHANGE_LIST_CAP);
+            }
+            v
+        };
+        Self {
+            revision: 0,
+            added: cap(added),
+            removed: cap(removed),
+            modified: cap(modified),
+            truncated,
+        }
+    }
+}
+
 impl IndexMeta {
+    /// Assigns `revision = current + 1`, records the symbol diff as the
+    /// change-log entry for that revision, and trims the log to its bound.
+    pub fn record_change(
+        &mut self,
+        added: Vec<String>,
+        removed: Vec<String>,
+        modified: Vec<String>,
+    ) {
+        self.revision = self.revision.wrapping_add(1);
+        let mut change = RevisionChange::from_diff(added, removed, modified);
+        change.revision = self.revision;
+        self.change_log.push(change);
+        if self.change_log.len() > CHANGE_LOG_MAX_REVISIONS {
+            let excess = self.change_log.len() - CHANGE_LOG_MAX_REVISIONS;
+            self.change_log.drain(0..excess);
+        }
+    }
+
     pub fn new(project_path: &Path) -> Self {
         Self {
             project_path: project_path.display().to_string(),
@@ -51,6 +123,8 @@ impl IndexMeta {
             dir_mtimes: HashMap::new(),
             source_file_count: 0,
             effective_excludes: Vec::new(),
+            revision: 0,
+            change_log: Vec::new(),
             repo_profile: RepoProfile::default(),
         }
     }

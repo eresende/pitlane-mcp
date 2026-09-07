@@ -10,6 +10,7 @@ Default public tier:
 - `trace_path`
 - `analyze_impact`
 - `analyze_changes`
+- `get_index_changes`
 - `get_index_stats`
 - `search_content`
 

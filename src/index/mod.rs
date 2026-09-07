@@ -15,6 +15,10 @@ pub struct SymbolIndex {
     pub by_kind: HashMap<SymbolKind, Vec<SymbolId>>,
     pub by_language: HashMap<Language, Vec<SymbolId>>,
     pub graph: NavigationGraph,
+    /// Index revision loaded from `IndexMeta.revision` and bumped by the
+    /// watcher on every flush. Not part of the on-disk index serialization.
+    /// Not serialized; navigation responses surface this as `index_revision`.
+    pub revision: u64,
     /// Intern table: deduplicated Arc<PathBuf> per unique file path.
     /// Not serialized; rebuilt by rebuild_secondary_indexes after loading.
     file_interner: HashMap<PathBuf, Arc<PathBuf>>,

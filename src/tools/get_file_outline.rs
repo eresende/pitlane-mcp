@@ -77,6 +77,7 @@ pub async fn get_file_outline(params: GetFileOutlineParams) -> anyhow::Result<Va
     response["content_seen"] = json!(observation.content_seen);
     response["target_seen"] = json!(observation.target_seen);
     response["content_changed"] = json!(observation.changed_since_last_read);
+    response["index_revision"] = json!(index.revision);
 
     Ok(response)
 }

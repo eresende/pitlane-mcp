@@ -228,6 +228,9 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
             Some((id, file))
         }),
     );
+    response["index_revision"] = json!(load_project_index(&params.project)
+        .map(|index| index.revision)
+        .unwrap_or(0));
     Ok(response)
 }
 
@@ -613,7 +616,8 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
         }
     }
 
-    let response = trace_execution_path(TraceExecutionPathParams {
+    let project_str = params.project.clone();
+    let mut response = trace_execution_path(TraceExecutionPathParams {
         project: params.project,
         query: query.clone(),
         source: source_hint.clone(),
@@ -738,6 +742,9 @@ pub async fn trace_path(params: TracePathParams) -> anyhow::Result<Value> {
             .iter()
             .filter_map(|item| item["file"].as_str().map(ToOwned::to_owned)),
     );
+    response["index_revision"] = json!(load_project_index(&project_str)
+        .map(|index| index.revision)
+        .unwrap_or(0));
     session::record_symbols(
         &canonical,
         compact_symbols.iter().filter_map(|item| {
@@ -756,7 +763,10 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
         .ok()
         .map(|meta| meta.repo_profile);
     let seeds = resolve_impact_seeds(&params).await?;
-    impact_from_seeds(&params, &index, &canonical, &seeds, profile.as_ref(), true)
+    let mut response =
+        impact_from_seeds(&params, &index, &canonical, &seeds, profile.as_ref(), true)?;
+    response["index_revision"] = json!(index.revision);
+    Ok(response)
 }
 
 /// Shared weighted traversal for explicit targets and revision-local diff seeds.
@@ -1120,6 +1130,9 @@ pub async fn navigate_code(params: NavigateCodeParams) -> anyhow::Result<Value> 
         }
     }
     apply_navigation_followup(&mut response);
+    response["index_revision"] = json!(load_project_index(&params.project)
+        .map(|index| index.revision)
+        .unwrap_or(0));
     Ok(response)
 }
 

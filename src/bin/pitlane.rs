@@ -166,6 +166,17 @@ enum Command {
         /// Path to the indexed project
         project: String,
     },
+    /// List symbols changed since an index revision
+    Changes {
+        /// Path to the indexed project
+        project: String,
+        /// Return revisions strictly newer than this revision (default: current)
+        #[arg(long)]
+        since: Option<u64>,
+        /// Maximum number of revisions returned, newest first (default: 20)
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Trace the strongest graph-backed path for a query
     TracePath {
         /// Path to the indexed project
@@ -509,6 +520,19 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
         Command::Stats { project } => {
             let params = tools::get_index_stats::GetIndexStatsParams { project };
             tools::get_index_stats::get_index_stats(params).await?
+        }
+
+        Command::Changes {
+            project,
+            since,
+            limit,
+        } => {
+            let params = tools::index_changes::GetIndexChangesParams {
+                project,
+                since_revision: since,
+                limit,
+            };
+            tools::index_changes::get_index_changes(params).await?
         }
 
         Command::TracePath {
