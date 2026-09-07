@@ -105,9 +105,9 @@ reqwest = { version = "0.12", default-features = false, features = [
 futures = "0.3"
 tree-sitter-solidity = "1.2"
 regex = "1"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
 httpmock = "0.8"

@@ -62,6 +62,22 @@ fn tools_list_result(protocol_version: &str) -> Value {
 }
 
 #[test]
+fn analyze_changes_is_public_with_required_revision_schema() {
+    let result = tools_list_result("2026-07-28");
+    let tool = result["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "analyze_changes")
+        .expect("public analyze_changes tool");
+    let required = tool["inputSchema"]["required"].as_array().unwrap();
+    assert!(required.contains(&json!("project")));
+    assert!(required.contains(&json!("base_ref")));
+    assert!(!required.contains(&json!("include_working_tree")));
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+}
+
+#[test]
 fn legacy_tools_list_omits_2026_result_fields() {
     let result = tools_list_result("2025-11-25");
 

@@ -14,7 +14,7 @@ Use pitlane-mcp for code lookup whenever it is available.
 3. Use locate_code when you need discovery without full source.
 4. Use read_code_unit once you know the target.
 5. Use trace_path for explicit source-to-sink or config-to-effect questions.
-6. Use analyze_impact before edits or refactors.
+6. Use analyze_impact before edits or refactors; use analyze_changes to review Git-diff impact.
 7. Use search_content when you know a text fragment but not the owning symbol.
 8. Use get_index_stats for lightweight orientation before broader exploration.
 9. Fall back to direct file reads only when editing or when full-file context is genuinely required.
@@ -39,5 +39,6 @@ Default public tier:
 - `read_code_unit`
 - `trace_path`
 - `analyze_impact`
+- `analyze_changes`
 - `get_index_stats`
 - `search_content`

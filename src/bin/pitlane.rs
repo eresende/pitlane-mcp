@@ -214,6 +214,21 @@ enum Command {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Map a Git diff to symbols, affected graph neighbors, and test candidates
+    AnalyzeChanges {
+        /// Git project directory
+        project: String,
+        /// Commit, branch or tag to compare against HEAD
+        #[arg(long)]
+        base_ref: String,
+        /// Include files on disk and non-ignored untracked files
+        #[arg(long)]
+        include_working_tree: bool,
+        #[arg(long)]
+        depth: Option<usize>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Show token-efficiency statistics for get_symbol
     UsageStats {
         /// Path to the indexed project (omit for global totals)
@@ -519,6 +534,22 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
             tools::orchestrator::trace_path(params).await?
         }
 
+        Command::AnalyzeChanges {
+            project,
+            base_ref,
+            include_working_tree,
+            depth,
+            limit,
+        } => {
+            tools::analyze_changes::analyze_changes(tools::analyze_changes::AnalyzeChangesParams {
+                project,
+                base_ref,
+                include_working_tree: Some(include_working_tree),
+                depth,
+                limit,
+            })
+            .await?
+        }
         Command::AnalyzeImpact {
             project,
             query,
@@ -638,6 +669,27 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn clap_parses_analyze_changes_command() {
+        let cli = Cli::try_parse_from([
+            "pitlane",
+            "analyze-changes",
+            "/repo",
+            "--base-ref",
+            "main",
+            "--include-working-tree",
+            "--depth",
+            "3",
+            "--limit",
+            "10",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::AnalyzeChanges {
+            project, base_ref, include_working_tree: true, depth: Some(3), limit: Some(10),
+        } if project == "/repo" && base_ref == "main"));
+        assert!(Cli::try_parse_from(["pitlane", "analyze-changes", "/repo"]).is_err());
     }
 
     #[test]

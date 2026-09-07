@@ -80,6 +80,36 @@ Estimate the blast radius of changing a symbol, file, or concept.
 
 Use this before edits or refactors.
 
+### `analyze_changes`
+
+Map a Git diff to changed symbols, likely affected graph neighbors, and test candidates.
+
+```json
+{ "project": "/your/project", "base_ref": "main", "include_working_tree": true }
+```
+
+CLI equivalent:
+
+```bash
+pitlane analyze-changes /your/project --base-ref main --include-working-tree
+```
+
+- `base_ref` is required and resolves to a commit. Comparison is directly against that commit, **not** its merge base with HEAD. Pass a merge-base SHA if that is what you need.
+- `include_working_tree` defaults to `false`: compare base with HEAD, ignoring staged/unstaged changes. When `true`, compare base with files on disk, including non-ignored untracked files. Staged content is included only as reflected on disk; this is not a staged-only diff.
+- Optional `depth` defaults to 2 (maximum 3); `limit` defaults to 8 (maximum 12 impacted symbols/files **per revision**).
+- No prior indexing or embeddings are required. Separate in-memory revision indexes reuse the existing weighted impact traversal without modifying Git state or the cached index.
+
+The response includes:
+
+- `base_revision`, `head_revision`, and `target_revision` (`working_tree` when applicable).
+- `changed_files` with zero-context `hunks`. Ranges use Git's one-based `start` and `count`; zero counts represent boundaries, not changed lines. Unmapped file changes remain visible, including `unmapped_hunk_indices` for partially mapped files.
+- `changed_symbols` with revision, line ranges, change classification, and supporting `hunk_indices` into that file's hunks. A modified symbol can appear for both revisions; symbol IDs must be interpreted together with `revision`.
+- `base_impact` and `target_impact` containing ranked `impact_symbols`, `impact_files`, support edges, and `test_candidates`. Base evidence preserves callers of deleted symbols. Base IDs and line ranges describe historical code, not necessarily readable current targets.
+- Graph results are labeled `heuristic`; support edges distinguish `heuristic_call` from `uncertain_reference`. Test candidates use test-like paths/names and graph evidence, **not** measured test coverage. Candidates come from the bounded impact list plus directly changed tests.
+- `omissions`, `effective_excludes`, and `limitations`. Impact results include total/omitted counts for the ranked lists.
+
+Renames appear as deletion/addition. Current exclusion policy applies to both revisions. Unsupported/excluded source and file-level edits may not map to symbols. Files over 1 MiB, symlinks, and submodules are omitted; snapshots are capped at 128 MiB each (use a project subtree for larger repos). Non-UTF-8 Git paths are rejected. Avoid editing files during analysis: worktree snapshots are not atomic.
+
 ### `get_index_stats`
 
 Return lightweight repo orientation data such as language and symbol counts.

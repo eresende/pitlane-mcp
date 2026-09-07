@@ -1,3 +1,4 @@
+pub mod analyze_changes;
 pub mod ensure_project_ready;
 pub mod find_callees;
 pub mod find_callers;

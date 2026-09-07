@@ -198,6 +198,20 @@ pub struct TracePathRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AnalyzeChangesRequest {
+    /// Git project directory; a cached index is not required.
+    pub project: String,
+    /// Commit, branch or tag to compare against HEAD (not a merge-base comparison).
+    pub base_ref: String,
+    /// Compare with files on disk, including non-ignored untracked files (default false).
+    pub include_working_tree: Option<bool>,
+    /// Maximum graph traversal depth (default 2, maximum 3).
+    pub depth: Option<usize>,
+    /// Maximum impacted symbols/files per revision (default 8, maximum 12).
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AnalyzeImpactRequest {
     /// Project path previously indexed
     pub project: String,
@@ -381,6 +395,7 @@ const DEFAULT_PUBLIC_TOOL_NAMES: &[&str] = &[
     "read_code_unit",
     "trace_path",
     "analyze_impact",
+    "analyze_changes",
     "get_index_stats",
     "search_content",
 ];
@@ -776,6 +791,33 @@ impl PitlaneMcp {
     }
 
     #[tool(
+        description = "Analyze a Git diff against base_ref. Maps edited lines to symbols and returns revision-qualified impact evidence and test candidates, including deleted symbols from the base revision. Does not require a cached index.",
+        meta = tool_meta("git diff changes impact callers tests review"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn analyze_changes(&self, Parameters(req): Parameters<AnalyzeChangesRequest>) -> String {
+        match tools::analyze_changes::analyze_changes(
+            tools::analyze_changes::AnalyzeChangesParams {
+                project: req.project,
+                base_ref: req.base_ref,
+                include_working_tree: req.include_working_tree,
+                depth: req.depth,
+                limit: req.limit,
+            },
+        )
+        .await
+        {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
         description = "Advanced umbrella router across locate, read, trace, and impact. Prefer locate_code or trace_path unless you want the server to choose the workflow.",
         meta = tool_meta("navigate locate read trace impact route intent"),
         annotations(
@@ -1137,8 +1179,8 @@ impl ServerHandler for PitlaneMcp {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
                 "pitlane-mcp: token-efficient code navigation. \
-                Default tool tier: ensure_project_ready, investigate, locate_code, read_code_unit, trace_path, analyze_impact, get_index_stats, and search_content. \
-                Suggested flow: start with ensure_project_ready; use investigate for broad code questions; use locate_code for ambiguous discovery; use read_code_unit to inspect a chosen target; use trace_path for flow questions; use analyze_impact before edits; use get_index_stats for lightweight orientation; use search_content only when you know a text fragment. \
+                Default tool tier: ensure_project_ready, investigate, locate_code, read_code_unit, trace_path, analyze_impact, analyze_changes, get_index_stats, and search_content. \
+                Suggested flow: start with ensure_project_ready; use investigate for broad code questions; use locate_code for ambiguous discovery; use read_code_unit to inspect a chosen target; use trace_path for flow questions; use analyze_impact before edits and analyze_changes for Git-diff impact; use get_index_stats for lightweight orientation; use search_content only when you know a text fragment. \
                 Advanced primitive tools are hidden from tools/list by default to reduce agent branching. Set PITLANE_MCP_TOOL_TIER=all to expose the full primitive surface.",
             )
     }

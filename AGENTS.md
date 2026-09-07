@@ -9,6 +9,7 @@ Default public tier:
 - `read_code_unit`
 - `trace_path`
 - `analyze_impact`
+- `analyze_changes`
 - `get_index_stats`
 - `search_content`
 
@@ -27,7 +28,7 @@ Advanced primitive tools are hidden from `tools/list` unless the server is start
 2. Use `locate_code` when the user wants to find code but it is not yet clear whether the target is a symbol, file, or text fragment.
 3. Use `read_code_unit` once you know the target and want the smallest useful read instead of manually choosing between lower-level read primitives.
 4. Use `trace_path` for behavior, source-to-sink, config-to-effect, shortest-path, and other execution-path questions.
-5. Use `analyze_impact` for blast-radius questions before edits or refactors.
+5. Use `analyze_impact` for blast-radius questions before edits or refactors. Use `analyze_changes` to map a Git diff to revision-qualified symbols, impact evidence, and test candidates.
 6. Use `search_content` when you know a text snippet, log string, import path, macro name, or regex fragment but do not know the symbol boundary yet.
 7. Use `get_index_stats` to orient yourself in unfamiliar repos before broader exploration.
 8. Fall back to direct file reads only when editing or when full-file context is genuinely required.
