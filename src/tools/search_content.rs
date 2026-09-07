@@ -56,12 +56,7 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
     let file_glob = params
         .file
         .as_deref()
-        .map(|f| {
-            GlobBuilder::new(f)
-                .case_insensitive(true)
-                .build()
-                .map(|g| g.compile_matcher())
-        })
+        .map(|f| build_file_filter(&canonical, f))
         .transpose()?;
     let language_filter = params
         .language
@@ -194,19 +189,57 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
         )
     } else {
         let top = &steering_matches[0];
+        let document = top["file"].as_str().is_some_and(|file| {
+            super::documents::is_document_extension(
+                Path::new(file)
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or(""),
+            )
+        });
+        if document {
+            response["guidance"]["next_step"] = json!("Use read_code_unit with file_path and line_start/line_end to inspect the match, or omit the line bounds for a heading/key outline.");
+        }
         build_steering(
             0.86,
             "The matched line provides direct evidence for the requested text snippet.".to_string(),
-            "get_file_outline",
-            json!({
-                "file": top["file"],
-                "line": top["line"],
-            }),
+            if document {
+                "read_code_unit"
+            } else {
+                "get_file_outline"
+            },
+            if document {
+                json!({"file_path": top["file"], "line_start": top["line"], "line_end": top["line"]})
+            } else {
+                json!({
+                    "file": top["file"],
+                    "line": top["line"],
+                })
+            },
             take_fallback_candidates(&steering_matches),
         )
     };
     attach_steering(&mut response, steering);
     Ok(response)
+}
+
+pub(crate) fn build_file_filter(root: &Path, filter: &str) -> anyhow::Result<globset::GlobMatcher> {
+    let path = Path::new(filter);
+    let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy();
+    let pattern = if root.join(path).is_dir() {
+        let directory = relative.trim_end_matches('/');
+        if directory.is_empty() || directory == "." {
+            "**".to_string()
+        } else {
+            format!("{directory}/**")
+        }
+    } else {
+        relative.into_owned()
+    };
+    Ok(GlobBuilder::new(&pattern)
+        .case_insensitive(true)
+        .build()?
+        .compile_matcher())
 }
 
 enum ContentMatcher {
@@ -238,8 +271,12 @@ impl ContentMatcher {
     }
 }
 
-fn parse_language_filter(language: &str) -> anyhow::Result<&'static [&'static str]> {
+pub(crate) fn parse_language_filter(language: &str) -> anyhow::Result<&'static [&'static str]> {
     match language.to_lowercase().as_str() {
+        "markdown" | "md" => Ok(&["md", "markdown"]),
+        "json" => Ok(&["json"]),
+        "yaml" | "yml" => Ok(&["yaml", "yml"]),
+        "toml" => Ok(&["toml"]),
         "rust" => Ok(&["rs"]),
         "python" => Ok(&["py"]),
         "javascript" | "js" => Ok(&["js", "jsx", "mjs", "cjs"]),
@@ -262,7 +299,7 @@ fn parse_language_filter(language: &str) -> anyhow::Result<&'static [&'static st
         other => Err(ToolError::InvalidArgument {
             param: "language".to_string(),
             message: format!(
-                "Unknown language '{}'. Supported: rust, python, javascript, typescript, svelte, c, cpp, go, java, bash, csharp, ruby, swift, objc, php, zig, kotlin, lua, solidity",
+                "Unknown language '{}'. Supported: rust, python, javascript, typescript, svelte, c, cpp, go, java, bash, csharp, ruby, swift, objc, php, zig, kotlin, lua, solidity, markdown, json, yaml, toml",
                 other
             ),
         }
@@ -270,18 +307,23 @@ fn parse_language_filter(language: &str) -> anyhow::Result<&'static [&'static st
     }
 }
 
-fn build_exclude_set(root: &Path) -> anyhow::Result<GlobSet> {
+pub(crate) fn build_exclude_set(root: &Path) -> anyhow::Result<GlobSet> {
     let mut builder = GlobSetBuilder::new();
     for pattern in default_exclude_patterns()
         .into_iter()
         .chain(load_gitignore_patterns(root))
+        .chain(
+            crate::index::format::load_project_meta(root)
+                .map(|meta| meta.effective_excludes)
+                .unwrap_or_default(),
+        )
     {
         builder.add(globset::Glob::new(&pattern)?);
     }
     Ok(builder.build()?)
 }
 
-fn collect_searchable_files(
+pub(crate) fn collect_searchable_files(
     root: &Path,
     exclude_set: &GlobSet,
     extra_excluded_dirs: &std::collections::HashSet<String>,
@@ -306,7 +348,9 @@ fn collect_searchable_files(
             continue;
         }
         let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
-        if !is_supported_extension(ext) || is_declaration_file(path) {
+        if (!is_supported_extension(ext) && !super::documents::is_document_extension(ext))
+            || is_declaration_file(path)
+        {
             continue;
         }
         if let Some(exts) = language_filter {

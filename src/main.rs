@@ -73,13 +73,13 @@ pub struct SearchSymbolsRequest {
 pub struct SearchContentRequest {
     /// Project path previously indexed
     pub project: String,
-    /// Literal text or regex pattern to search for inside source files
+    /// Literal text or regex pattern to search for inside source, Markdown, JSON, YAML, or TOML files
     pub query: String,
     /// Treat query as a regular expression (default: false)
     pub regex: Option<bool>,
     /// Case-sensitive match (default: false)
     pub case_sensitive: Option<bool>,
-    /// Filter by language ("rust", "python", "javascript", "typescript", "svelte", "c", "cpp", "go", "java", "bash", "csharp", "ruby", "swift", "objc", "php", "zig", "kotlin", "lua", "solidity")
+    /// Filter by source language, or "markdown", "json", "yaml", "toml".
     pub language: Option<String>,
     /// Glob pattern to restrict search to specific files
     pub file: Option<String>,
@@ -153,11 +153,11 @@ pub struct LocateCodeRequest {
     pub project: String,
     /// Code lookup intent or code-path fragment. The server routes this to the most likely discovery primitive.
     pub query: String,
-    /// Optional routing hint such as "symbol", "file", "content", or "project".
+    /// Optional routing hint: "symbol", "file", "content", "project", "docs", or "config".
     pub intent: Option<String>,
-    /// Filter by SymbolKind when looking for a symbol candidate.
+    /// Filter by SymbolKind, or use "section" for Markdown headings and "config_key" for configuration keys.
     pub kind: Option<String>,
-    /// Filter by language ("rust", "python", "javascript", "typescript", "svelte", "c", "cpp", "go", "java", "bash", "csharp", "ruby", "swift", "objc", "php", "zig", "kotlin", "lua", "solidity")
+    /// Filter by source language, or "markdown", "json", "yaml", "toml" for document discovery.
     pub language: Option<String>,
     /// Restrict lookup to a subtree or file glob when relevant.
     pub scope: Option<String>,
@@ -636,7 +636,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Search indexed source text for a known snippet, log string, import path, or regex fragment. Use this only when you know text but not the owning symbol.",
+        description = "Search source, Markdown, JSON, YAML, and TOML text for a known snippet or regex fragment. Use locate_code with intent=docs or config for structured headings and keys.",
         meta = tool_meta("content text grep regex snippet string file search"),
         annotations(
             read_only_hint = true,

@@ -50,6 +50,38 @@ Resolve an ambiguous query into the most likely symbol, file, or content lookup 
 
 Use this when you need discovery without full source.
 
+Ambiguous symbol queries also include matching Markdown sections and JSON/YAML/TOML
+configuration keys. Use `intent: "docs"` (or `"documentation"`) or `intent: "config"`
+to focus on those documents; `kind: "section"` and `kind: "config_key"` are also
+supported. Document language filters are `markdown`, `json`, `yaml`, and `toml`.
+
+```json
+{ "project": "/your/project", "query": "Retry policy", "intent": "docs" }
+{ "project": "/your/project", "query": "server.port", "intent": "config", "scope": "config/**" }
+```
+
+Each result includes a `read_target`: pass its fields alongside `project` to
+`read_code_unit`. Document results use file/line coordinates, with `kind`, `name`,
+and `qualified` describing a heading hierarchy or nested key path. Repeated headings
+and array/table keys remain separate locations. Markdown sections extend to the
+next heading of equal or higher level; config ranges include the key's value.
+
+Documents are parsed from current files on demand (not embedded or stored as code
+symbols). New and edited documents are visible without re-indexing; `index_revision`
+still describes the source index. Discovery uses the source search's defaults,
+environment directory exclusions, `.gitignore`, and saved custom index exclusions.
+`scope` accepts a project-relative directory or glob. Symlinks, non-UTF-8 documents,
+and files over 1 MiB are skipped. Heading/key matching is lexical; it does not provide
+semantic document search. YAML aliases are not expanded and complex mapping keys
+are omitted. Malformed syntax is handled on a best-effort basis.
+
+`related_source` includes up to three candidates when a Markdown section names a
+symbol in backticks or a config key exactly matches a symbol name. These links carry
+explicit lexical evidence and `resolved: false`, remain within scope/exclusions,
+and do not create call-graph edges. With an explicit source language or symbol
+intent, lookup remains limited to source. At `limit: 1`, an existing source result
+takes precedence over documents.
+
 ### `read_code_unit`
 
 Read the smallest useful code unit for a known target.
@@ -62,6 +94,10 @@ Read the smallest useful code unit for a known target.
 Use this instead of manually choosing between symbol, file-outline, and line-slice primitives.
 
 Responses include `read_state` with `new`, `unchanged`, or `changed` guidance.
+
+Passing a Markdown, JSON, YAML, or TOML `file_path` without line bounds returns a
+bounded outline of sections/keys and their `read_target` values. Explicit line
+reads reuse the normal retrieval and freshness behavior (at most 500 lines per read).
 
 ### `trace_path`
 
@@ -145,7 +181,8 @@ Every check carries a `status` (`ok`/`warn`/`error`/`info`), a `detail`, and —
 
 ### `search_content`
 
-Search indexed source text for a known snippet, log string, import path, or regex fragment.
+Search source, Markdown, JSON, YAML, and TOML text for a known snippet, log string,
+import path, or regex fragment. Document language filters are accepted here too.
 
 ```json
 { "project": "/your/project", "query": "RegexMatcherBuilder::new" }
