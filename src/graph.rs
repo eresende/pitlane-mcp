@@ -457,7 +457,18 @@ fn scan_generic_direct_references(
                 &candidate.kind,
                 ambiguous,
             );
-            if let Some(max_confidence) = max_confidence {
+            if call_shaped_unambiguous(
+                &cleaned,
+                candidate.name.as_str(),
+                &candidate.kind,
+                ambiguous,
+            ) {
+                // A direct `name(` occurrence in cleaned source is a genuine
+                // call site even when the language AST scan cannot see it —
+                // e.g. calls embedded in macro arguments such as `format!`,
+                // whose token trees tree-sitter does not parse as expressions.
+                confidence = confidence.max(0.98);
+            } else if let Some(max_confidence) = max_confidence {
                 confidence = confidence.min(max_confidence);
             }
             DirectReference {
@@ -471,6 +482,35 @@ fn scan_generic_direct_references(
             }
         })
         .collect()
+}
+
+/// True when `name` appears in `cleaned` (comment- and string-stripped)
+/// as a direct call: the character before the occurrence is not part of a
+/// larger identifier and the character after it is `(`.
+fn contains_call_pattern(cleaned: &str, name: &str) -> bool {
+    let mut from = 0usize;
+    while let Some(pos) = cleaned[from..].find(name) {
+        let abs = from + pos;
+        let after = abs + name.len();
+        let prev_is_word = cleaned[..abs]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if !prev_is_word && cleaned[after..].starts_with('(') {
+            return true;
+        }
+        from = after;
+        if from >= cleaned.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// A call-shaped occurrence of an unambiguous callable name is call-grade
+/// evidence regardless of the line it appears on.
+fn call_shaped_unambiguous(cleaned: &str, name: &str, kind: &SymbolKind, ambiguous: bool) -> bool {
+    !ambiguous && is_callable_kind(kind) && contains_call_pattern(cleaned, name)
 }
 
 fn resolve_edges(
@@ -510,7 +550,12 @@ fn normalise_edge_bucket(bucket: &mut Vec<NavigationEdge>) {
             })
             .then_with(|| a.symbol_id.cmp(&b.symbol_id))
     });
-    bucket.dedup_by(|a, b| a.symbol_id == b.symbol_id);
+    // Keep the first (highest-priority) edge per target. Consecutive-dedup is
+    // not enough: sorting by confidence can separate same-target edges when
+    // their confidences differ (e.g. an AST-derived 0.99 call and a
+    // call-shaped generic 0.98 for the same symbol).
+    let mut seen: HashSet<String> = HashSet::new();
+    bucket.retain(|edge| seen.insert(edge.symbol_id.clone()));
 }
 
 fn relation_rank(relation: EdgeRelation) -> u8 {
@@ -1042,5 +1087,110 @@ mod tests {
         assert_eq!(edges.len(), 1, "got {edges:?}");
         assert_eq!(edges[0].0, "process");
         assert_eq!(edges[0].1, EdgeRelation::Calls);
+    }
+
+    // ── Call-shaped generic evidence (macro-embedded calls) ────────────
+
+    #[test]
+    fn test_call_inside_macro_arguments_is_call() {
+        // tree-sitter parses macro token trees as raw tokens, so the Rust
+        // AST scan cannot see calls embedded in `format!`/`println!`
+        // arguments. A direct `name(` occurrence in cleaned source is still
+        // a genuine call site.
+        let index = build_index(
+            "fn helper_fn(s: &str) -> &str { s }\nfn root() {\n    let s = helper_fn(\"x\");\n    println!(\"{}\", helper_fn(s));\n    summary.push_str(&format!(\"{}\", helper_fn(\"y\")));\n}\n",
+        );
+
+        let edges = outgoing_ids(&index, "root");
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        assert_eq!(edges[0].0, "helper_fn");
+        assert_eq!(edges[0].1, EdgeRelation::Calls);
+        assert!(edges[0].2 >= 0.98, "got {}", edges[0].2);
+    }
+
+    #[test]
+    fn test_name_mention_without_call_shape_stays_reference() {
+        // The identifier appears without a following `(` — the parentheses
+        // on the line belong to something else. Must stay a reference.
+        let index = build_index(
+            "fn helper_fn(s: &str) -> &str { s }\nfn root() {\n    let f: fn(&str) -> &str = helper_fn;\n    println!(\"{} {}\", f, 1 + (2 * 3));\n}\n",
+        );
+
+        let edges = outgoing_ids(&index, "root");
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        assert_eq!(edges[0].0, "helper_fn");
+        assert_eq!(edges[0].1, EdgeRelation::References);
+        assert!(edges[0].2 <= 0.84, "got {}", edges[0].2);
+    }
+
+    #[test]
+    fn test_call_shaped_ambiguous_name_stays_reference() {
+        // Even with a direct `name(` occurrence, ambiguity keeps the edge
+        // below the calls threshold.
+        let index = build_index_files(&[
+            (
+                "lib.rs",
+                "fn process() {}\nfn root() { format!(\"{}\", process()); }\n",
+            ),
+            ("other.rs", "fn process() {}\n"),
+        ]);
+
+        let edges = outgoing_ids(&index, "root");
+        assert_eq!(edges.len(), 2, "got {edges:?}");
+        for (_, relation, confidence) in &edges {
+            assert_eq!(*relation, EdgeRelation::References);
+            assert!(*confidence <= 0.84, "got {confidence}");
+        }
+    }
+
+    #[test]
+    fn test_method_call_shape_with_dot_prefix_is_call() {
+        // `.name(` is a method call site; the dot must not defeat the
+        // call-shape detection (preceding `.` is not a word character).
+        let index = build_index(
+            "struct Worker;\nimpl Worker { fn run(&self) {} }\nfn root(w: &Worker) { println!(\"{}\", w.run()); }\n",
+        );
+
+        let run_edge = outgoing_edge(&index, "root", "run").unwrap();
+        assert_eq!(run_edge.relation, EdgeRelation::Calls);
+    }
+
+    #[test]
+    fn test_ast_and_generic_edges_for_same_target_are_deduplicated() {
+        // `leaf()` produces an AST call edge (0.99) and a call-shaped generic
+        // edge (0.98). The bucket must keep only the higher-priority one per
+        // target — confidence-descending sort separates same-target edges,
+        // so consecutive-dedup is insufficient.
+        let index = build_index("fn leaf() {}\nfn branch() { leaf(); format!(\"{}\", leaf()); }\n");
+
+        let edges = outgoing_ids(&index, "branch");
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        assert_eq!(edges[0].0, "leaf");
+        assert_eq!(edges[0].1, EdgeRelation::Calls);
+        assert!(edges[0].2 >= 0.98, "got {}", edges[0].2);
+    }
+
+    #[test]
+    fn test_ast_and_generic_edges_for_same_target_are_deduplicated_in_buckets() {
+        // Same scenario checked through the NavigationEdge buckets directly,
+        // including the incoming direction.
+        let index = build_index("fn leaf() {}\nfn branch() { leaf(); format!(\"{}\", leaf()); }\n");
+        let leaf = index.symbols.values().find(|s| s.name == "leaf").unwrap();
+        let incoming = index.graph.incoming.get(&leaf.id).unwrap();
+        assert_eq!(incoming.len(), 1, "got {incoming:?}");
+    }
+
+    #[test]
+    fn test_contains_call_pattern_boundaries() {
+        assert!(contains_call_pattern("let x = foo(1);", "foo"));
+        assert!(!contains_call_pattern("let x = my_foo(1);", "foo"));
+        assert!(!contains_call_pattern("let x = foo2(1);", "foo"));
+        assert!(!contains_call_pattern("let foo = bar(1);", "foo"));
+        assert!(contains_call_pattern("w.run();", "run"));
+        assert!(!contains_call_pattern("x = foo (1);", "foo"));
+        // NOTE: comment/string stripping happens upstream (in
+        // scan_generic_direct_references); this helper only sees cleaned
+        // text, and the stripped case is covered by
+        // test_comment_mentioning_call_produces_no_calls_edge.
     }
 }
