@@ -132,6 +132,7 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
             &sym.id,
             Some(sym.file.as_ref()),
         );
+        response["index_revision"] = json!(index.revision);
         return Ok(response);
     }
 
@@ -209,6 +210,7 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         &sym.id,
         Some(sym.file.as_ref()),
     );
+    response["index_revision"] = json!(index.revision);
 
     Ok(response)
 }

@@ -9,6 +9,7 @@ pub mod get_lines;
 pub mod get_project_outline;
 pub mod get_symbol;
 pub mod get_usage_stats;
+pub mod index_changes;
 pub mod index_project;
 pub mod investigate;
 pub mod orchestrator;

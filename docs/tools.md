@@ -21,6 +21,7 @@ Notes:
 - Does not block on embeddings
 - Accepts `exclude`, `force`, and `max_files`
 - Accepts `poll_interval_ms` and `timeout_secs` for compatibility, but they are currently ignored
+- Starts a background watcher by default so edits update the index incrementally; pass `"watch": false` to opt out. The response reports the watcher status in `watching`.
 
 ### `investigate`
 
@@ -119,6 +120,16 @@ Return lightweight repo orientation data such as language and symbol counts.
 ```
 
 Use this before broader exploration when you want orientation, not structure.
+
+### `get_index_changes`
+
+List symbols the index recorded as changed since a revision, newest first.
+
+```json
+{ "project": "/your/project", "since_revision": 4, "limit": 20 }
+```
+
+The index revision is a monotonically increasing counter persisted with the index; every navigation response includes the current value as `index_revision`. Revisions are assigned by every persisted content change: fresh indexing, watcher batch flushes, and full resyncs. Poll `get_index_changes` with the revision you last observed to learn exactly which symbols were added, removed, or touched without re-reading files. A revision becomes visible once the index flush lands — pending embedding work never delays it. The change log is bounded (most recent 50 revisions, per-list caps); responses carry `complete` so you know when the log was trimmed and a re-index is the safe re-baseline.
 
 ### `search_content`
 

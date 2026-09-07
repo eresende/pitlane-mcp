@@ -254,6 +254,32 @@ async fn full_resync(
             let _ = crate::index::bm25::mark_stale(&tantivy_dir);
         }
         crate::index::bm25::invalidate(root);
+
+        // Record the resync as a new revision with a symbol-level diff
+        // against the pre-resync symbol set (issue #82).
+        let old_ids: HashSet<&str> = old_removed_ids.iter().map(|s| s.as_str()).collect();
+        let mut added = Vec::new();
+        let mut modified = Vec::new();
+        for id in idx.symbols.keys() {
+            if old_ids.contains(id.as_str()) {
+                modified.push(id.clone());
+            } else {
+                added.push(id.clone());
+            }
+        }
+        let removed: Vec<String> = old_removed_ids
+            .iter()
+            .filter(|id| !idx.symbols.contains_key(id.as_str()))
+            .cloned()
+            .collect();
+        let mut meta = load_meta(meta_path).unwrap_or_else(|_| IndexMeta::new(root));
+        meta.record_change(added, removed, modified);
+        idx.revision = meta.revision;
+        drop(idx);
+
+        if let Err(e) = save_meta(&meta, meta_path) {
+            eprintln!("pitlane-mcp: failed to flush meta to disk: {}", e);
+        }
     }
 
     if let Some(cfg) = &embed_config {
@@ -341,6 +367,38 @@ async fn reindex_batch(
             let _ = crate::index::bm25::mark_stale(&tantivy_dir);
         }
         crate::index::bm25::invalidate(root);
+
+        // Record the flush as a new revision (issue #82): added = symbols in
+        // the affected files that were not there before, removed = prior
+        // symbols no longer present, modified = surviving symbols in those
+        // files (IDs are file/name/kind based, so a content edit usually
+        // keeps the ID).
+        let removed_set: HashSet<&str> = removed_ids.iter().map(|s| s.as_str()).collect();
+        let mut added = Vec::new();
+        let mut modified = Vec::new();
+        for path in &accepted {
+            if let Some(ids) = idx.by_file.get(path) {
+                for id in ids {
+                    if removed_set.contains(id.as_str()) {
+                        modified.push(id.clone());
+                    } else {
+                        added.push(id.clone());
+                    }
+                }
+            }
+        }
+        let removed: Vec<String> = removed_ids
+            .iter()
+            .filter(|id| !idx.symbols.contains_key(id.as_str()))
+            .cloned()
+            .collect();
+
+        let mut meta = load_meta(meta_path).unwrap_or_else(|_| IndexMeta::new(root));
+        meta.record_change(added, removed, modified);
+        idx.revision = meta.revision;
+        if let Err(e) = save_meta(&meta, meta_path) {
+            eprintln!("pitlane-mcp: failed to flush meta to disk: {}", e);
+        }
     }
     // write lock released — safe to re-acquire index.read() below
 
@@ -401,6 +459,7 @@ async fn reindex_batch(
 mod tests {
     use super::*;
     use crate::indexer::registry;
+    use serde_json::json;
     use std::sync::atomic::AtomicBool;
     use tempfile::TempDir;
 
@@ -816,5 +875,128 @@ mod tests {
         let names = symbol_names(&index).await;
         assert!(names.iter().any(|n| n == "kept"));
         assert!(!names.iter().any(|n| n == "vendor_new"), "names={names:?}");
+    }
+    /// A watcher batch flush records a new revision with a symbol-level diff
+    /// in meta, and the in-memory index revision advances with it (issue #82).
+    #[tokio::test]
+    async fn test_batch_flush_records_revision_and_change_log() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, b"fn old_fn() {}").unwrap();
+
+        let indexer = Arc::new(Indexer::new(registry::build_default_registry()));
+        let (idx, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let index = Arc::new(RwLock::new(idx));
+
+        // Baseline meta at revision 1.
+        let meta_path = dir.path().join("meta.json");
+        let mut meta = IndexMeta::new(dir.path());
+        meta.record_change(
+            index.read().await.symbols.keys().cloned().collect(),
+            Vec::new(),
+            Vec::new(),
+        );
+        save_meta(&meta, &meta_path).unwrap();
+
+        // Edit + flush through the debounce loop.
+        let (tx, rx) = mpsc::channel(16);
+        let handle = spawn_loop(rx, &dir, indexer, index.clone());
+        std::fs::write(&file, b"fn new_fn() {}").unwrap();
+        tx.send(file).await.unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let meta = load_meta(&meta_path).unwrap();
+        assert_eq!(meta.revision, 2, "flush should assign revision 2");
+        let entry = meta.change_log.last().unwrap();
+        assert_eq!(entry.revision, 2);
+        assert!(
+            entry.added.iter().any(|id| id.contains("new_fn")),
+            "added={:?}",
+            entry.added
+        );
+        assert!(
+            entry.removed.iter().any(|id| id.contains("old_fn")),
+            "removed={:?}",
+            entry.removed
+        );
+
+        // In-memory index revision advanced so navigation responses see it.
+        let idx = index.read().await;
+        assert_eq!(idx.revision, 2);
+        assert!(!idx.symbols.values().any(|s| s.name == "old_fn"));
+        assert!(idx.symbols.values().any(|s| s.name == "new_fn"));
+    }
+    /// End-to-end issue #82: after a watcher flush, get_index_changes reports
+    /// the new revision with the changed symbols.
+    #[tokio::test]
+    async fn test_get_index_changes_surfaces_watcher_flush() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, b"fn old_fn() {}").unwrap();
+
+        // Index through the real tool so the index lands in the global store
+        // where get_index_changes (and other tools) will read it.
+        crate::tools::index_project::index_project(
+            crate::tools::index_project::IndexProjectParams {
+                path: dir.path().to_string_lossy().to_string(),
+                exclude: None,
+                force: Some(true),
+                max_files: None,
+                progress_token: None,
+                peer: None,
+                embed_config: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let canonical =
+            crate::path_policy::resolve_project_path(&dir.path().to_string_lossy()).unwrap();
+        let idx_dir = index_dir(&canonical).unwrap();
+        let (idx, _) = Indexer::new(registry::build_default_registry())
+            .index_project(dir.path(), &[])
+            .unwrap();
+        let index = Arc::new(RwLock::new(idx));
+
+        // Flush through the real on-disk index/meta paths.
+        let root = dir.path().to_path_buf();
+        let indexer2 = Arc::new(Indexer::new(registry::build_default_registry()));
+        let (tx, rx) = mpsc::channel(16);
+        let handle = tokio::spawn(run_debounce_loop(
+            rx,
+            root,
+            indexer2,
+            index.clone(),
+            TEST_DEBOUNCE,
+            idx_dir.join("index.bin"),
+            idx_dir.join("meta.json"),
+            None,
+            Arc::new(AtomicBool::new(false)),
+        ));
+        std::fs::write(&file, b"fn new_fn() {}").unwrap();
+        tx.send(file).await.unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let changes = crate::tools::index_changes::get_index_changes(
+            crate::tools::index_changes::GetIndexChangesParams {
+                project: dir.path().to_string_lossy().to_string(),
+                since_revision: Some(0),
+                limit: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(changes["current_revision"], json!(2));
+        assert_eq!(changes["complete"], json!(true));
+        let symbols = changes["changed_symbols"].as_array().unwrap();
+        assert!(
+            symbols
+                .iter()
+                .any(|id| id.as_str().is_some_and(|s| s.contains("new_fn"))),
+            "changed_symbols={symbols:?}"
+        );
     }
 }

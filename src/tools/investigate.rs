@@ -663,7 +663,7 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
 
     session::record_query(&canonical, &query);
 
-    let response = json!({
+    let mut response = json!({
         "query": query,
         "answer": answer,
         "symbols_read": symbols_seen.len(),
@@ -678,6 +678,7 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         },
         "repeated": false,
     });
+    response["index_revision"] = json!(index.revision);
     session::store_investigate_cache(&canonical, &cache_key, response.clone());
 
     Ok(response)
