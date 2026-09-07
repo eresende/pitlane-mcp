@@ -18,3 +18,6 @@ This directory contains the focused documentation for `pitlane-mcp`.
 
 - [Security](security.md)
   Filesystem scope, confinement, storage, and practical deployment guidance.
+
+- [Development Notes](development.md)
+  Local build/test/release workflow, including the stale-binary quirk after `cargo publish`.
