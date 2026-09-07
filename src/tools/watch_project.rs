@@ -323,11 +323,25 @@ mod cross_process_tests {
         assert_eq!(status["status"], json!("running"));
         assert_eq!(status["pid"], json!(std::process::id()));
 
-        // Stale: a PID that cannot exist.
+        // Stale: a PID that cannot exist. On Windows the liveness check is
+        // conservative (assumes alive without a Win32 API dependency), so
+        // stale detection is a Unix-only behavior.
         std::fs::write(&status_path, br#"{"pid": 99999999}"#).unwrap();
-        let status = external_status(&project).unwrap();
-        assert_eq!(status["status"], json!("stale"));
-        assert!(!status_path.exists(), "stale entry cleaned up");
+        #[cfg(not(windows))]
+        {
+            let status = external_status(&project).unwrap();
+            assert_eq!(status["status"], json!("stale"));
+            assert!(!status_path.exists(), "stale entry cleaned up");
+        }
+        #[cfg(windows)]
+        {
+            let status = external_status(&project).unwrap();
+            assert_eq!(
+                status["status"],
+                json!("running"),
+                "windows assumes unknown PIDs are alive (conservative fallback)"
+            );
+        }
     }
 
     /// external_stop writes the flag and reports stopped once the watcher
