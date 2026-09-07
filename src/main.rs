@@ -141,6 +141,10 @@ pub struct InvestigateRequest {
     pub language: Option<String>,
     /// Restrict investigation to a subtree or file glob
     pub scope: Option<String>,
+    /// Approximate token budget for the inlined source payload (issue #83). Omit for the default (~6000 tokens).
+    pub token_budget: Option<usize>,
+    /// Include related test symbols even when the query does not mention tests (default: false)
+    pub include_tests: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -702,6 +706,8 @@ impl PitlaneMcp {
             query: req.query,
             language: req.language,
             scope: req.scope,
+            token_budget: req.token_budget,
+            include_tests: req.include_tests,
         };
         match tools::investigate::investigate(params).await {
             Ok(v) => value_to_text(v),

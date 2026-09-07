@@ -265,6 +265,12 @@ enum Command {
         /// Restrict to a subtree or file glob
         #[arg(long)]
         scope: Option<String>,
+        /// Approximate token budget for the inlined source payload
+        #[arg(long)]
+        token_budget: Option<usize>,
+        /// Include related test symbols even if the query does not mention tests
+        #[arg(long)]
+        include_tests: bool,
     },
 }
 
@@ -621,12 +627,16 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
             query,
             lang,
             scope,
+            token_budget,
+            include_tests,
         } => {
             let params = tools::investigate::InvestigateParams {
                 project,
                 query,
                 language: lang,
                 scope,
+                token_budget,
+                include_tests: Some(include_tests),
             };
             tools::investigate::investigate(params).await?
         }

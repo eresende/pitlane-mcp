@@ -37,6 +37,8 @@ Optional parameters:
 
 - `language`
 - `scope`
+- `token_budget` — approximate token budget for the inlined source payload (default ~6000, chars/4 estimate). Symbols are inlined in discovery order; when the budget runs out the next symbol is truncated to what still fits (never below 15 lines) and the rest become metadata-only navigation targets: they stay in `symbols` with their ID, file, and line range (`presentation: "metadata_only"`, `reason: "token budget exhausted"`) and also appear in `omitted_symbols`. Fetch them with `read_code_unit` — no re-discovery needed. `limits.estimated_tokens_used` reports the estimate.
+- `include_tests` — include related test symbols even when the query does not mention tests (default: tests are only pulled in for test-oriented queries)
 
 ### `locate_code`
 

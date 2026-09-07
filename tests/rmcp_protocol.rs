@@ -130,3 +130,20 @@ fn doctor_is_public_with_project_required() {
     assert!(!required.contains(&json!("repair")));
     assert_eq!(tool["annotations"]["readOnlyHint"], true);
 }
+
+#[test]
+fn investigate_exposes_budget_parameters() {
+    let result = tools_list_result("2026-07-28");
+    let tool = result["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "investigate")
+        .expect("public investigate tool");
+    let props = tool["inputSchema"]["properties"].as_object().unwrap();
+    assert!(props.contains_key("token_budget"));
+    assert!(props.contains_key("include_tests"));
+    let required = tool["inputSchema"]["required"].as_array().unwrap();
+    assert!(!required.contains(&json!("token_budget")));
+    assert!(!required.contains(&json!("include_tests")));
+}

@@ -21,12 +21,32 @@ use crate::tools::search_symbols::{search_symbols, SearchSymbolsParams};
 
 const MAX_INLINE_SYMBOLS: usize = 6;
 const MAX_INLINE_LINES: usize = 120;
+/// Default approximate token budget for the inlined payload (issue #83).
+/// Chars/4 heuristic; 6000 tokens ≈ the pre-budget inline behaviour.
+const DEFAULT_TOKEN_BUDGET: usize = 6000;
+/// Below this many lines a symbol is omitted entirely rather than inlined as
+/// an unusably thin slice. Navigation metadata is still returned.
+const MIN_INLINE_LINES: usize = 15;
+
+/// Cheap token estimate: ~4 characters per token for code.
+fn estimate_tokens(text: &str) -> usize {
+    text.len().div_ceil(4)
+}
 
 pub struct InvestigateParams {
     pub project: String,
     pub query: String,
     pub language: Option<String>,
     pub scope: Option<String>,
+    /// Approximate token budget for the inlined source payload (issue #83).
+    /// Symbols are inlined in discovery order until the budget is exhausted;
+    /// the next symbol is truncated to what fits (never below
+    /// MIN_INLINE_LINES) and the rest become metadata-only navigation
+    /// targets in `symbols` with an entry in `omitted_symbols`.
+    pub token_budget: Option<usize>,
+    /// Include related test symbols even when the query does not mention
+    /// tests (default: only when the query looks test-oriented).
+    pub include_tests: Option<bool>,
 }
 
 /// Split a query into sub-queries that attack the question from different angles.
@@ -225,12 +245,15 @@ fn investigate_cache_key(
     language: Option<&str>,
     scope: Option<&str>,
     epoch: u64,
+    token_budget: Option<usize>,
+    include_tests: bool,
 ) -> String {
     // Language and scope filters change which symbols an investigation may
     // consider, so they must be part of the key. The epoch changes whenever
     // the index is rebuilt (reindex or watcher update), invalidating answers
-    // that may reference stale source.
-    let mut key = format!("investigate:v2:{}", epoch);
+    // that may reference stale source. Budget and test inclusion shape the
+    // response payload, so they are part of the key too (issue #83).
+    let mut key = format!("investigate:v3:{}", epoch);
     if let Some(lang) = language {
         let lang = lang.trim().to_lowercase();
         if !lang.is_empty() {
@@ -244,6 +267,13 @@ fn investigate_cache_key(
             key.push_str(";scope=");
             key.push_str(scope);
         }
+    }
+    if let Some(budget) = token_budget {
+        key.push_str(";budget=");
+        key.push_str(&budget.to_string());
+    }
+    if include_tests {
+        key.push_str(";tests=1");
     }
     key.push(';');
     key.push_str(&normalize_investigate_key(query));
@@ -304,11 +334,14 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         return Err(anyhow::anyhow!("query must not be empty"));
     }
 
+    let include_tests = params.include_tests.unwrap_or(false);
     let cache_key = investigate_cache_key(
         &query,
         params.language.as_deref(),
         params.scope.as_deref(),
         session::investigate_epoch(&canonical),
+        params.token_budget,
+        include_tests,
     );
     if let Some(cached) = session::get_investigate_cache(&canonical, &cache_key) {
         return Ok(mark_investigate_repeated(cached));
@@ -436,9 +469,11 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         discovered_ids.truncate(MAX_INLINE_SYMBOLS);
     }
 
-    // Phase 3b: If the query mentions tests, prioritize test functions.
+    // Phase 3b: If the query mentions tests (or tests were explicitly
+    // requested), prioritize test functions.
     let query_lower = query.to_lowercase();
-    let wants_tests = query_lower.contains("test")
+    let wants_tests = include_tests
+        || query_lower.contains("test")
         || query_lower.contains("behavior")
         || query_lower.contains("edge case")
         || query_lower.contains("scenario");
@@ -543,12 +578,27 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         }
     }
 
-    // Phase 4: Read symbol bodies.
+    // Phase 4: Read symbol bodies within the token budget (issue #83).
+    // Symbols are inlined in discovery order; when the budget runs out, the
+    // next symbol is truncated to what still fits (never below
+    // MIN_INLINE_LINES) and the rest become metadata-only navigation targets:
+    // they stay in `symbols` with their ID/file/line range so the caller can
+    // fetch them via read_code_unit without re-discovering.
+    let token_budget = params
+        .token_budget
+        .unwrap_or(DEFAULT_TOKEN_BUDGET)
+        .clamp(200, 100_000);
     let mut sections: Vec<String> = Vec::new();
     let mut files_seen: Vec<String> = Vec::new();
     let mut symbols_seen: Vec<Value> = Vec::new();
     let mut truncated_symbols: Vec<Value> = Vec::new();
     let mut unreadable_ids: Vec<String> = Vec::new();
+    let mut budget_omitted_ids: Vec<String> = Vec::new();
+    // Reserve a small allowance for response prose so the payload stays under
+    // budget even with the answer text around the code blocks.
+    const PROSE_ALLOWANCE_TOKENS: usize = 400;
+    let mut used = PROSE_ALLOWANCE_TOKENS;
+    let mut budget_exhausted = false;
 
     for symbol_id in &discovered_ids {
         let Some(sym) = index.symbols.get(symbol_id.as_str()) else {
@@ -568,28 +618,59 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
 
         let lines: Vec<&str> = source.lines().collect();
         let total_lines = lines.len();
-        let truncated = total_lines > MAX_INLINE_LINES;
-        let body = if truncated {
-            let mut t = lines[..MAX_INLINE_LINES].join("\n");
-            t.push_str(&format!(
-                "\n// ... ({} more lines)",
-                total_lines - MAX_INLINE_LINES
-            ));
-            t
+        // Per-symbol hard cap still applies inside the budget so one huge
+        // early symbol cannot crowd out everything that follows.
+        let cap_lines = total_lines.min(MAX_INLINE_LINES);
+        let full_cost = estimate_tokens(&source) + 40; // + fence/header overhead
+
+        let (shown, presentation) = if budget_exhausted || full_cost + used > token_budget {
+            // Try to fit a truncated slice; omit entirely when even that
+            // would be too thin to be useful.
+            let remaining = token_budget.saturating_sub(used);
+            let avg_line_chars = (source.len() / total_lines.max(1)).max(1);
+            let fit_lines = (remaining.saturating_sub(40) * 4 / avg_line_chars)
+                .min(cap_lines)
+                .min(MAX_INLINE_LINES);
+            if !budget_exhausted && fit_lines >= MIN_INLINE_LINES {
+                (fit_lines, "truncated")
+            } else {
+                budget_exhausted = true;
+                (0, "metadata_only")
+            }
         } else {
-            source.clone()
+            (
+                cap_lines,
+                if cap_lines < total_lines {
+                    "truncated"
+                } else {
+                    "inlined"
+                },
+            )
         };
 
-        sections.push(format!(
-            "### {} `{}` in {} (lines {}-{})\n```{}\n{}\n```",
-            sym.kind, sym.qualified, short_file, sym.line_start, sym.line_end, sym.language, body,
-        ));
+        if shown > 0 {
+            let mut body = lines[..shown].join("\n");
+            if shown < total_lines {
+                body.push_str(&format!("\n// ... ({} more lines)", total_lines - shown));
+            }
+            sections.push(format!(
+                "### {} `{}` in {} (lines {}-{})\n```{}\n{}\n```",
+                sym.kind,
+                sym.qualified,
+                short_file,
+                sym.line_start,
+                sym.line_start + shown as u32 - 1,
+                sym.language,
+                body,
+            ));
+            used += estimate_tokens(&body) + 40;
+        }
 
-        if truncated {
+        if presentation == "truncated" {
             truncated_symbols.push(json!({
                 "id": sym.id,
                 "name": sym.name,
-                "lines_shown": MAX_INLINE_LINES,
+                "lines_shown": shown,
                 "lines_total": total_lines,
             }));
         }
@@ -597,6 +678,7 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         if !files_seen.contains(&file_str) {
             files_seen.push(file_str.clone());
         }
+        // Navigation target for every candidate, regardless of presentation.
         symbols_seen.push(json!({
             "id": sym.id,
             "name": sym.name,
@@ -604,17 +686,29 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
             "kind": sym.kind.to_string(),
             "line_start": sym.line_start,
             "line_end": sym.line_end,
-            "lines_shown": total_lines.min(MAX_INLINE_LINES),
+            "lines_shown": shown,
             "lines_total": total_lines,
+            "presentation": presentation,
+            "reason": if presentation == "metadata_only" {
+                json!("token budget exhausted")
+            } else {
+                Value::Null
+            },
         }));
 
+        if presentation == "metadata_only" {
+            budget_omitted_ids.push(sym.id.clone());
+            continue;
+        }
         session::record_symbol(&canonical, &sym.id, Some(sym.file.as_ref()));
         session::record_file(&canonical, &sym.file);
     }
 
     // Omission metadata: discovered symbols that did not fit inline, plus
     // symbols whose source could not be read.
-    let omitted_symbols = build_omission_metadata(&index, &omitted_ids, &unreadable_ids);
+    let mut all_omitted_ids = omitted_ids;
+    all_omitted_ids.extend(budget_omitted_ids);
+    let omitted_symbols = build_omission_metadata(&index, &all_omitted_ids, &unreadable_ids);
 
     let is_complete = truncated_symbols.is_empty() && omitted_symbols.is_empty();
 
@@ -675,6 +769,8 @@ pub async fn investigate(params: InvestigateParams) -> anyhow::Result<Value> {
         "limits": {
             "max_symbols": MAX_INLINE_SYMBOLS,
             "max_lines_per_symbol": MAX_INLINE_LINES,
+            "token_budget": token_budget,
+            "estimated_tokens_used": used,
         },
         "repeated": false,
     });
@@ -734,6 +830,8 @@ mod tests {
             query: "gitignore_match".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -748,6 +846,8 @@ mod tests {
             query: "find gitignore_match".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -759,24 +859,37 @@ mod tests {
 
     #[test]
     fn test_investigate_cache_key_separates_filters_and_epochs() {
-        let base = investigate_cache_key("gitignore", None, None, 0);
+        let base = investigate_cache_key("gitignore", None, None, 0, None, false);
         assert!(base.contains("gitignore"));
         // Language filter changes the key.
         assert_ne!(
-            investigate_cache_key("gitignore", Some("rust"), None, 0),
+            investigate_cache_key("gitignore", Some("rust"), None, 0, None, false),
             base
         );
         // Scope filter changes the key.
         assert_ne!(
-            investigate_cache_key("gitignore", None, Some("src/tools"), 0),
+            investigate_cache_key("gitignore", None, Some("src/tools"), 0, None, false),
             base
         );
         // A new epoch (index rebuild) changes the key.
-        assert_ne!(investigate_cache_key("gitignore", None, None, 1), base);
+        assert_ne!(
+            investigate_cache_key("gitignore", None, None, 1, None, false),
+            base
+        );
+        // A different token budget changes the key (issue #83).
+        assert_ne!(
+            investigate_cache_key("gitignore", None, None, 0, Some(1000), false),
+            base
+        );
+        // Tests inclusion changes the key (issue #83).
+        assert_ne!(
+            investigate_cache_key("gitignore", None, None, 0, None, true),
+            base
+        );
         // Filters are normalized so casing/whitespace alone cannot bypass the cache.
         assert_eq!(
-            investigate_cache_key("gitignore", Some(" Rust "), None, 0),
-            investigate_cache_key("gitignore", Some("rust"), None, 0)
+            investigate_cache_key("gitignore", Some(" Rust "), None, 0, None, false),
+            investigate_cache_key("gitignore", Some("rust"), None, 0, None, false)
         );
     }
 
@@ -792,6 +905,8 @@ mod tests {
             query: "alpha".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -803,6 +918,8 @@ mod tests {
             query: "alpha".to_string(),
             language: Some("python".to_string()),
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -814,6 +931,8 @@ mod tests {
             query: "alpha".to_string(),
             language: Some("python".to_string()),
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -832,6 +951,8 @@ mod tests {
             query: "stale_symbol".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -843,6 +964,8 @@ mod tests {
             query: "stale_symbol".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -862,6 +985,8 @@ mod tests {
             query: "stale_symbol".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -880,6 +1005,8 @@ mod tests {
             query: "hello".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap_err();
@@ -891,6 +1018,8 @@ mod tests {
             query: "hello".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -913,6 +1042,8 @@ mod tests {
             query: "small_thing".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -952,6 +1083,8 @@ mod tests {
             query: "very_long_function".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -1048,6 +1181,8 @@ mod tests {
             query: "widget".to_string(),
             language: None,
             scope: None,
+            token_budget: None,
+            include_tests: None,
         })
         .await
         .unwrap();
@@ -1080,5 +1215,180 @@ mod tests {
         // An answer claiming completeness must not contain the capped warning.
         let answer = resp["answer"].as_str().unwrap();
         assert_eq!(answer.contains("capped and may be incomplete"), !complete);
+    }
+    // ── Issue #83: token budget and explicit test inclusion ──
+
+    #[tokio::test]
+    async fn test_token_budget_omits_and_preserves_navigation_targets() {
+        let dir = TempDir::new().unwrap();
+        // Several large symbols so a tiny budget cannot inline them all.
+        let mut src = String::new();
+        for i in 0..6 {
+            src.push_str(&format!("pub fn budget_probe_{i}() {{\n"));
+            for j in 0..40 {
+                src.push_str(&format!(
+                    "    let _v{j} = {j} + {i}; // filler line to grow the body\n"
+                ));
+            }
+            src.push_str("}\n\n");
+        }
+        std::fs::write(dir.path().join("lib.rs"), src).unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = investigate(InvestigateParams {
+            project,
+            query: "budget_probe".to_string(),
+            language: None,
+            scope: None,
+            token_budget: Some(300), // enough for ~1 small slice only
+            include_tests: None,
+        })
+        .await
+        .unwrap();
+
+        // Some symbols made it inline, the rest are metadata-only navigation
+        // targets with reasons - nothing silently dropped.
+        let symbols = result["symbols"].as_array().unwrap();
+        assert!(!symbols.is_empty());
+        assert!(
+            symbols.iter().any(|s| s["presentation"] == "metadata_only"),
+            "expected at least one metadata-only symbol, symbols={symbols:?}"
+        );
+        for s in symbols
+            .iter()
+            .filter(|s| s["presentation"] == "metadata_only")
+        {
+            assert_eq!(s["lines_shown"], json!(0));
+            assert_eq!(s["reason"], "token budget exhausted");
+            assert!(s["id"].is_string() && s["file"].is_string());
+        }
+        // Omission metadata covers the budget-omitted symbols.
+        assert_eq!(result["complete"], json!(false));
+        assert!(
+            result["omitted_symbols"].as_array().unwrap().len()
+                >= symbols
+                    .iter()
+                    .filter(|s| s["presentation"] == "metadata_only")
+                    .count()
+        );
+        // Inlined content fits the budget: answer stays bounded.
+        let answer_len = result["answer"].as_str().unwrap().len();
+        assert!(answer_len < 300 * 4 + 4096, "answer too long: {answer_len}");
+    }
+
+    #[tokio::test]
+    async fn test_token_budget_truncates_to_fit() {
+        let dir = TempDir::new().unwrap();
+        let body: String = (0..60)
+            .map(|j| format!("    let _v{j} = {j}; // filler\n"))
+            .collect();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            format!("pub fn trunc_probe() {{\n{body}}}\n"),
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = investigate(InvestigateParams {
+            project,
+            query: "trunc_probe".to_string(),
+            language: None,
+            scope: None,
+            token_budget: Some(800),
+            include_tests: None,
+        })
+        .await
+        .unwrap();
+
+        let symbols = result["symbols"].as_array().unwrap();
+        assert!(!symbols.is_empty(), "expected the probe symbol to be found");
+        let s = &symbols[0];
+        assert_eq!(s["presentation"], "truncated", "s={s}");
+        assert!(s["lines_shown"].as_u64().unwrap() < s["lines_total"].as_u64().unwrap());
+        let truncated = result["truncated_symbols"].as_array().unwrap();
+        assert_eq!(truncated.len(), 1);
+        assert_eq!(truncated[0]["name"], json!("trunc_probe"));
+    }
+
+    #[tokio::test]
+    async fn test_include_tests_surfaces_test_symbols_without_test_query() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn widget_render() {}\n").unwrap();
+        std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+        std::fs::write(
+            dir.path().join("tests/widget.rs"),
+            b"#[test]\nfn widget_render_snapshot() { assert!(true); }\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+
+        let with_tests = investigate(InvestigateParams {
+            project: project.clone(),
+            query: "widget render".to_string(),
+            language: None,
+            scope: None,
+            token_budget: None,
+            include_tests: Some(true),
+        })
+        .await
+        .unwrap();
+
+        let names: Vec<String> = with_tests["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            names.iter().any(|n| n.contains("widget_render_snapshot")),
+            "expected the test symbol in {names:?}"
+        );
+
+        // Without the flag, the same query stays implementation-only.
+        let without = investigate(InvestigateParams {
+            project,
+            query: "widget render".to_string(),
+            language: None,
+            scope: None,
+            token_budget: None,
+            include_tests: None,
+        })
+        .await
+        .unwrap();
+        let names: Vec<String> = without["symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["name"].as_str().map(str::to_string))
+            .collect();
+        assert!(
+            !names.iter().any(|n| n.contains("test")),
+            "test symbols should not appear without include_tests: {names:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_default_budget_preserves_legacy_shape() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn hello() {}\n").unwrap();
+        let project = setup_project(&dir).await;
+
+        let result = investigate(InvestigateParams {
+            project,
+            query: "hello".to_string(),
+            language: None,
+            scope: None,
+            token_budget: None,
+            include_tests: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["limits"]["token_budget"], json!(6000));
+        assert!(result["limits"]["estimated_tokens_used"].as_u64().unwrap() > 0);
+        // Every listed symbol carries the presentation field.
+        for s in result["symbols"].as_array().unwrap() {
+            assert!(s["presentation"].is_string());
+        }
     }
 }
