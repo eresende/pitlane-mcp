@@ -548,7 +548,11 @@ fn current_file_mtimes(
     Ok(current_source_snapshot(project_path, exclude_patterns)?.file_mtimes)
 }
 
-fn is_index_up_to_date(project_path: &Path, meta: &IndexMeta, exclude_patterns: &[String]) -> bool {
+pub(crate) fn is_index_up_to_date(
+    project_path: &Path,
+    meta: &IndexMeta,
+    exclude_patterns: &[String],
+) -> bool {
     if meta.project_path != project_path.display().to_string() {
         return false;
     }

@@ -115,3 +115,18 @@ fn get_index_changes_is_public_with_project_required() {
     assert!(!required.contains(&json!("since_revision")));
     assert_eq!(tool["annotations"]["readOnlyHint"], true);
 }
+
+#[test]
+fn doctor_is_public_with_project_required() {
+    let result = tools_list_result("2026-07-28");
+    let tool = result["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "doctor")
+        .expect("public doctor tool");
+    let required = tool["inputSchema"]["required"].as_array().unwrap();
+    assert!(required.contains(&json!("project")));
+    assert!(!required.contains(&json!("repair")));
+    assert_eq!(tool["annotations"]["readOnlyHint"], true);
+}
