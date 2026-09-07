@@ -33,7 +33,7 @@ pub async fn get_index_changes(params: GetIndexChangesParams) -> anyhow::Result<
         .iter()
         .filter(|change| change.revision > since)
         .collect();
-    entries.sort_by(|a, b| b.revision.cmp(&a.revision));
+    entries.sort_by_key(|change| std::cmp::Reverse(change.revision));
 
     let earliest_logged = meta.change_log.iter().map(|c| c.revision).min();
     // The feed is complete when every revision between `since + 1` and
