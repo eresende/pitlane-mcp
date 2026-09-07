@@ -156,10 +156,16 @@ enum Command {
         #[arg(long)]
         timeout_secs: Option<u64>,
     },
-    /// Keep a project index updated until interrupted
+    /// Keep a project index updated until interrupted or stopped
     Watch {
         /// Path to the indexed project
         project: String,
+        /// Stop a running watcher instead of starting one
+        #[arg(long)]
+        stop: bool,
+        /// Show watcher status without starting or stopping
+        #[arg(long)]
+        status: bool,
     },
     /// Show index statistics (file/symbol counts by language and kind)
     Stats {
@@ -293,7 +299,21 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Watch { project } => {
+        Command::Watch {
+            project,
+            stop,
+            status,
+        } => {
+            if stop {
+                let result = tools::watch_project::external_stop(&project).await?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
+            if status {
+                let result = tools::watch_project::external_status(&project)?;
+                println!("{}", serde_json::to_string_pretty(&result)?);
+                return Ok(());
+            }
             let embed_config = pitlane_mcp::embed::EmbedConfig::try_from_env()?.map(Arc::new);
             let registry = tools::watch_project::WatcherRegistry::new();
             let params = tools::watch_project::WatchProjectParams {
@@ -304,8 +324,34 @@ async fn main() -> anyhow::Result<()> {
             };
             let result = tools::watch_project::watch_project(params, &registry).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
-            tokio::signal::ctrl_c().await?;
-            let _ = registry.stop(&project);
+            if result["status"] == "already_running" {
+                // Another process owns the watcher; nothing to await here.
+                return Ok(());
+            }
+            // Exit on ctrl-c or when another invocation stops us via the
+            // cross-process stop flag (issue #99).
+            let watcher = {
+                let mut watchers = registry.watchers_lock();
+                watchers.remove(
+                    &pitlane_mcp::path_policy::resolve_project_path(&project)?
+                        .display()
+                        .to_string(),
+                )
+            };
+            let Some(watcher) = watcher else {
+                return Ok(());
+            };
+            let mut done = watcher.done();
+            done.borrow_and_update(); // mark current state seen so changed() waits for a real signal
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    drop(watcher); // Drop removes the status file
+                    let _ = registry.stop(&project);
+                }
+                _ = done.changed() => {
+                    // Watcher shut itself down after a stop flag; nothing to clean up.
+                }
+            }
             Ok(())
         }
         command => {

@@ -15,6 +15,7 @@ use crate::indexer::{
     default_exclude_patterns, load_gitignore_patterns, path_is_excluded, registry, Indexer,
 };
 use crate::tools::index_project::current_source_snapshot;
+use crate::tools::watch_project::{remove_watch_status, watch_status_path, write_watch_status};
 
 const DEBOUNCE_WINDOW: Duration = Duration::from_millis(500);
 const CHANNEL_CAPACITY: usize = 1024;
@@ -35,9 +36,26 @@ fn effective_exclude_patterns(root: &Path, meta_path: &Path) -> Vec<String> {
 
 pub struct ProjectWatcher {
     _watcher: RecommendedWatcher,
+    /// Resolves when the debounce loop exits (stop flag, channel close, or
+    /// error) so callers can await a clean shutdown.
+    done: tokio::sync::watch::Receiver<bool>,
+    /// Where the cross-process status file lives (removed on Drop).
+    status_path: PathBuf,
+}
+
+impl Drop for ProjectWatcher {
+    fn drop(&mut self) {
+        // Best-effort cleanup of the cross-process status file; the debounce
+        // loop also removes it on a stop-flag shutdown.
+        remove_watch_status(&self.status_path);
+    }
 }
 
 impl ProjectWatcher {
+    pub fn done(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.done.clone()
+    }
+
     pub fn start(
         project_path: PathBuf,
         index: Arc<RwLock<SymbolIndex>>,
@@ -53,6 +71,20 @@ impl ProjectWatcher {
         let (tx, rx) = mpsc::channel::<PathBuf>(CHANNEL_CAPACITY);
         let overflowed = Arc::new(AtomicBool::new(false));
 
+        // Cross-process lifecycle (issue #99): publish a status file under the
+        // index directory and honor a stop-flag written by any other
+        // `pitlane watch --stop` / `watch_project` invocation.
+        let idx_dir = meta_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| project_path.clone());
+        let status_path = watch_status_path(&idx_dir);
+        write_watch_status(&status_path)?;
+        let stop_flag_path = idx_dir.join("watch.stop");
+        let _ = std::fs::remove_file(&stop_flag_path); // stale flag from a previous stop
+
+        let (done_tx, done_rx) = tokio::sync::watch::channel(false);
+
         tokio::spawn(run_debounce_loop(
             rx,
             project_path_clone,
@@ -63,6 +95,9 @@ impl ProjectWatcher {
             meta_path,
             embed_config,
             Arc::clone(&overflowed),
+            stop_flag_path,
+            status_path.clone(),
+            done_tx,
         ));
 
         let handler = move |result: notify::Result<Event>| {
@@ -90,7 +125,11 @@ impl ProjectWatcher {
         let mut watcher = recommended_watcher(handler)?;
         watcher.watch(&project_path, RecursiveMode::Recursive)?;
 
-        Ok(Self { _watcher: watcher })
+        Ok(Self {
+            _watcher: watcher,
+            done: done_rx,
+            status_path,
+        })
     }
 }
 
@@ -108,9 +147,14 @@ async fn run_debounce_loop(
     meta_path: PathBuf,
     embed_config: Option<Arc<EmbedConfig>>,
     overflowed: Arc<AtomicBool>,
+    stop_flag_path: PathBuf,
+    status_path: PathBuf,
+    done_tx: tokio::sync::watch::Sender<bool>,
 ) {
     let mut pending: HashSet<PathBuf> = HashSet::new();
     let mut deadline: Option<Instant> = None;
+    let mut stop_poll = tokio::time::interval(Duration::from_millis(500));
+    stop_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         let timeout = deadline
@@ -137,6 +181,8 @@ async fn run_debounce_loop(
                             &overflowed,
                         )
                         .await;
+                        remove_watch_status(&status_path);
+                        let _ = done_tx.send(true);
                         return;
                     }
                 }
@@ -156,6 +202,27 @@ async fn run_debounce_loop(
                 )
                 .await;
                 deadline = None;
+            }
+
+            // Cross-process stop request (issue #99).
+            _ = stop_poll.tick() => {
+                if stop_flag_path.exists() {
+                    let _ = std::fs::remove_file(&stop_flag_path);
+                    flush_pending(
+                        &mut pending,
+                        &root,
+                        &indexer,
+                        &index,
+                        &index_path,
+                        &meta_path,
+                        embed_config.as_ref().map(Arc::clone),
+                        &overflowed,
+                    )
+                    .await;
+                    remove_watch_status(&status_path);
+                    let _ = done_tx.send(true);
+                    return;
+                }
             }
         }
     }
@@ -490,6 +557,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         let index_path = dir.path().join("index.bin");
         let meta_path = dir.path().join("meta.json");
+        let (done_tx, _done_rx) = tokio::sync::watch::channel(false);
         tokio::spawn(run_debounce_loop(
             rx,
             root,
@@ -500,6 +568,9 @@ mod tests {
             meta_path,
             None,
             overflowed,
+            dir.path().join("watch.stop"),
+            dir.path().join("watch.json"),
+            done_tx,
         ))
     }
 
@@ -963,6 +1034,7 @@ mod tests {
         let root = dir.path().to_path_buf();
         let indexer2 = Arc::new(Indexer::new(registry::build_default_registry()));
         let (tx, rx) = mpsc::channel(16);
+        let (done_tx, _done_rx) = tokio::sync::watch::channel(false);
         let handle = tokio::spawn(run_debounce_loop(
             rx,
             root,
@@ -973,6 +1045,9 @@ mod tests {
             idx_dir.join("meta.json"),
             None,
             Arc::new(AtomicBool::new(false)),
+            idx_dir.join("watch.stop"),
+            idx_dir.join("watch.json"),
+            done_tx,
         ));
         std::fs::write(&file, b"fn new_fn() {}").unwrap();
         tx.send(file).await.unwrap();
@@ -998,5 +1073,55 @@ mod tests {
                 .any(|id| id.as_str().is_some_and(|s| s.contains("new_fn"))),
             "changed_symbols={symbols:?}"
         );
+    }
+    /// Issue #99: writing the stop flag shuts the debounce loop down and the
+    /// status file is removed, so another process can observe the stop.
+    #[tokio::test]
+    async fn test_stop_flag_shuts_down_loop_and_clears_status() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, b"fn keep() {}").unwrap();
+
+        let (index, indexer) = setup(&dir);
+        let (tx, rx) = mpsc::channel(16);
+        let (done_tx, mut done_rx) = tokio::sync::watch::channel(false);
+        let status_path = dir.path().join("watch.json");
+        std::fs::write(&status_path, b"{\"pid\": 1}").unwrap();
+        let stop_flag = dir.path().join("watch.stop");
+
+        let handle = tokio::spawn(run_debounce_loop(
+            rx,
+            dir.path().to_path_buf(),
+            indexer,
+            index.clone(),
+            TEST_DEBOUNCE,
+            dir.path().join("index.bin"),
+            dir.path().join("meta.json"),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            stop_flag.clone(),
+            status_path.clone(),
+            done_tx,
+        ));
+
+        std::fs::write(&stop_flag, b"stop").unwrap();
+        // Keep the channel open so the shutdown comes from the stop flag.
+        assert!(done_rx.changed().await.is_ok(), "done signal expected");
+        drop(tx);
+        handle.await.unwrap();
+        assert!(
+            !status_path.exists(),
+            "status file must be removed on stop-flag shutdown"
+        );
+        assert!(!stop_flag.exists(), "stop flag consumed");
+        // Pending edits were flushed before shutdown.
+        let names: Vec<_> = index
+            .read()
+            .await
+            .symbols
+            .values()
+            .map(|s| s.name.to_string())
+            .collect();
+        assert!(names.contains(&"keep".to_string()));
     }
 }
