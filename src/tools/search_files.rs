@@ -339,6 +339,9 @@ fn collect_files(
 }
 
 fn parse_language_filter(language: &str) -> anyhow::Result<&'static [&'static str]> {
+    if super::documents::is_document_language(Some(language)) {
+        return super::search_content::parse_language_filter(language);
+    }
     match language.to_lowercase().as_str() {
         "rust" => Ok(&["rs"]),
         "python" => Ok(&["py"]),

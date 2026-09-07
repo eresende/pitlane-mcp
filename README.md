@@ -35,6 +35,7 @@ On the benchmark corpora in this repo, that translates into large reductions in 
 
 - AST-based indexing for Rust, Python, JavaScript, TypeScript, Svelte, C, C++, Go, Java, C#, Ruby, Swift, Objective-C, PHP, Zig, Kotlin, Lua, Solidity, and Bash
 - BM25 symbol search plus optional semantic search
+- Markdown heading and JSON/YAML/TOML key discovery alongside source, with focused line reads
 - Small default MCP surface for agents
 - Composite navigation tools for discovery, reading, path tracing, and impact analysis
 - Incremental re-indexing and disk-persisted indexes
