@@ -755,11 +755,23 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
     let profile = load_project_meta(&canonical)
         .ok()
         .map(|meta| meta.repo_profile);
+    let seeds = resolve_impact_seeds(&params).await?;
+    impact_from_seeds(&params, &index, &canonical, &seeds, profile.as_ref(), true)
+}
+
+/// Shared weighted traversal for explicit targets and revision-local diff seeds.
+pub(crate) fn impact_from_seeds(
+    params: &AnalyzeImpactParams,
+    index: &crate::index::SymbolIndex,
+    canonical: &Path,
+    seeds: &[ImpactSeed],
+    profile: Option<&RepoProfile>,
+    record_session: bool,
+) -> anyhow::Result<Value> {
     let depth_limit = params.depth.unwrap_or(2).clamp(1, 3);
     let limit = params.limit.unwrap_or(8).clamp(1, 12);
     let query = params.query.as_deref().unwrap_or("");
     let scope_set = build_scope_set(params.scope.as_deref());
-    let seeds = resolve_impact_seeds(&params).await?;
     if seeds.is_empty() {
         return Err(anyhow::anyhow!(
             "analyze_impact could not resolve a seed symbol. Provide symbol_id, file_path, or a more specific query."
@@ -771,7 +783,7 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
     let mut frontier: Vec<(String, usize, i32, i32, String)> = Vec::new();
     let mut best_paths: HashMap<String, (i32, usize, i32)> = HashMap::new();
 
-    for seed in &seeds {
+    for seed in seeds {
         frontier.push((seed.id.clone(), 0, 120, 0, "seed".to_string()));
         best_paths.insert(seed.id.clone(), (120, 0, 0));
         impacted_files
@@ -804,10 +816,9 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
             continue;
         }
 
-        for neighbor in collect_impact_neighbors(&index, &symbol_id, &canonical, scope_set.as_ref())
-        {
+        for neighbor in collect_impact_neighbors(index, &symbol_id, canonical, scope_set.as_ref()) {
             let distance = depth + 1;
-            let score = impact_edge_score(distance, &neighbor, &canonical, profile.as_ref(), query);
+            let score = impact_edge_score(distance, &neighbor, canonical, profile, query);
             let next_path_score = path_score + score - (distance as i32 * 8);
             let next_path_priority = path_priority + neighbor.priority;
             let candidate_state = (next_path_score, distance, next_path_priority);
@@ -870,10 +881,12 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
             .then(a.distance.cmp(&b.distance))
             .then(a.name.cmp(&b.name))
     });
+    let total_impact_symbols = symbol_values.len();
     symbol_values.truncate(limit);
 
     let mut file_values: Vec<ImpactFile> = impacted_files.into_values().collect();
     file_values.sort_by(|a, b| b.score.cmp(&a.score).then(a.file.cmp(&b.file)));
+    let total_impact_files = file_values.len();
     file_values.truncate(limit);
 
     let steering = if symbol_values.is_empty() {
@@ -913,6 +926,11 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
             "file": seed.file,
         })).collect::<Vec<_>>(),
         "depth_limit": depth_limit,
+        "limit": limit,
+        "total_impact_symbols": total_impact_symbols,
+        "total_impact_files": total_impact_files,
+        "omitted_impact_symbols": total_impact_symbols.saturating_sub(symbol_values.len()),
+        "omitted_impact_files": total_impact_files.saturating_sub(file_values.len()),
         "impact_symbols": symbol_values.iter().map(|s| s.to_json()).collect::<Vec<_>>(),
         "impact_files": file_values.iter().map(|f| f.to_json()).collect::<Vec<_>>(),
         "edge_provenance_summary": build_edge_provenance_summary(&symbol_values, &file_values),
@@ -922,13 +940,17 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
             "Weighted graph traversal identified the most likely blast-radius targets."
         },
     });
+    if !record_session {
+        attach_steering(&mut response, steering);
+        return Ok(response);
+    }
     let impact_followup = response["impact_symbols"]
         .as_array()
         .and_then(|items| items.first())
-        .map(|top| expansion_followup_state(&canonical, top));
-    session::record_query(&canonical, query);
+        .map(|top| expansion_followup_state(canonical, top));
+    session::record_query(canonical, query);
     session::record_files(
-        &canonical,
+        canonical,
         response["impact_files"]
             .as_array()
             .into_iter()
@@ -936,7 +958,7 @@ pub async fn analyze_impact(params: AnalyzeImpactParams) -> anyhow::Result<Value
             .filter_map(|item| item["file"].as_str().map(ToOwned::to_owned)),
     );
     session::record_symbols(
-        &canonical,
+        canonical,
         response["impact_symbols"]
             .as_array()
             .into_iter()
@@ -2278,11 +2300,11 @@ fn impact_symbol_kind_bonus(kind: &str) -> i32 {
 }
 
 #[derive(Clone)]
-struct ImpactSeed {
-    id: String,
-    name: String,
-    kind: String,
-    file: String,
+pub(crate) struct ImpactSeed {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) kind: String,
+    pub(crate) file: String,
 }
 
 #[derive(Clone, Copy)]
@@ -2576,7 +2598,7 @@ fn matches_scope(path: &Path, project_path: &Path, scope_set: Option<&GlobSet>) 
 }
 
 fn collect_impact_neighbors(
-    index: &Arc<crate::index::SymbolIndex>,
+    index: &crate::index::SymbolIndex,
     symbol_id: &str,
     project_path: &Path,
     scope_set: Option<&GlobSet>,

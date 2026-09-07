@@ -143,7 +143,7 @@ Most users should stay on the default tool tier:
 3. Use `locate_code` when you need discovery without full source.
 4. Use `read_code_unit` once you know the target.
 5. Use `trace_path` for explicit source-to-sink or config-to-effect questions.
-6. Use `analyze_impact` before edits or refactors.
+6. Use `analyze_impact` before edits or refactors, and `analyze_changes` to review a Git diff.
 7. Use `search_content` only when you know a text fragment but not the owning symbol.
 
 Default public tier:
@@ -154,6 +154,7 @@ Default public tier:
 - `read_code_unit`
 - `trace_path`
 - `analyze_impact`
+- `analyze_changes`
 - `get_index_stats`
 - `search_content`
 
@@ -179,6 +180,7 @@ Examples:
 ```bash
 pitlane index /your/project
 pitlane investigate /your/project "How does ignore handling work?"
+pitlane analyze-changes /your/project --base-ref main --include-working-tree
 pitlane search /your/project authenticate --kind method
 pitlane symbol /your/project src/auth.rs::Auth::login[method]
 pitlane usages /your/project src/auth.rs::Auth::login[method]

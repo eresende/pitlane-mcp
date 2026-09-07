@@ -130,6 +130,14 @@ impl CandidateIndex {
 }
 
 pub fn build_navigation_graph(index: &SymbolIndex) -> NavigationGraph {
+    build_navigation_graph_with_source(index, |sym| read_symbol_source(sym, false))
+}
+
+/// Build the same navigation graph from a revision snapshot without reading the worktree.
+pub(crate) fn build_navigation_graph_with_source(
+    index: &SymbolIndex,
+    source: impl Fn(&Symbol) -> anyhow::Result<String>,
+) -> NavigationGraph {
     let mut graph = NavigationGraph {
         built: true,
         ..Default::default()
@@ -137,7 +145,7 @@ pub fn build_navigation_graph(index: &SymbolIndex) -> NavigationGraph {
 
     let candidates = CandidateIndex::build(index);
     for sym in index.symbols.values() {
-        let source_text = match read_symbol_source(sym, false) {
+        let source_text = match source(sym) {
             Ok(source) => source,
             Err(_) => continue,
         };
