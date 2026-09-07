@@ -319,10 +319,13 @@ async fn do_index_project(
     // apply the same policy (issue #74).
     meta.effective_excludes = exclude.clone();
     // Fresh indexing is a content change (issue #82): carry over the previous
-    // revision and let record_change assign the next one. The baseline is
-    // recorded as a change whose `added` list is every indexed symbol (capped
-    // per RevisionChange).
-    meta.revision = load_meta(&meta_path).map(|prev| prev.revision).unwrap_or(0);
+    // revision AND change log, then record_change assigns the next one. The
+    // baseline is recorded as a change whose `added` list is every indexed
+    // symbol (capped per RevisionChange).
+    if let Ok(prev) = load_meta(&meta_path) {
+        meta.revision = prev.revision;
+        meta.change_log = prev.change_log;
+    }
     let all_ids: Vec<String> = index.symbols.keys().cloned().collect();
     meta.record_change(all_ids, Vec::new(), Vec::new());
     index.revision = meta.revision;

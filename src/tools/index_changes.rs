@@ -201,4 +201,38 @@ mod tests {
         assert_eq!(meta.revision, 0);
         assert!(meta.change_log.is_empty());
     }
+    #[tokio::test]
+    async fn test_reindex_preserves_change_log_history() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), b"pub fn one() {}\n").unwrap();
+        let project = index_dir(&dir).await; // baseline revision 1
+
+        // Second (forced) index: revision 2, and revision 1 stays queryable.
+        index_project(IndexProjectParams {
+            path: project.clone(),
+            exclude: None,
+            force: Some(true),
+            max_files: None,
+            progress_token: None,
+            peer: None,
+            embed_config: None,
+        })
+        .await
+        .unwrap();
+
+        let result = get_index_changes(GetIndexChangesParams {
+            project,
+            since_revision: Some(0),
+            limit: None,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result["current_revision"], json!(2));
+        assert_eq!(result["complete"], json!(true));
+        let revisions = result["revisions"].as_array().unwrap();
+        assert_eq!(revisions.len(), 2, "revisions={revisions:?}");
+        assert_eq!(revisions[0]["revision"], json!(2));
+        assert_eq!(revisions[1]["revision"], json!(1));
+    }
 }
