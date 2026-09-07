@@ -12,6 +12,7 @@ Default public tier:
 - `analyze_changes`
 - `get_index_changes`
 - `get_index_stats`
+- `doctor`
 - `search_content`
 
 Advanced primitive tools are hidden from `tools/list` unless the server is started with `PITLANE_MCP_TOOL_TIER=all`.

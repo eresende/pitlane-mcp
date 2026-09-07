@@ -374,6 +374,14 @@ pub struct GetIndexStatsRequest {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DoctorRequest {
+    /// Project path previously indexed
+    pub project: String,
+    /// Apply safe repairs: force re-index when stale, re-embed when incomplete (default: false)
+    pub repair: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetIndexChangesRequest {
     /// Project path previously indexed
     pub project: String,
@@ -410,6 +418,7 @@ const DEFAULT_PUBLIC_TOOL_NAMES: &[&str] = &[
     "analyze_changes",
     "get_index_changes",
     "get_index_stats",
+    "doctor",
     "search_content",
 ];
 
@@ -1129,6 +1138,27 @@ impl PitlaneMcp {
             limit: req.limit,
         };
         match tools::index_changes::get_index_changes(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Diagnose index health: freshness, exclusions, skipped files, embedding completeness, and cache compatibility. Use when results look stale or incomplete.",
+        meta = tool_meta("doctor diagnostics health repair stale incomplete"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn doctor(&self, Parameters(req): Parameters<DoctorRequest>) -> String {
+        let params = tools::doctor::DoctorParams {
+            project: req.project,
+            repair: req.repair,
+        };
+        match tools::doctor::doctor(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }

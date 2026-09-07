@@ -166,6 +166,14 @@ enum Command {
         /// Path to the indexed project
         project: String,
     },
+    /// Diagnose index health (freshness, exclusions, embeddings, skipped files)
+    Doctor {
+        /// Path to the indexed project
+        project: String,
+        /// Apply safe repairs: force re-index when stale, re-embed when incomplete
+        #[arg(long)]
+        repair: bool,
+    },
     /// List symbols changed since an index revision
     Changes {
         /// Path to the indexed project
@@ -520,6 +528,14 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
         Command::Stats { project } => {
             let params = tools::get_index_stats::GetIndexStatsParams { project };
             tools::get_index_stats::get_index_stats(params).await?
+        }
+
+        Command::Doctor { project, repair } => {
+            let params = tools::doctor::DoctorParams {
+                project,
+                repair: Some(repair),
+            };
+            tools::doctor::doctor(params).await?
         }
 
         Command::Changes {

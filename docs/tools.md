@@ -131,6 +131,16 @@ List symbols the index recorded as changed since a revision, newest first.
 
 The index revision is a monotonically increasing counter persisted with the index; every navigation response includes the current value as `index_revision`. Revisions are assigned by every persisted content change: fresh indexing, watcher batch flushes, and full resyncs. Poll `get_index_changes` with the revision you last observed to learn exactly which symbols were added, removed, or touched without re-reading files. A revision becomes visible once the index flush lands — pending embedding work never delays it. The change log is bounded (most recent 50 revisions, per-list caps); responses carry `complete` so you know when the log was trimmed and a re-index is the safe re-baseline.
 
+### `doctor`
+
+Diagnose index health: freshness, effective exclusions, skipped oversized files, embedding completeness and store compatibility, index revision, and change-log state.
+
+```json
+{ "project": "/your/project", "repair": false }
+```
+
+Every check carries a `status` (`ok`/`warn`/`error`/`info`), a `detail`, and — when something is wrong — a targeted `repair` hint. Set `"repair": true` to apply the safe repairs automatically: force re-index when the index is stale, and kick off background embedding when vectors are incomplete. Repairs only touch rebuildable artifacts (index, embeddings), never user files. Parse failures are not persisted historically, so `doctor` re-derives structural diagnostics at call time.
+
 ### `search_content`
 
 Search indexed source text for a known snippet, log string, import path, or regex fragment.
