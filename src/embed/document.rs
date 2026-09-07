@@ -49,7 +49,7 @@ fn env_usize(name: &str, default: usize) -> usize {
         .unwrap_or(default)
 }
 
-fn truncate_chars(text: &str, max: usize) -> String {
+fn truncate_document(text: &str, max: usize) -> String {
     if text.len() <= max {
         return text.to_string();
     }
@@ -70,7 +70,7 @@ fn compact_code(source: &str, max: usize) -> String {
     let tail = max - head;
     format!(
         "{}\n/* ... middle omitted ... */\n{}",
-        truncate_chars(source, head),
+        truncate_document(source, head),
         source
             .char_indices()
             .rev()
@@ -153,7 +153,7 @@ pub fn build_symbol_document(sym: &Symbol, project_root: Option<&Path>) -> Strin
         let mut parts = vec![sym.name.clone(), sym.qualified.clone()];
         parts.extend(sym.signature.iter().cloned());
         parts.extend(sym.doc.iter().cloned());
-        return truncate_chars(
+        return truncate_document(
             &parts.join("\n"),
             env_usize("PITLANE_EMBED_MAX_CHARS", DEFAULT_MAX_CHARS),
         );
@@ -197,7 +197,7 @@ pub fn build_symbol_document(sym: &Symbol, project_root: Option<&Path>) -> Strin
             env_usize("PITLANE_EMBED_BODY_CHARS", DEFAULT_BODY_CHARS),
         ));
     }
-    truncate_chars(
+    truncate_document(
         &text,
         env_usize("PITLANE_EMBED_MAX_CHARS", DEFAULT_MAX_CHARS),
     )
