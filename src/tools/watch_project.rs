@@ -63,8 +63,9 @@ pub fn remove_watch_status(status_path: &Path) {
     let _ = std::fs::remove_file(status_path);
 }
 
-/// Is a PID alive? `/proc` on Linux; assume alive elsewhere (conservative:
-/// a stale file then requires an explicit `--stop` to clear).
+/// Is a PID alive? `/proc` on Linux, `kill -0` on other Unix (a nonexistent
+/// PID fails with an error we can observe). Elsewhere: assume alive
+/// (conservative: a stale file then requires an explicit `--stop` to clear).
 fn pid_alive(pid: i32) -> bool {
     if pid <= 0 {
         return false;
@@ -73,7 +74,16 @@ fn pid_alive(pid: i32) -> bool {
     {
         Path::new(&format!("/proc/{pid}")).exists()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
     {
         let _ = pid;
         true
