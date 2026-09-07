@@ -340,7 +340,7 @@ pub(crate) fn discover(params: &LocateCodeParams, limit: usize) -> anyhow::Resul
                 as_result(&unit, &relative, source),
                 source[unit.start..unit.end].to_string(),
             ));
-            found.sort_by(|a, b| b.0.cmp(&a.0));
+            found.sort_by_key(|entry| std::cmp::Reverse(entry.0));
             found.truncate(limit);
         }
     }
