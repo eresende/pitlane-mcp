@@ -124,16 +124,25 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         limit: params.limit,
     };
 
-    let mut results = match route {
-        LocateRoute::Project => locate_project(&effective_params, limit).await?,
-        LocateRoute::Files => locate_files(&effective_params, limit).await?,
-        LocateRoute::Content => locate_content(&effective_params, limit).await?,
-        LocateRoute::Symbols { ref mode } => {
-            locate_symbols(&effective_params, limit, mode.as_str()).await?
+    let document_only = super::documents::document_only(&params);
+    let mut results = if document_only {
+        route_used = "documents".to_string();
+        super::documents::discover(&params, limit)?
+    } else {
+        match route {
+            LocateRoute::Project => locate_project(&effective_params, limit).await?,
+            LocateRoute::Files => locate_files(&effective_params, limit).await?,
+            LocateRoute::Content => locate_content(&effective_params, limit).await?,
+            LocateRoute::Symbols { ref mode } => {
+                locate_symbols(&effective_params, limit, mode.as_str()).await?
+            }
         }
     };
 
-    if results.is_empty() {
+    if results.is_empty()
+        && !document_only
+        && !super::documents::is_document_language(params.language.as_deref())
+    {
         if let Some(fallback) = fallback_locate_route(&route, effective_query) {
             let fallback_route = fallback.as_str().to_string();
             let fallback_results = match fallback {
@@ -151,13 +160,36 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         }
     }
 
+    // Reserve a result for matching documentation/configuration on ambiguous
+    // symbol queries. Explicit symbol/file/content requests retain their route.
+    if !document_only
+        && params.intent.is_none()
+        && params.kind.is_none()
+        && matches!(route, LocateRoute::Symbols { .. })
+    {
+        let documents = super::documents::discover(&params, limit)?;
+        if !documents.is_empty() && (limit > 1 || results.is_empty()) {
+            results.truncate(limit.saturating_sub(1));
+            for document in documents {
+                if results.len() >= limit {
+                    break;
+                }
+                // A content fallback may already have the same location.
+                results.retain(|r| {
+                    r["file"] != document["file"] || r["line_start"] != document["line_start"]
+                });
+                results.push(document);
+            }
+        }
+    }
+
     let _novelty_bias = promote_nearby_unseen_locate_candidate(&mut results, &canonical);
 
     let mut response = json!({
         "query": query,
         "count": results.len(),
     });
-    if normalized.is_some() {
+    if normalized.is_some() && !document_only {
         response["normalized_query"] = json!(effective_query);
     }
 
@@ -184,18 +216,17 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
             let kind = r["symbol_kind"]
                 .as_str()
                 .unwrap_or(r["kind"].as_str().unwrap_or("?"));
-            let id = r["id"].as_str().unwrap_or("");
             summary.push_str(&format!(
-                "{}. {} `{}` in {} — `{}`\n   → read_code_unit(symbol_id=\"{}\")\n",
+                "{}. {} `{}` in {} — `{}`\n   → read_code_unit({})\n",
                 i + 1,
                 kind,
                 name,
                 short_file,
-                if sig.len() > 100 { &sig[..100] } else { sig },
-                id
+                truncate_chars(sig, 100),
+                read_target(r)
             ));
         }
-        summary.push_str("\nUse read_code_unit with the symbol_id above to inspect any result. Do not use generic file read tools.");
+        summary.push_str("\nUse read_code_unit with the read target above to inspect any result.");
         response["summary"] = json!(summary);
     }
 
@@ -208,6 +239,12 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
                 "name": r["name"],
                 "file": r["file"],
                 "signature": r["signature"],
+                "kind": r["kind"],
+                "qualified": r["qualified"],
+                "line_start": r["line_start"],
+                "line_end": r["line_end"],
+                "read_target": read_target(r),
+                "related_source": r["related_source"],
             })
         })
         .collect();
@@ -232,6 +269,16 @@ pub async fn locate_code(params: LocateCodeParams) -> anyhow::Result<Value> {
         .map(|index| index.revision)
         .unwrap_or(0));
     Ok(response)
+}
+
+fn read_target(result: &Value) -> Value {
+    if let Some(id) = result["id"].as_str() {
+        json!({"symbol_id": id})
+    } else if result["line_start"].is_number() && result["line_end"].is_number() {
+        json!({"file_path": result["file"], "line_start": result["line_start"], "line_end": result["line_end"]})
+    } else {
+        json!({"file_path": result["file"]})
+    }
 }
 
 /// Character-safe truncation to at most `max_chars` characters.
@@ -465,6 +512,35 @@ pub async fn read_code_unit(params: ReadCodeUnitParams) -> anyhow::Result<Value>
         return Err(anyhow::anyhow!(
             "line_start and line_end must either both be set or both be omitted"
         ));
+    }
+
+    if super::documents::is_document_extension(
+        file_path_obj
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or(""),
+    ) {
+        let resolved = crate::path_policy::resolve_project_file(&canonical, &file_path)?;
+        let metadata = crate::path_policy::regular_file_metadata(&resolved)?
+            .ok_or_else(|| anyhow::anyhow!("Not a regular file: {file_path}"))?;
+        if metadata.len() > 1024 * 1024 {
+            anyhow::bail!("Document exceeds the 1 MiB discovery limit; use an explicit line read");
+        }
+        let bytes = crate::path_policy::read_regular_file(&resolved)?;
+        let source = std::str::from_utf8(&bytes)?;
+        let mut response =
+            super::documents::outline(source, &file_path, READ_CODE_UNIT_FILE_OUTLINE_LIMIT)?;
+        let observation =
+            session::observe_content(&canonical, "document_outline", &file_path, source);
+        attach_read_state(
+            &mut response,
+            "document_outline",
+            Some(observation.content_seen),
+            Some(observation.target_seen),
+            Some(observation.changed_since_last_read),
+        );
+        session::record_file(&canonical, Path::new(&file_path));
+        return Ok(response);
     }
 
     let mut response = get_file_outline(GetFileOutlineParams {
@@ -1873,6 +1949,8 @@ async fn locate_content(params: &LocateCodeParams, limit: usize) -> anyhow::Resu
                 "line_end": m["line"],
                 "column": m["column"],
                 "snippet": m["line_text"],
+                "name": m["line_text"],
+                "signature": m["line_text"],
                 "source_tool": "search_content",
             })
         })

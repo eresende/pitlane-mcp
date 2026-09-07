@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 
 use serde::{Deserialize, Serialize};
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 use crate::index::SymbolIndex;
 use crate::indexer::language::{Language, Symbol, SymbolId, SymbolKind};
@@ -294,16 +294,38 @@ fn scan_direct_references(
     candidates: &CandidateIndex,
 ) -> Vec<DirectReference> {
     let mut refs = Vec::new();
-    let cap_generic_confidence = if sym.language == Language::Rust {
-        match scan_rust_direct_references(index, sym, source_text, candidates) {
-            Some(mut rust_refs) => {
+    let cap_generic_confidence = match sym.language {
+        Language::Rust => {
+            if let Some(mut rust_refs) =
+                scan_rust_direct_references(index, sym, source_text, candidates)
+            {
                 refs.append(&mut rust_refs);
                 Some(0.84)
+            } else {
+                None
             }
-            None => None,
         }
-    } else {
-        None
+        Language::Python => {
+            if let Some(py_matches) = collect_python_call_matches(source_text) {
+                for matched in py_matches {
+                    resolve_ast_match(index, sym, &matched, candidates)
+                        .into_iter()
+                        .for_each(|r| refs.push(r));
+                }
+            }
+            Some(0.84)
+        }
+        Language::TypeScript => {
+            if let Some(ts_matches) = collect_typescript_call_matches(source_text) {
+                for matched in ts_matches {
+                    resolve_ast_match(index, sym, &matched, candidates)
+                        .into_iter()
+                        .for_each(|r| refs.push(r));
+                }
+            }
+            Some(0.84)
+        }
+        _ => None,
     };
 
     refs.extend(scan_generic_direct_references(
@@ -314,6 +336,49 @@ fn scan_direct_references(
         candidates,
     ));
     sort_direct_references(&mut refs);
+    refs
+}
+
+/// Resolve a single AST call match against the candidate index, producing
+/// `DirectReference` entries for each same-language symbol that shares the name.
+fn resolve_ast_match(
+    index: &SymbolIndex,
+    sym: &Symbol,
+    matched: &CallMatch,
+    candidates: &CandidateIndex,
+) -> Vec<DirectReference> {
+    let resolved = candidates.lookup(index, sym.language.clone(), &matched.name, &sym.id);
+    if resolved.is_empty() {
+        return vec![];
+    }
+
+    refs_from_resolved(&resolved, matched.evidence.as_str(), matched.confidence)
+}
+
+fn refs_from_resolved(
+    resolved: &[&Symbol],
+    evidence: &str,
+    base_confidence: f32,
+) -> Vec<DirectReference> {
+    let ambiguous = resolved.len() > 1;
+    let mut refs = Vec::new();
+    for candidate in resolved {
+        let confidence = if ambiguous {
+            base_confidence.min(AMBIGUOUS_CONFIDENCE_CAP)
+        } else {
+            base_confidence
+        };
+        // Preserve the evidence line from the AST call site.
+        refs.push(DirectReference {
+            id: candidate.id.clone(),
+            name: candidate.name.clone(),
+            kind: candidate.kind.to_string(),
+            file: candidate.file.to_string_lossy().replace('\\', "/"),
+            line_start: candidate.line_start,
+            evidence: evidence.chars().take(240).collect(),
+            confidence,
+        });
+    }
     refs
 }
 
@@ -734,12 +799,16 @@ fn scan_rust_direct_references(
     Some(refs)
 }
 
+// Shared call match type used by all language-specific AST extractors.
 #[derive(Debug, Clone)]
-struct RustCallMatch {
-    name: String,
-    evidence: String,
-    confidence: f32,
+pub(crate) struct CallMatch {
+    pub name: String,
+    pub evidence: String,
+    pub confidence: f32,
 }
+
+// Alias for backward compatibility with existing Rust code.
+type RustCallMatch = CallMatch;
 
 fn collect_rust_call_matches(source_text: &str) -> Option<Vec<RustCallMatch>> {
     let mut parser = Parser::new();
@@ -843,6 +912,222 @@ fn last_rust_identifier(source_text: &str, node: Node<'_>) -> Option<String> {
                 .into_iter()
                 .rev()
                 .find_map(|child| last_rust_identifier(source_text, child))
+        }
+    }
+}
+
+// ── Python AST call extraction (Issue #85)──────────────────────────────
+/// Collects all callable name matches from a Python source via tree-sitter.
+/// Returns `None` if parsing fails; empty vec means no calls found.
+fn collect_python_call_matches(source_text: &str) -> Option<Vec<CallMatch>> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(source_text, None)?;
+
+    let mut matches = Vec::new();
+    let mut stack = vec![tree.root_node()];
+
+    while let Some(node) = stack.pop() {
+        if node.kind() == "call" {
+            // Python `call` nodes have a `function` field pointing to the
+            // callable (identifier, attribute, subscript, etc.) and an
+            // `arguments` field containing `argument_list`.
+            let target = node.child_by_field_name("function");
+            if let Some(name) = target.and_then(|t| python_callable_name(source_text, t)) {
+                matches.push(CallMatch {
+                    name,
+                    evidence: node_evidence(source_text, node),
+                    confidence: 0.98,
+                });
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    Some(matches)
+}
+
+/// Extract the callable name from a Python AST node that represents the target of a call.
+fn python_callable_name(source_text: &str, node: Node<'_>) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(node_text(source_text, node)),
+        // Method calls like `obj.method()` produce an attribute node where
+        // the `.name` child holds the method name.
+        "attribute" => node
+            .child_by_field_name("attribute")
+            .and_then(|attr| python_callable_name(source_text, attr))
+            .or_else(|| last_python_identifier(source_text, node)),
+        // Subscript calls like `arr[0]()` — extract from the subscripted object.
+        "subscript" => node
+            .child_by_field_name("value")
+            .and_then(|val| python_callable_name(source_text, val))
+            .or_else(|| last_python_identifier(source_text, node)),
+        // Lambda calls are rare but possible: `(lambda x: f())()`.
+        "lambda" => {
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                if let Some(name) = python_callable_name(source_text, child) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+        // Parenthesized expressions: `(f)` or `(obj.method)`.
+        "parenthesized_expression" => node
+            .named_child(0)
+            .and_then(|c| python_callable_name(source_text, c)),
+        _ => {
+            // For unknown wrapper nodes (e.g., `lambda`, comprehension), recurse
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(name) = python_callable_name(source_text, child) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Extract the last identifier from a Python AST subtree.
+/// Fallback for complex nodes where we cannot determine the exact callable field.
+fn last_python_identifier(source_text: &str, node: Node<'_>) -> Option<String> {
+    match node.kind() {
+        "identifier" => Some(node_text(source_text, node)),
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if matches!(child.kind(), "identifier") {
+                    return Some(node_text(source_text, child));
+                }
+            }
+            None
+        }
+    }
+}
+
+// ── TypeScript AST call extraction (Issue #85)──────────────────────────
+/// Collects all callable name matches from a TypeScript source via tree-sitter.
+fn collect_typescript_call_matches(source_text: &str) -> Option<Vec<CallMatch>> {
+    let mut parser = Parser::new();
+    // Try TYPESCRIPT first (handles both .ts and .tsx files).
+    if parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .is_ok()
+    {
+        if let Some(tree) = parser.parse(source_text, None) {
+            return collect_ts_call_matches_impl(source_text, &tree);
+        }
+    }
+    // Fallback to TSX grammar (for JSX-heavy files).
+    if parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
+        .is_ok()
+    {
+        let tree = parser.parse(source_text, None)?;
+        return collect_ts_call_matches_impl(source_text, &tree);
+    }
+    Some(Vec::new())
+}
+
+fn collect_ts_call_matches_impl(source_text: &str, tree: &Tree) -> Option<Vec<CallMatch>> {
+    let mut matches = Vec::new();
+    let mut stack = vec![tree.root_node()];
+
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "call_expression" => {
+                // TypeScript `call_expression` has fields: function, arguments.
+                // Direct calls: foo()
+                // Method calls via member access: obj.method(), Obj.staticMethod()
+                let target = node.child_by_field_name("function");
+                if let Some(name) = target.and_then(|t| ts_callable_name(source_text, t)) {
+                    matches.push(CallMatch {
+                        name,
+                        evidence: node_evidence(source_text, node),
+                        confidence: 0.98,
+                    });
+                }
+            }
+            "new_expression" => {
+                // Constructor calls: new Foo(1)
+                let target = node
+                    .child_by_field_name("class")
+                    .or_else(|| node.named_child(0));
+                if let Some(name) = target.and_then(|t| ts_callable_name(source_text, t)) {
+                    matches.push(CallMatch {
+                        name,
+                        evidence: node_evidence(source_text, node),
+                        confidence: 0.95,
+                    });
+                }
+            }
+            _ => {}
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            stack.push(child);
+        }
+    }
+
+    Some(matches)
+}
+
+/// Extract the callable name from a TypeScript AST node that represents the target of a call.
+fn ts_callable_name(source_text: &str, node: Node<'_>) -> Option<String> {
+    match node.kind() {
+        "identifier" | "qualified_name" => Some(node_text(source_text, node)),
+        // Method calls via member access: obj.method()
+        "member_access_expression" => node
+            .child_by_field_name("property")
+            .and_then(|prop| ts_callable_name(source_text, prop))
+            .or_else(|| last_ts_identifier(source_text, node)),
+        // Computed property calls via brackets: obj['method']()
+        "computed_member_access_expression" => {
+            let prop = node.child_by_field_name("property")?;
+            if matches!(prop.kind(), "identifier" | "string_literal") {
+                // For computed access, extract the identifier inside
+                last_ts_identifier(source_text, prop)
+            } else {
+                None
+            }
+        }
+        // Parenthesized: (foo) or (obj.method)
+        "parenthesized_expression" => node
+            .named_child(0)
+            .and_then(|c| ts_callable_name(source_text, c)),
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if let Some(name) = ts_callable_name(source_text, child) {
+                    return Some(name);
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Extract the last identifier from a TypeScript AST subtree.
+/// Fallback for complex nodes where we cannot determine the exact callable field.
+fn last_ts_identifier(source_text: &str, node: Node<'_>) -> Option<String> {
+    match node.kind() {
+        "identifier" | "qualified_name" => Some(node_text(source_text, node)),
+        _ => {
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if matches!(child.kind(), "identifier") {
+                    return Some(node_text(source_text, child));
+                }
+            }
+            None
         }
     }
 }
@@ -1200,5 +1485,265 @@ mod tests {
         // scan_generic_direct_references); this helper only sees cleaned
         // text, and the stripped case is covered by
         // test_comment_mentioning_call_produces_no_calls_edge.
+    }
+
+    // ── Issue #85: Python AST call extraction tests ───────────────
+
+    #[test]
+    fn test_python_ast_direct_call_is_extracted() {
+        let matches = collect_python_call_matches(
+            r#"def helper():
+    pass
+def caller():
+    helper(1, 2)
+"#,
+        );
+        assert!(matches.is_some(), "parsing should succeed");
+        let matches = matches.unwrap();
+        // Should find one call: helper()
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "helper");
+    }
+
+    #[test]
+    fn test_python_ast_method_call_is_extracted() {
+        let matches = collect_python_call_matches(
+            r#"class Greeter:
+    def greet(self):
+        pass
+def caller():
+    g.greet('hello')
+"#,
+        );
+        assert!(matches.is_some());
+        let matches = matches.unwrap();
+        // Should find one call: greet()
+        assert_eq!(matches.len(), 1);
+        assert_eq!(
+            matches[0].name, "greet",
+            "method name should be extracted from attribute access"
+        );
+    }
+
+    #[test]
+    fn test_python_ast_nested_calls_are_extracted() {
+        let matches = collect_python_call_matches(
+            r#"def outer():
+def inner():
+    pass
+def caller():
+    result = outer(inner()) + foo(bar(1))
+"#,
+        );
+        assert!(matches.is_some());
+        let matches = matches.unwrap();
+        // Should find: inner(), outer(), bar(), foo()
+        assert_eq!(
+            matches.len(),
+            4,
+            "got {:?}",
+            matches.iter().map(|m| m.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_python_graph_direct_call_produces_calls_edge() {
+        let index = build_index_files(&[
+            (
+                r#"helper.py"#,
+                r#"def helper():
+    pass
+"#,
+            ),
+            (
+                r#"caller.py"#,
+                r#"def caller():
+    result = helper(1, 2)
+"#,
+            ),
+        ]);
+
+        let edges = outgoing_ids(&index, "caller");
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        assert_eq!(edges[0].0, "helper");
+        assert_eq!(edges[0].1, EdgeRelation::Calls);
+    }
+
+    #[test]
+    fn test_python_graph_method_call_produces_calls_edge() {
+        let index = build_index_files(&[
+            (
+                r#"class_def.py"#,
+                r#"class Greeter:
+    def greet(self):
+        pass
+"#,
+            ),
+            (
+                r#"caller.py"#,
+                r#"def caller():
+    g.greet('hello')
+"#,
+            ),
+        ]);
+
+        let edges = outgoing_ids(&index, "caller");
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        assert_eq!(edges[0].0, "greet");
+        assert_eq!(edges[0].1, EdgeRelation::Calls);
+    }
+
+    #[test]
+    fn test_python_ambiguous_name_stays_reference() {
+        let index = build_index_files(&[
+            (
+                r#"a.py"#,
+                r#"def process():
+    pass
+def caller():
+    process(x)
+"#,
+            ),
+            (
+                r#"b.py"#,
+                r#"def process():
+    return True
+"#,
+            ),
+        ]);
+
+        let edges = outgoing_ids(&index, "caller");
+        assert_eq!(edges.len(), 2, "got {edges:?}");
+        for (_, relation, confidence) in &edges {
+            assert_eq!(
+                *relation,
+                EdgeRelation::References,
+                "ambiguous name should not become Calls edge"
+            );
+            assert!(
+                *confidence <= AMBIGUOUS_CONFIDENCE_CAP,
+                "confidence capped at {}",
+                *confidence
+            );
+        }
+    }
+
+    // ── Issue #85: TypeScript AST call extraction tests ───────────
+
+    #[test]
+    fn test_typescript_ast_direct_call_is_extracted() {
+        let matches = collect_typescript_call_matches(
+            r#"function helper(): void {}
+caller();
+"#,
+        );
+        assert!(matches.is_some(), "parsing should succeed");
+        let matches = matches.unwrap();
+        // Should find one call: caller()
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].name, "caller");
+    }
+
+    #[test]
+    fn test_typescript_ast_method_call_is_extracted() {
+        let matches = collect_typescript_call_matches(
+            r#"class Greeter {
+    greet(): void {}
+}
+caller();
+g.greet('hello');
+"#,
+        );
+        assert!(matches.is_some());
+        let matches = matches.unwrap();
+        // Should find: caller() and g.greet()
+        assert_eq!(
+            matches.len(),
+            2,
+            "got {:?}",
+            matches.iter().map(|m| m.name.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_typescript_graph_direct_call_produces_calls_edge() {
+        let index = build_index_files(&[
+            (
+                r#"helper.ts"#,
+                r#"function helper(): void {}
+"#,
+            ),
+            (
+                r#"caller.ts"#,
+                r#"function caller(): void {
+    result = helper(1, 2);
+}
+"#,
+            ),
+        ]);
+
+        let edges = outgoing_ids(&index, "caller");
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        assert_eq!(edges[0].0, "helper");
+        assert_eq!(edges[0].1, EdgeRelation::Calls);
+    }
+
+    #[test]
+    fn test_typescript_graph_method_call_produces_calls_edge() {
+        let index = build_index_files(&[
+            (
+                r#"class_def.ts"#,
+                r#"class Greeter {
+    greet(): void {}
+}
+"#,
+            ),
+            (
+                r#"caller.ts"#,
+                r#"function caller(): void {
+    g.greet('hello');
+}
+"#,
+            ),
+        ]);
+
+        let edges = outgoing_ids(&index, "caller");
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        assert_eq!(edges[0].0, "greet");
+        assert_eq!(edges[0].1, EdgeRelation::Calls);
+    }
+
+    #[test]
+    fn test_typescript_ambiguous_name_stays_reference() {
+        let index = build_index_files(&[
+            (
+                r#"a.ts"#,
+                r#"function process(): void {}
+function caller(): void {
+    process(x);
+}
+"#,
+            ),
+            (
+                r#"b.ts"#,
+                r#"                function process(): number { return 1; }
+"#,
+            ),
+        ]);
+
+        let edges = outgoing_ids(&index, "caller");
+        assert_eq!(edges.len(), 2, "got {edges:?}");
+        for (_, relation, confidence) in &edges {
+            assert_eq!(
+                *relation,
+                EdgeRelation::References,
+                "ambiguous name should not become Calls edge"
+            );
+            assert!(
+                *confidence <= AMBIGUOUS_CONFIDENCE_CAP,
+                "confidence capped at {}",
+                *confidence
+            );
+        }
     }
 }
