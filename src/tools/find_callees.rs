@@ -42,6 +42,7 @@ pub async fn find_callees(params: FindCalleesParams) -> anyhow::Result<Value> {
                 "reason": "identifier appears in source and resolves to an indexed symbol",
                 "evidence": callee.evidence,
                 "confidence": callee.confidence,
+                "resolution": callee.resolution.as_str(),
             })
         })
         .collect();

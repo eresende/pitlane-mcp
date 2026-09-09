@@ -6,7 +6,7 @@ use crate::embed::EmbedConfig;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::{json, Value};
 
-use crate::graph::{edge_evidence_quality, navigation_edge_metrics, EdgeRelation};
+use crate::graph::{edge_evidence_quality, navigation_edge_metrics, EdgeRelation, EdgeResolution};
 use crate::index::format::load_project_meta;
 use crate::index::repo_profile::{compact_repo_map, profile_entrypoints, RepoProfile};
 #[cfg(test)]
@@ -2428,6 +2428,7 @@ struct ImpactNeighbor {
     file: String,
     direction: ImpactDirection,
     relation: EdgeRelation,
+    resolution: EdgeResolution,
     evidence: String,
     confidence: f32,
     evidence_quality: f32,
@@ -2444,6 +2445,7 @@ impl ImpactNeighbor {
 struct ImpactSupportEdge {
     direction: &'static str,
     relation: EdgeRelation,
+    resolution: EdgeResolution,
     evidence: String,
     confidence: f32,
     evidence_quality: f32,
@@ -2463,6 +2465,7 @@ impl ImpactSupportEdge {
         Self {
             direction: neighbor.direction_label(),
             relation: neighbor.relation,
+            resolution: neighbor.resolution,
             evidence: neighbor.evidence.clone(),
             confidence: neighbor.confidence,
             evidence_quality: neighbor.evidence_quality,
@@ -2477,6 +2480,7 @@ impl ImpactSupportEdge {
         json!({
             "direction": self.direction,
             "relation": self.relation.as_str(),
+            "resolution": self.resolution.as_str(),
             "evidence": self.evidence,
             "confidence": self.confidence,
             "evidence_quality": self.evidence_quality,
@@ -2721,6 +2725,7 @@ fn collect_impact_neighbors(
                 file: symbol.file.to_string_lossy().replace('\\', "/"),
                 direction,
                 relation: edge.relation,
+                resolution: edge.resolution,
                 evidence: edge.evidence.clone(),
                 confidence: edge.confidence,
                 evidence_quality: metrics.evidence_quality,
