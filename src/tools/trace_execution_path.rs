@@ -146,6 +146,7 @@ pub async fn trace_execution_path(params: TraceExecutionPathParams) -> anyhow::R
                 "from_id": edge.from_id,
                 "to_id": edge.to_id,
                 "relation": edge.relation.as_str(),
+                "resolution": "resolved",
                 "evidence": edge.evidence,
                 "confidence": edge.confidence,
                 "evidence_quality": edge.evidence_quality,

@@ -2,7 +2,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 use crate::error::ToolError;
-use crate::graph::{collect_direct_references, read_symbol_source};
+use crate::graph::{collect_direct_references, collect_unresolved_calls, read_symbol_source};
 use crate::indexer::language::SymbolKind;
 use crate::path_policy::resolve_project_path;
 use crate::session;
@@ -155,6 +155,9 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
                     "id": reference.id,
                     "name": reference.name,
                     "kind": reference.kind,
+                    "resolution": reference.resolution.as_str(),
+                    "evidence": reference.evidence,
+                    "confidence": reference.confidence,
                 })
             })
             .collect();
@@ -163,6 +166,11 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         (refs, truncated)
     } else {
         (Vec::new(), false)
+    };
+    let unresolved_calls = if include_references {
+        collect_unresolved_calls(&index, sym)
+    } else {
+        Vec::new()
     };
     let observation = session::observe_content(
         Path::new(&canonical_project),
@@ -186,6 +194,9 @@ pub async fn get_symbol(params: GetSymbolParams) -> anyhow::Result<Value> {
         if references_truncated {
             response["references_truncated"] = json!(true);
         }
+    }
+    if include_references && !unresolved_calls.is_empty() {
+        response["unresolved_calls"] = json!(unresolved_calls);
     }
     let content_seen = observation.content_seen;
     let content_changed = observation.changed_since_last_read;
@@ -549,6 +560,45 @@ mod tests {
             ref_names.contains(&"helper"),
             "helper should appear in references, got: {ref_names:?}"
         );
+        assert_eq!(refs[0]["resolution"], "resolved");
+    }
+
+    #[tokio::test]
+    async fn test_full_source_labels_unresolved_calls() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("caller.py"),
+            b"def caller(client):\n    client.send()\n    missing()\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+        let index = load_project_index(&project).unwrap();
+        let caller_id = index
+            .symbols
+            .values()
+            .find(|symbol| symbol.name == "caller")
+            .unwrap()
+            .id
+            .clone();
+
+        let result = get_symbol(GetSymbolParams {
+            project,
+            symbol_id: caller_id,
+            include_context: None,
+            signature_only: Some(false),
+            include_references: Some(true),
+        })
+        .await
+        .unwrap();
+
+        let unresolved = result["unresolved_calls"].as_array().unwrap();
+        assert_eq!(unresolved.len(), 2);
+        assert!(unresolved
+            .iter()
+            .any(|call| { call["name"] == "send" && call["reason"] == "dynamic_receiver" }));
+        assert!(unresolved
+            .iter()
+            .any(|call| { call["name"] == "missing" && call["reason"] == "no_visible_target" }));
     }
 
     /// Signature-only response does NOT include a references field.

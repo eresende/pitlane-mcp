@@ -231,10 +231,7 @@ fn snapshot_index(
             .files
             .get(symbol.file.strip_prefix(root)?)
             .context("Missing revision source")?;
-        let body = source
-            .get(symbol.byte_start..symbol.byte_end)
-            .context("Invalid symbol byte range")?;
-        Ok(String::from_utf8_lossy(body).into_owned())
+        Ok(String::from_utf8_lossy(source).into_owned())
     });
     Ok(index)
 }

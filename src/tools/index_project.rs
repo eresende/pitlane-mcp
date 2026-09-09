@@ -556,7 +556,7 @@ pub(crate) fn is_index_up_to_date(
     if meta.project_path != project_path.display().to_string() {
         return false;
     }
-    if meta.version != 5 {
+    if meta.version != 6 {
         return false;
     }
 

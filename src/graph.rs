@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{Read, Seek, SeekFrom};
 
 use serde::{Deserialize, Serialize};
-use tree_sitter::{Node, Parser};
+use tree_sitter::{Node, Parser, Tree};
 
 use crate::index::SymbolIndex;
 use crate::indexer::language::{Language, Symbol, SymbolId, SymbolKind};
@@ -17,6 +17,33 @@ pub struct DirectReference {
     pub line_start: u32,
     pub evidence: String,
     pub confidence: f32,
+    pub resolution: EdgeResolution,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeResolution {
+    #[default]
+    Resolved,
+    Ambiguous,
+}
+
+impl EdgeResolution {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Resolved => "resolved",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UnresolvedCall {
+    pub name: String,
+    pub receiver: Option<String>,
+    pub evidence: String,
+    pub confidence: f32,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -47,6 +74,7 @@ pub struct NavigationEdge {
     pub relation: EdgeRelation,
     pub evidence: String,
     pub confidence: f32,
+    pub resolution: EdgeResolution,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
@@ -54,6 +82,7 @@ pub struct NavigationGraph {
     pub built: bool,
     pub outgoing: HashMap<String, Vec<NavigationEdge>>,
     pub incoming: HashMap<String, Vec<NavigationEdge>>,
+    pub unresolved_calls: HashMap<String, Vec<UnresolvedCall>>,
 }
 
 /// Extract unique identifier tokens from source text.
@@ -93,6 +122,14 @@ pub fn read_symbol_source(sym: &Symbol, include_context: bool) -> anyhow::Result
     }
 }
 
+fn read_file_source(sym: &Symbol) -> anyhow::Result<String> {
+    let mut file = open_regular_file(sym.file.as_ref())
+        .map_err(|e| anyhow::anyhow!("Cannot open file {:?}: {}", sym.file, e))?;
+    let mut content = String::new();
+    file.read_to_string(&mut content)?;
+    Ok(content)
+}
+
 /// Name-to-candidate lookup built once per graph build. Replaces scanning
 /// every indexed symbol for each source symbol (O(N²)) with O(1) lookups.
 pub(crate) struct CandidateIndex {
@@ -130,13 +167,13 @@ impl CandidateIndex {
 }
 
 pub fn build_navigation_graph(index: &SymbolIndex) -> NavigationGraph {
-    build_navigation_graph_with_source(index, |sym| read_symbol_source(sym, false))
+    build_navigation_graph_with_source(index, read_file_source)
 }
 
 /// Build the same navigation graph from a revision snapshot without reading the worktree.
 pub(crate) fn build_navigation_graph_with_source(
     index: &SymbolIndex,
-    source: impl Fn(&Symbol) -> anyhow::Result<String>,
+    file_source: impl Fn(&Symbol) -> anyhow::Result<String>,
 ) -> NavigationGraph {
     let mut graph = NavigationGraph {
         built: true,
@@ -144,12 +181,43 @@ pub(crate) fn build_navigation_graph_with_source(
     };
 
     let candidates = CandidateIndex::build(index);
+    let mut sources = HashMap::new();
+    let mut failed_sources = HashSet::new();
+    let mut imports_by_file = HashMap::new();
     for sym in index.symbols.values() {
-        let source_text = match source(sym) {
-            Ok(source) => source,
-            Err(_) => continue,
+        if failed_sources.contains(sym.file.as_ref()) {
+            continue;
+        }
+        if !sources.contains_key(sym.file.as_ref()) {
+            let Ok(source) = file_source(sym) else {
+                failed_sources.insert(sym.file.as_ref().clone());
+                continue;
+            };
+            sources.insert(sym.file.as_ref().clone(), source);
+        }
+        let Some(source_text) = sources.get(sym.file.as_ref()) else {
+            continue;
         };
-        for reference in scan_direct_references(index, sym, &source_text, &candidates) {
+        let Some(symbol_source) = source_text.get(sym.byte_start..sym.byte_end) else {
+            continue;
+        };
+        let imports = imports_by_file
+            .entry(sym.file.as_ref().clone())
+            .or_insert_with(|| parse_imports(&sym.language, source_text));
+        let scanned = scan_direct_references(
+            index,
+            sym,
+            symbol_source,
+            source_text,
+            Some(imports),
+            &candidates,
+        );
+        if !scanned.unresolved.is_empty() {
+            graph
+                .unresolved_calls
+                .insert(sym.id.clone(), scanned.unresolved);
+        }
+        for reference in scanned.references {
             let Some(target) = index.symbols.get(&reference.id) else {
                 continue;
             };
@@ -164,6 +232,7 @@ pub(crate) fn build_navigation_graph_with_source(
                     relation,
                     evidence: reference.evidence.clone(),
                     confidence: reference.confidence,
+                    resolution: reference.resolution,
                 });
             graph
                 .incoming
@@ -174,6 +243,7 @@ pub(crate) fn build_navigation_graph_with_source(
                     relation,
                     evidence: reference.evidence,
                     confidence: reference.confidence,
+                    resolution: reference.resolution,
                 });
         }
     }
@@ -208,7 +278,43 @@ pub fn collect_direct_references(
             &owned_source
         }
     };
-    scan_direct_references(index, sym, source_text, &CandidateIndex::build(index))
+    let owned_file_source = read_file_source(sym).ok();
+    let file_source = owned_file_source.as_deref().unwrap_or(source_text);
+    scan_direct_references(
+        index,
+        sym,
+        source_text,
+        file_source,
+        None,
+        &CandidateIndex::build(index),
+    )
+    .references
+}
+
+pub fn collect_unresolved_calls(index: &SymbolIndex, sym: &Symbol) -> Vec<UnresolvedCall> {
+    if index.graph.built {
+        return index
+            .graph
+            .unresolved_calls
+            .get(&sym.id)
+            .cloned()
+            .unwrap_or_default();
+    }
+    let Ok(file_source) = read_file_source(sym) else {
+        return Vec::new();
+    };
+    let Some(symbol_source) = file_source.get(sym.byte_start..sym.byte_end) else {
+        return Vec::new();
+    };
+    scan_direct_references(
+        index,
+        sym,
+        symbol_source,
+        &file_source,
+        None,
+        &CandidateIndex::build(index),
+    )
+    .unresolved
 }
 
 pub fn collect_direct_callable_references(
@@ -280,6 +386,7 @@ pub fn collect_incoming_callable_references(
                 line_start: candidate.line_start,
                 evidence: reference.evidence.clone(),
                 confidence: reference.confidence,
+                resolution: reference.resolution,
             });
         }
     }
@@ -287,40 +394,670 @@ pub fn collect_incoming_callable_references(
     callers
 }
 
+#[derive(Default)]
+struct ScanResult {
+    references: Vec<DirectReference>,
+    unresolved: Vec<UnresolvedCall>,
+}
+
 fn scan_direct_references(
     index: &SymbolIndex,
     sym: &Symbol,
     source_text: &str,
+    file_source: &str,
+    file_imports: Option<&[ImportBinding]>,
     candidates: &CandidateIndex,
-) -> Vec<DirectReference> {
+) -> ScanResult {
     let mut refs = Vec::new();
-    let cap_generic_confidence = if sym.language == Language::Rust {
-        match scan_rust_direct_references(index, sym, source_text, candidates) {
+    let mut unresolved = Vec::new();
+    let mut ast_call_names = HashSet::new();
+    let cap_generic_confidence = match sym.language {
+        Language::Rust => match scan_rust_direct_references(index, sym, source_text, candidates) {
             Some(mut rust_refs) => {
                 refs.append(&mut rust_refs);
                 Some(0.84)
             }
             None => None,
+        },
+        Language::Python | Language::TypeScript => {
+            let extraction = match sym.language {
+                Language::Python => collect_python_call_matches(source_text),
+                Language::TypeScript => collect_typescript_call_matches(source_text, &sym.file),
+                _ => unreachable!(),
+            };
+            if let Some(extraction) = extraction {
+                let context = ResolutionContext::from_source(
+                    &sym.language,
+                    file_source,
+                    source_text,
+                    file_imports,
+                );
+                for matched in extraction {
+                    ast_call_names.insert(matched.name.clone());
+                    match resolve_ast_match(index, sym, &matched, candidates, &context) {
+                        AstResolution::References(mut resolved) => refs.append(&mut resolved),
+                        AstResolution::Unresolved(call) => unresolved.push(call),
+                    }
+                }
+            }
+            Some(0.84)
         }
-    } else {
-        None
+        _ => None,
     };
 
-    refs.extend(scan_generic_direct_references(
-        index,
-        sym,
-        source_text,
-        cap_generic_confidence,
-        candidates,
-    ));
+    let mut generic =
+        scan_generic_direct_references(index, sym, source_text, cap_generic_confidence, candidates);
+    generic.retain(|reference| !ast_call_names.contains(&reference.name));
+    refs.extend(generic);
     sort_direct_references(&mut refs);
-    refs
+    unresolved.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.evidence.cmp(&b.evidence))
+            .then_with(|| a.reason.cmp(&b.reason))
+    });
+    unresolved
+        .dedup_by(|a, b| a.name == b.name && a.evidence == b.evidence && a.reason == b.reason);
+    ScanResult {
+        references: refs,
+        unresolved,
+    }
 }
 
 /// Confidence cap for references whose target name is ambiguous (multiple
 /// same-language candidates). Below the `Calls` thresholds in
 /// `classify_relation`, so ambiguous name matches stay `References`.
 const AMBIGUOUS_CONFIDENCE_CAP: f32 = 0.84;
+
+#[derive(Debug, Clone)]
+struct CallMatch {
+    name: String,
+    receiver: Option<String>,
+    evidence: String,
+    confidence: f32,
+}
+
+#[derive(Debug, Clone)]
+struct ImportBinding {
+    local: String,
+    imported: Option<String>,
+    module: String,
+    namespace: bool,
+}
+
+#[derive(Debug, Default)]
+struct ResolutionContext {
+    imports: Vec<ImportBinding>,
+    shadowed: HashSet<String>,
+    receiver_types: HashMap<String, String>,
+}
+
+impl ResolutionContext {
+    fn from_source(
+        language: &Language,
+        file_source: &str,
+        symbol_source: &str,
+        cached_imports: Option<&[ImportBinding]>,
+    ) -> Self {
+        let imports = cached_imports
+            .map(<[ImportBinding]>::to_vec)
+            .unwrap_or_else(|| parse_imports(language, file_source));
+        let (shadowed, receiver_types) = collect_local_bindings(language, symbol_source);
+        Self {
+            imports,
+            shadowed,
+            receiver_types,
+        }
+    }
+}
+
+fn parse_imports(language: &Language, source: &str) -> Vec<ImportBinding> {
+    match language {
+        Language::Python => parse_python_imports(source),
+        Language::TypeScript => parse_typescript_imports(source),
+        _ => Vec::new(),
+    }
+}
+
+enum AstResolution {
+    References(Vec<DirectReference>),
+    Unresolved(UnresolvedCall),
+}
+
+fn resolve_ast_match(
+    index: &SymbolIndex,
+    caller: &Symbol,
+    matched: &CallMatch,
+    candidates: &CandidateIndex,
+    context: &ResolutionContext,
+) -> AstResolution {
+    let unresolved = |reason: &str| {
+        AstResolution::Unresolved(UnresolvedCall {
+            name: matched.name.clone(),
+            receiver: matched.receiver.clone(),
+            evidence: matched.evidence.clone(),
+            confidence: matched.confidence,
+            reason: reason.to_string(),
+        })
+    };
+
+    let resolved = if let Some(receiver) = matched.receiver.as_deref() {
+        if let Some(binding) = context
+            .imports
+            .iter()
+            .find(|binding| binding.namespace && binding.local == receiver)
+        {
+            filter_module_candidates(
+                candidates.lookup(index, caller.language.clone(), &matched.name, &caller.id),
+                caller,
+                &binding.module,
+            )
+        } else {
+            let owner = receiver_owner(caller, receiver, context, candidates, index);
+            let Some((owner, module)) = owner else {
+                return unresolved("dynamic_receiver");
+            };
+            let methods = candidates
+                .lookup(index, caller.language.clone(), &matched.name, &caller.id)
+                .into_iter()
+                .filter(|candidate| qualified_owner_matches(candidate, &owner))
+                .collect::<Vec<_>>();
+            if let Some(module) = module {
+                filter_module_candidates(methods, caller, &module)
+            } else {
+                methods
+            }
+        }
+    } else {
+        if context.shadowed.contains(&matched.name) {
+            return unresolved("shadowed_local_binding");
+        }
+
+        let same_file = candidates
+            .lookup(index, caller.language.clone(), &matched.name, &caller.id)
+            .into_iter()
+            .filter(|candidate| candidate.file == caller.file)
+            .collect::<Vec<_>>();
+        let lexical = prefer_lexical_candidates(caller, same_file);
+        if !lexical.is_empty() {
+            lexical
+        } else if let Some(binding) = context
+            .imports
+            .iter()
+            .find(|binding| !binding.namespace && binding.local == matched.name)
+        {
+            binding_candidates(index, caller, candidates, binding, &matched.name)
+        } else {
+            Vec::new()
+        }
+    };
+
+    if resolved.is_empty() {
+        return unresolved("no_visible_target");
+    }
+    AstResolution::References(refs_from_candidates(resolved, matched))
+}
+
+fn binding_candidates<'a>(
+    index: &'a SymbolIndex,
+    caller: &Symbol,
+    candidates: &CandidateIndex,
+    binding: &ImportBinding,
+    fallback_name: &str,
+) -> Vec<&'a Symbol> {
+    if binding.imported.as_deref() == Some("default") {
+        return index
+            .symbols
+            .values()
+            .filter(|candidate| {
+                candidate.id != caller.id
+                    && candidate.language == caller.language
+                    && is_callable_kind(&candidate.kind)
+                    && module_matches(
+                        &candidate.file,
+                        &caller.file,
+                        &binding.module,
+                        &caller.language,
+                    )
+            })
+            .collect();
+    }
+    let target_name = binding.imported.as_deref().unwrap_or(fallback_name);
+    filter_module_candidates(
+        candidates.lookup(index, caller.language.clone(), target_name, &caller.id),
+        caller,
+        &binding.module,
+    )
+}
+
+fn refs_from_candidates(resolved: Vec<&Symbol>, matched: &CallMatch) -> Vec<DirectReference> {
+    let resolution = if resolved.len() > 1 {
+        EdgeResolution::Ambiguous
+    } else {
+        EdgeResolution::Resolved
+    };
+    resolved
+        .into_iter()
+        .map(|candidate| DirectReference {
+            id: candidate.id.clone(),
+            name: candidate.name.clone(),
+            kind: candidate.kind.to_string(),
+            file: candidate.file.to_string_lossy().replace('\\', "/"),
+            line_start: candidate.line_start,
+            evidence: matched.evidence.chars().take(240).collect(),
+            confidence: if resolution == EdgeResolution::Ambiguous {
+                matched.confidence.min(AMBIGUOUS_CONFIDENCE_CAP)
+            } else {
+                matched.confidence
+            },
+            resolution,
+        })
+        .collect()
+}
+
+fn prefer_lexical_candidates<'a>(caller: &Symbol, candidates: Vec<&'a Symbol>) -> Vec<&'a Symbol> {
+    let separator = match caller.language {
+        Language::Python => "::",
+        Language::TypeScript => ".",
+        _ => return candidates,
+    };
+    let owner = caller
+        .qualified
+        .rsplit_once(separator)
+        .map(|(owner, _)| owner);
+    if let Some(owner) = owner {
+        let scoped: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|candidate| {
+                candidate
+                    .qualified
+                    .strip_suffix(&format!("{separator}{}", candidate.name))
+                    == Some(owner)
+            })
+            .collect();
+        if !scoped.is_empty() {
+            return scoped;
+        }
+    }
+    candidates
+        .into_iter()
+        .filter(|candidate| !candidate.qualified.contains(separator))
+        .collect()
+}
+
+fn qualified_owner_matches(candidate: &Symbol, owner: &str) -> bool {
+    candidate.qualified == format!("{owner}::{}", candidate.name)
+        || candidate.qualified == format!("{owner}.{}", candidate.name)
+}
+
+fn receiver_owner(
+    caller: &Symbol,
+    receiver: &str,
+    context: &ResolutionContext,
+    candidates: &CandidateIndex,
+    index: &SymbolIndex,
+) -> Option<(String, Option<String>)> {
+    if matches!(receiver, "self" | "cls" | "this") {
+        return caller
+            .qualified
+            .rsplit_once(if caller.language == Language::Python {
+                "::"
+            } else {
+                "."
+            })
+            .map(|(owner, _)| (owner.to_string(), None));
+    }
+    let inferred_owner = context
+        .receiver_types
+        .get(receiver)
+        .map(String::as_str)
+        .unwrap_or(receiver);
+    if let Some(binding) = context
+        .imports
+        .iter()
+        .find(|binding| !binding.namespace && binding.local == inferred_owner)
+    {
+        if binding.imported.as_deref() == Some("default") {
+            let classes: Vec<_> = index
+                .symbols
+                .values()
+                .filter(|candidate| {
+                    candidate.language == caller.language
+                        && candidate.kind == SymbolKind::Class
+                        && module_matches(
+                            &candidate.file,
+                            &caller.file,
+                            &binding.module,
+                            &caller.language,
+                        )
+                })
+                .collect();
+            if classes.len() == 1 {
+                return Some((classes[0].name.clone(), Some(binding.module.clone())));
+            }
+            return None;
+        }
+        return binding
+            .imported
+            .clone()
+            .map(|owner| (owner, Some(binding.module.clone())));
+    }
+    let class_matches =
+        candidates.lookup(index, caller.language.clone(), inferred_owner, &caller.id);
+    let same_file: Vec<_> = class_matches
+        .iter()
+        .copied()
+        .filter(|candidate| candidate.file == caller.file)
+        .collect();
+    if same_file.len() == 1 && same_file[0].kind == SymbolKind::Class {
+        return Some((same_file[0].name.clone(), None));
+    }
+    (class_matches.len() == 1 && class_matches[0].kind == SymbolKind::Class)
+        .then(|| (class_matches[0].name.clone(), None))
+}
+
+fn filter_module_candidates<'a>(
+    candidates: Vec<&'a Symbol>,
+    caller: &Symbol,
+    module: &str,
+) -> Vec<&'a Symbol> {
+    candidates
+        .into_iter()
+        .filter(|candidate| module_matches(&candidate.file, &caller.file, module, &caller.language))
+        .collect()
+}
+
+fn module_matches(
+    candidate: &std::path::Path,
+    caller: &std::path::Path,
+    module: &str,
+    language: &Language,
+) -> bool {
+    let candidate = candidate.to_string_lossy().replace('\\', "/");
+    let caller_dir = caller.parent().unwrap_or_else(|| std::path::Path::new(""));
+    let module = module.trim_matches(|c| matches!(c, '\'' | '"'));
+    let relative = module.starts_with('.') && !matches!(language, Language::Python)
+        || module.starts_with("./")
+        || module.starts_with("../");
+    let module_path = if *language == Language::Python {
+        let leading = module.chars().take_while(|c| *c == '.').count();
+        let mut base = caller_dir.to_path_buf();
+        for _ in 1..leading {
+            base.pop();
+        }
+        let rest = module.trim_start_matches('.').replace('.', "/");
+        if leading > 0 {
+            base.join(rest).to_string_lossy().replace('\\', "/")
+        } else {
+            rest
+        }
+    } else if relative {
+        normalize_path(&caller_dir.join(module))
+            .to_string_lossy()
+            .replace('\\', "/")
+    } else {
+        module.to_string()
+    };
+    let stem = candidate
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .unwrap_or(&candidate);
+    stem == module_path
+        || stem.ends_with(&format!("/{module_path}"))
+        || stem == format!("{module_path}/index")
+        || stem.ends_with(&format!("/{module_path}/index"))
+        || stem == format!("{module_path}/__init__")
+        || stem.ends_with(&format!("/{module_path}/__init__"))
+}
+
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn parse_python_imports(source: &str) -> Vec<ImportBinding> {
+    let mut bindings = Vec::new();
+    for statement in import_statements(source, &["from ", "import "]) {
+        let line = statement.split('#').next().unwrap_or("").trim();
+        if let Some(rest) = line.strip_prefix("from ") {
+            let Some((module, names)) = rest.split_once(" import ") else {
+                continue;
+            };
+            for name in names.trim_matches(|c| matches!(c, '(' | ')')).split(',') {
+                let (imported, local) = split_alias(name.trim());
+                if !imported.is_empty() {
+                    bindings.push(ImportBinding {
+                        local: local.to_string(),
+                        imported: Some(imported.to_string()),
+                        module: module.trim().to_string(),
+                        namespace: false,
+                    });
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("import ") {
+            for item in rest.split(',') {
+                let (module, alias) = split_alias(item.trim());
+                if !module.is_empty() {
+                    bindings.push(ImportBinding {
+                        local: if alias == module {
+                            module.split('.').next().unwrap_or(module).to_string()
+                        } else {
+                            alias.to_string()
+                        },
+                        imported: None,
+                        module: module.to_string(),
+                        namespace: true,
+                    });
+                }
+            }
+        }
+    }
+    bindings
+}
+
+fn parse_typescript_imports(source: &str) -> Vec<ImportBinding> {
+    let mut bindings = Vec::new();
+    for statement in import_statements(source, &["import "]) {
+        let line = statement.trim();
+        let Some(rest) = line.strip_prefix("import ") else {
+            continue;
+        };
+        let Some((clause, module)) = rest.rsplit_once(" from ") else {
+            continue;
+        };
+        let module = module
+            .split(';')
+            .next()
+            .unwrap_or(module)
+            .trim()
+            .trim_end_matches(';')
+            .trim_matches(|c| matches!(c, '\'' | '"'));
+        if let Some(namespace) = clause.trim().strip_prefix("* as ") {
+            bindings.push(ImportBinding {
+                local: namespace.trim().to_string(),
+                imported: None,
+                module: module.to_string(),
+                namespace: true,
+            });
+            continue;
+        }
+        if let (Some(start), Some(end)) = (clause.find('{'), clause.rfind('}')) {
+            for name in clause[start + 1..end].split(',') {
+                let (imported, local) = split_alias(name.trim());
+                if !imported.is_empty() {
+                    bindings.push(ImportBinding {
+                        local: local.to_string(),
+                        imported: Some(imported.to_string()),
+                        module: module.to_string(),
+                        namespace: false,
+                    });
+                }
+            }
+        }
+        let default = clause.split(',').next().unwrap_or("").trim();
+        if !default.is_empty() && !default.starts_with('{') {
+            bindings.push(ImportBinding {
+                local: default.to_string(),
+                imported: Some("default".to_string()),
+                module: module.to_string(),
+                namespace: false,
+            });
+        }
+    }
+    bindings
+}
+
+fn import_statements(source: &str, prefixes: &[&str]) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut nesting = 0_i32;
+    for line in source.lines().map(str::trim) {
+        if current.is_empty() {
+            if !prefixes.iter().any(|prefix| line.starts_with(prefix)) {
+                continue;
+            }
+        } else {
+            current.push(' ');
+        }
+        current.push_str(line.trim_end_matches('\\'));
+        nesting += line
+            .chars()
+            .map(|c| match c {
+                '(' | '{' | '[' => 1,
+                ')' | '}' | ']' => -1,
+                _ => 0,
+            })
+            .sum::<i32>();
+        if nesting <= 0 && !line.ends_with('\\') {
+            statements.push(std::mem::take(&mut current));
+            nesting = 0;
+        }
+    }
+    if !current.is_empty() {
+        statements.push(current);
+    }
+    statements
+}
+
+fn split_alias(value: &str) -> (&str, &str) {
+    value
+        .split_once(" as ")
+        .map(|(original, alias)| (original.trim(), alias.trim()))
+        .unwrap_or((value.trim(), value.trim()))
+}
+
+fn collect_local_bindings(
+    language: &Language,
+    source: &str,
+) -> (HashSet<String>, HashMap<String, String>) {
+    let mut shadowed = HashSet::new();
+    let mut receiver_types = HashMap::new();
+    for line in source.lines().map(str::trim) {
+        let declaration = match language {
+            Language::TypeScript => ["const ", "let ", "var "]
+                .into_iter()
+                .find_map(|prefix| line.strip_prefix(prefix)),
+            Language::Python => Some(line),
+            _ => None,
+        };
+        if let Some(declaration) = declaration {
+            if let Some((left, right)) = declaration.split_once('=') {
+                let local = left.trim().split(':').next().unwrap_or("").trim();
+                if is_simple_reference(local) {
+                    shadowed.insert(local.to_string());
+                    let annotated_owner = left.split_once(':').and_then(|(_, owner)| {
+                        owner
+                            .trim()
+                            .split(|c: char| !c.is_alphanumeric() && c != '_')
+                            .next()
+                            .filter(|owner| is_identifier(owner))
+                    });
+                    let constructed_owner = || {
+                        let right = right.trim().strip_prefix("new ").unwrap_or(right.trim());
+                        right
+                            .split('(')
+                            .next()
+                            .map(str::trim)
+                            .filter(|name| is_identifier(name))
+                    };
+                    if let Some(owner) = annotated_owner.or_else(constructed_owner) {
+                        receiver_types.insert(local.to_string(), owner.to_string());
+                    }
+                }
+            } else if *language == Language::Python {
+                if let Some((local, owner)) = declaration.split_once(':') {
+                    let local = local.trim();
+                    let owner = owner
+                        .trim()
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if is_simple_reference(local) && is_identifier(owner) {
+                        shadowed.insert(local.to_string());
+                        receiver_types.insert(local.to_string(), owner.to_string());
+                    }
+                }
+            }
+            if *language == Language::TypeScript {
+                let left = declaration.split('=').next().unwrap_or(declaration);
+                if let Some((local, owner)) = left.split_once(':') {
+                    let local = local.trim();
+                    let owner = owner
+                        .trim()
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if is_identifier(local) && is_identifier(owner) {
+                        shadowed.insert(local.to_string());
+                        receiver_types.insert(local.to_string(), owner.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if let Some((_, params)) = source.lines().next().and_then(|line| line.split_once('(')) {
+        if let Some((params, _)) = params.split_once(')') {
+            for parameter in params.split(',') {
+                let parameter = parameter.trim();
+                let name = parameter.split(':').next().unwrap_or(parameter).trim();
+                if is_identifier(name) {
+                    shadowed.insert(name.to_string());
+                }
+                if let Some((_, owner)) = parameter.split_once(':') {
+                    let owner = owner
+                        .trim()
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        .next()
+                        .unwrap_or("");
+                    if is_identifier(name) && is_identifier(owner) {
+                        receiver_types.insert(name.to_string(), owner.to_string());
+                    }
+                }
+            }
+        }
+    }
+    (shadowed, receiver_types)
+}
+
+fn is_simple_reference(value: &str) -> bool {
+    !value.is_empty() && value.split('.').all(is_identifier)
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars.next().is_some_and(|c| c == '_' || c.is_alphabetic())
+        && chars.all(|c| c == '_' || c.is_alphanumeric())
+}
 
 /// Remove comments and string-literal contents from source, preserving
 /// newlines so cleaned text stays line-aligned with the original.
@@ -487,6 +1224,11 @@ fn scan_generic_direct_references(
                 line_start: candidate.line_start,
                 evidence,
                 confidence,
+                resolution: if ambiguous {
+                    EdgeResolution::Ambiguous
+                } else {
+                    EdgeResolution::Resolved
+                },
             }
         })
         .collect()
@@ -540,6 +1282,7 @@ fn resolve_edges(
                 line_start: target.line_start,
                 evidence: edge.evidence.clone(),
                 confidence: edge.confidence,
+                resolution: edge.resolution,
             })
         })
         .collect();
@@ -551,6 +1294,7 @@ fn normalise_edge_bucket(bucket: &mut Vec<NavigationEdge>) {
     bucket.sort_by(|a, b| {
         relation_rank(b.relation)
             .cmp(&relation_rank(a.relation))
+            .then_with(|| resolution_rank(b.resolution).cmp(&resolution_rank(a.resolution)))
             .then_with(|| {
                 b.confidence
                     .partial_cmp(&a.confidence)
@@ -570,6 +1314,13 @@ fn relation_rank(relation: EdgeRelation) -> u8 {
     match relation {
         EdgeRelation::Calls => 2,
         EdgeRelation::References => 1,
+    }
+}
+
+fn resolution_rank(resolution: EdgeResolution) -> u8 {
+    match resolution {
+        EdgeResolution::Resolved => 2,
+        EdgeResolution::Ambiguous => 1,
     }
 }
 
@@ -645,9 +1396,13 @@ fn classify_relation(target: &Symbol, confidence: f32) -> EdgeRelation {
 
 fn sort_direct_references(refs: &mut Vec<DirectReference>) {
     refs.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        resolution_rank(b.resolution)
+            .cmp(&resolution_rank(a.resolution))
+            .then_with(|| {
+                b.confidence
+                    .partial_cmp(&a.confidence)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a.file.cmp(&b.file))
             .then_with(|| a.line_start.cmp(&b.line_start))
@@ -727,6 +1482,11 @@ fn scan_rust_direct_references(
                 line_start: candidate.line_start,
                 evidence: matched.evidence.clone(),
                 confidence,
+                resolution: if ambiguous {
+                    EdgeResolution::Ambiguous
+                } else {
+                    EdgeResolution::Resolved
+                },
             }
         }));
     }
@@ -847,6 +1607,159 @@ fn last_rust_identifier(source_text: &str, node: Node<'_>) -> Option<String> {
     }
 }
 
+fn collect_python_call_matches(source_text: &str) -> Option<Vec<CallMatch>> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_python::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(source_text, None)?;
+    let mut matches = Vec::new();
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        if node.kind() == "call" {
+            if let Some(target) = node.child_by_field_name("function") {
+                let (name, receiver, confidence) = python_call_target(source_text, target);
+                if !name.is_empty() {
+                    matches.push(CallMatch {
+                        name,
+                        receiver,
+                        evidence: node_evidence(source_text, node),
+                        confidence,
+                    });
+                }
+            }
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    Some(matches)
+}
+
+fn python_call_target(source: &str, node: Node<'_>) -> (String, Option<String>, f32) {
+    match node.kind() {
+        "identifier" => (node_text(source, node), None, 0.98),
+        "attribute" => {
+            let name = node
+                .child_by_field_name("attribute")
+                .map(|child| node_text(source, child))
+                .unwrap_or_default();
+            let receiver = node
+                .child_by_field_name("object")
+                .map(|child| node_text(source, child));
+            (name, receiver, 0.98)
+        }
+        "parenthesized_expression" => node
+            .named_child(0)
+            .map(|child| python_call_target(source, child))
+            .unwrap_or_default(),
+        _ => (
+            node_text(source, node).chars().take(120).collect(),
+            Some("<dynamic>".to_string()),
+            0.65,
+        ),
+    }
+}
+
+fn collect_typescript_call_matches(
+    source_text: &str,
+    file: &std::path::Path,
+) -> Option<Vec<CallMatch>> {
+    let mut parser = Parser::new();
+    let tsx = matches!(
+        file.extension().and_then(|extension| extension.to_str()),
+        Some("tsx" | "jsx")
+    );
+    let language = if tsx {
+        tree_sitter_typescript::LANGUAGE_TSX.into()
+    } else {
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()
+    };
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(source_text, None)?;
+    collect_ts_call_matches_impl(source_text, &tree)
+}
+
+fn collect_ts_call_matches_impl(source_text: &str, tree: &Tree) -> Option<Vec<CallMatch>> {
+    let mut matches = Vec::new();
+    let mut pending = vec![tree.root_node()];
+    while let Some(node) = pending.pop() {
+        let target = match node.kind() {
+            "call_expression" => node.child_by_field_name("function"),
+            "new_expression" => node
+                .child_by_field_name("constructor")
+                .or_else(|| node.child_by_field_name("class"))
+                .or_else(|| node.named_child(0)),
+            _ => None,
+        };
+        if let Some(target) = target {
+            let (name, receiver, confidence) = ts_call_target(source_text, target);
+            if !name.is_empty() {
+                matches.push(CallMatch {
+                    name,
+                    receiver,
+                    evidence: node_evidence(source_text, node),
+                    confidence: if node.kind() == "new_expression" {
+                        confidence.min(0.95)
+                    } else {
+                        confidence
+                    },
+                });
+            }
+        }
+        let mut cursor = node.walk();
+        pending.extend(node.named_children(&mut cursor));
+    }
+    Some(matches)
+}
+
+fn ts_call_target(source: &str, node: Node<'_>) -> (String, Option<String>, f32) {
+    match node.kind() {
+        "identifier" => (node_text(source, node), None, 0.98),
+        "member_expression" | "member_access_expression" => {
+            let name = node
+                .child_by_field_name("property")
+                .map(|child| node_text(source, child))
+                .unwrap_or_default();
+            let receiver = node
+                .child_by_field_name("object")
+                .map(|child| node_text(source, child));
+            (name, receiver, 0.98)
+        }
+        "subscript_expression" | "computed_member_access_expression" => {
+            let property = node
+                .child_by_field_name("index")
+                .or_else(|| node.child_by_field_name("property"));
+            let receiver = node
+                .child_by_field_name("object")
+                .map(|child| node_text(source, child));
+            if let Some(property) = property {
+                let raw = node_text(source, property);
+                if matches!(property.kind(), "string" | "string_literal") {
+                    return (
+                        raw.trim_matches(|c| matches!(c, '\'' | '"')).to_string(),
+                        receiver,
+                        0.9,
+                    );
+                }
+            }
+            (
+                node_text(source, node).chars().take(120).collect(),
+                Some("<dynamic>".to_string()),
+                0.65,
+            )
+        }
+        "parenthesized_expression" => node
+            .named_child(0)
+            .map(|child| ts_call_target(source, child))
+            .unwrap_or_default(),
+        _ => (
+            node_text(source, node).chars().take(120).collect(),
+            Some("<dynamic>".to_string()),
+            0.65,
+        ),
+    }
+}
+
 fn node_text(source_text: &str, node: Node<'_>) -> String {
     node.utf8_text(source_text.as_bytes())
         .unwrap_or("")
@@ -910,7 +1823,11 @@ mod tests {
     fn build_index_files(files: &[(&str, &str)]) -> SymbolIndex {
         let dir = TempDir::new().unwrap();
         for (name, source) in files {
-            std::fs::write(dir.path().join(name), source).unwrap();
+            let path = dir.path().join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, source).unwrap();
         }
         let indexer = Indexer::new(registry::build_default_registry());
         let (index, _) = indexer.index_project(dir.path(), &[]).unwrap();
@@ -1200,5 +2117,202 @@ mod tests {
         // scan_generic_direct_references); this helper only sees cleaned
         // text, and the stripped case is covered by
         // test_comment_mentioning_call_produces_no_calls_edge.
+    }
+
+    #[test]
+    fn python_import_alias_resolves_to_the_imported_module() {
+        let index = build_index_files(&[
+            ("a.py", "def process():\n    pass\n"),
+            ("b.py", "def process():\n    pass\n"),
+            (
+                "caller.py",
+                "from a import process as run_process\n\ndef caller():\n    run_process()\n",
+            ),
+        ]);
+        let caller = index.symbols.values().find(|s| s.name == "caller").unwrap();
+        let edges = index.graph.outgoing.get(&caller.id).unwrap();
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        let target = index.symbols.get(&edges[0].symbol_id).unwrap();
+        assert!(target.file.ends_with("a.py"));
+        assert_eq!(edges[0].relation, EdgeRelation::Calls);
+        assert_eq!(edges[0].resolution, EdgeResolution::Resolved);
+        assert!(edges[0].evidence.contains("run_process()"));
+    }
+
+    #[test]
+    fn typescript_namespace_import_resolves_member_without_global_name_matching() {
+        let index = build_index_files(&[
+            ("a.ts", "export function process(): void {}\n"),
+            ("b.ts", "export function process(): void {}\n"),
+            (
+                "caller.ts",
+                "import * as utils from './a';\nexport function caller(): void { utils.process(); }\n",
+            ),
+        ]);
+        let caller = index.symbols.values().find(|s| s.name == "caller").unwrap();
+        let edges = index.graph.outgoing.get(&caller.id).unwrap();
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        let target = index.symbols.get(&edges[0].symbol_id).unwrap();
+        assert!(target.file.ends_with("a.ts"));
+        assert_eq!(edges[0].relation, EdgeRelation::Calls);
+    }
+
+    #[test]
+    fn typescript_named_alias_resolves_to_the_imported_module() {
+        let index = build_index_files(&[
+            ("a.ts", "export function process(): void {}\n"),
+            ("b.ts", "export function process(): void {}\n"),
+            (
+                "caller.ts",
+                "import { process as runProcess } from './a';\nexport function caller(): void { runProcess(); }\n",
+            ),
+        ]);
+        let caller = index.symbols.values().find(|s| s.name == "caller").unwrap();
+        let edges = index.graph.outgoing.get(&caller.id).unwrap();
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        let target = index.symbols.get(&edges[0].symbol_id).unwrap();
+        assert!(target.file.ends_with("a.ts"));
+        assert_eq!(edges[0].resolution, EdgeResolution::Resolved);
+    }
+
+    #[test]
+    fn imported_targets_that_remain_ambiguous_are_explicitly_labeled() {
+        let index = build_index_files(&[
+            ("a.ts", "export function process(): void {}\n"),
+            ("a.tsx", "export function process(): void {}\n"),
+            (
+                "caller.ts",
+                "import { process } from './a';\nexport function caller(): void { process(); }\n",
+            ),
+        ]);
+        let caller = index.symbols.values().find(|s| s.name == "caller").unwrap();
+        let edges = index.graph.outgoing.get(&caller.id).unwrap();
+        assert_eq!(edges.len(), 2, "got {edges:?}");
+        assert!(edges.iter().all(|edge| {
+            edge.relation == EdgeRelation::References
+                && edge.resolution == EdgeResolution::Ambiguous
+                && edge.confidence <= AMBIGUOUS_CONFIDENCE_CAP
+        }));
+    }
+
+    #[test]
+    fn lexical_same_file_candidate_wins_over_same_name_in_other_module() {
+        let index = build_index_files(&[
+            (
+                "local.py",
+                "def process():\n    pass\n\ndef caller():\n    process()\n",
+            ),
+            ("other.py", "def process():\n    pass\n"),
+        ]);
+        let caller = index.symbols.values().find(|s| s.name == "caller").unwrap();
+        let edges = index.graph.outgoing.get(&caller.id).unwrap();
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        let target = index.symbols.get(&edges[0].symbol_id).unwrap();
+        assert!(target.file.ends_with("local.py"));
+        assert_eq!(edges[0].resolution, EdgeResolution::Resolved);
+    }
+
+    #[test]
+    fn typed_receiver_resolves_the_matching_python_method() {
+        let index = build_index_files(&[(
+            "models.py",
+            "class A:\n    def save(self):\n        pass\n\nclass B:\n    def save(self):\n        pass\n\ndef caller(item: A):\n    item.save()\n",
+        )]);
+        let caller = index.symbols.values().find(|s| s.name == "caller").unwrap();
+        let edges = index.graph.outgoing.get(&caller.id).unwrap();
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        let target = index.symbols.get(&edges[0].symbol_id).unwrap();
+        assert_eq!(target.qualified, "A::save");
+        assert_eq!(edges[0].resolution, EdgeResolution::Resolved);
+    }
+
+    #[test]
+    fn typed_receiver_resolves_the_matching_typescript_method() {
+        let index = build_index_files(&[(
+            "models.ts",
+            "class A { save(): void {} }\nclass B { save(): void {} }\nexport function caller(item: A): void { item.save(); }\n",
+        )]);
+        let caller = index.symbols.values().find(|s| s.name == "caller").unwrap();
+        let edges = index.graph.outgoing.get(&caller.id).unwrap();
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        let target = index.symbols.get(&edges[0].symbol_id).unwrap();
+        assert_eq!(target.qualified, "A.save");
+        assert_eq!(edges[0].resolution, EdgeResolution::Resolved);
+    }
+
+    #[test]
+    fn dynamic_receiver_is_explicitly_unresolved() {
+        let index = build_index_files(&[(
+            "models.py",
+            "class A:\n    def save(self):\n        pass\n\ndef caller(item):\n    item.save()\n",
+        )]);
+        let caller = index.symbols.values().find(|s| s.name == "caller").unwrap();
+        assert!(!index.graph.outgoing.contains_key(&caller.id));
+        let unresolved = index.graph.unresolved_calls.get(&caller.id).unwrap();
+        assert_eq!(unresolved.len(), 1);
+        assert_eq!(unresolved[0].name, "save");
+        assert_eq!(unresolved[0].receiver.as_deref(), Some("item"));
+        assert_eq!(unresolved[0].reason, "dynamic_receiver");
+    }
+
+    #[test]
+    fn missing_direct_target_is_explicitly_unresolved() {
+        let index = build_index_files(&[(
+            "caller.ts",
+            "export function caller(): void { missingTarget(); }\n",
+        )]);
+        let caller = index.symbols.values().find(|s| s.name == "caller").unwrap();
+        let unresolved = index.graph.unresolved_calls.get(&caller.id).unwrap();
+        assert_eq!(unresolved[0].name, "missingTarget");
+        assert_eq!(unresolved[0].reason, "no_visible_target");
+    }
+
+    #[test]
+    fn parameter_shadowing_prevents_false_call_edge() {
+        let index = build_index_files(&[(
+            "local.py",
+            "def process():\n    pass\n\ndef caller(process):\n    process()\n",
+        )]);
+        let caller = index.symbols.values().find(|s| s.name == "caller").unwrap();
+        assert!(!index.graph.outgoing.contains_key(&caller.id));
+        assert_eq!(
+            index.graph.unresolved_calls[&caller.id][0].reason,
+            "shadowed_local_binding"
+        );
+    }
+
+    #[test]
+    fn tsx_uses_tsx_grammar_and_resolves_imported_call() {
+        let index = build_index_files(&[
+            ("helper.ts", "export function helper(): void {}\n"),
+            (
+                "component.tsx",
+                "import { helper } from './helper';\nexport function Component() { return <button onClick={() => helper()}>Go</button>; }\n",
+            ),
+        ]);
+        let component = index
+            .symbols
+            .values()
+            .find(|s| s.name == "Component")
+            .unwrap();
+        let edges = index.graph.outgoing.get(&component.id).unwrap();
+        assert_eq!(edges.len(), 1, "got {edges:?}");
+        assert_eq!(
+            index.symbols.get(&edges[0].symbol_id).unwrap().name,
+            "helper"
+        );
+    }
+
+    #[test]
+    fn rust_ambiguity_is_explicitly_labeled() {
+        let index = build_index_files(&[
+            ("lib.rs", "fn process() {}\nfn root() { process(); }\n"),
+            ("other.rs", "fn process() {}\n"),
+        ]);
+        let root = index.symbols.values().find(|s| s.name == "root").unwrap();
+        let edges = index.graph.outgoing.get(&root.id).unwrap();
+        assert!(edges
+            .iter()
+            .all(|edge| edge.resolution == EdgeResolution::Ambiguous));
     }
 }

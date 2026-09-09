@@ -117,7 +117,7 @@ impl IndexMeta {
     pub fn new(project_path: &Path) -> Self {
         Self {
             project_path: project_path.display().to_string(),
-            version: 5,
+            version: 6,
             indexed_at: chrono_now(),
             file_mtimes: HashMap::new(),
             dir_mtimes: HashMap::new(),
@@ -302,6 +302,7 @@ mod tests {
                 relation: EdgeRelation::Calls,
                 evidence: "world();".to_string(),
                 confidence: 0.98,
+                resolution: crate::graph::EdgeResolution::Resolved,
             }],
         );
         index.graph.incoming.insert(
@@ -311,6 +312,17 @@ mod tests {
                 relation: EdgeRelation::Calls,
                 evidence: "world();".to_string(),
                 confidence: 0.98,
+                resolution: crate::graph::EdgeResolution::Resolved,
+            }],
+        );
+        index.graph.unresolved_calls.insert(
+            id1.clone(),
+            vec![crate::graph::UnresolvedCall {
+                name: "dynamic".to_string(),
+                receiver: None,
+                evidence: "dynamic();".to_string(),
+                confidence: 0.65,
+                reason: "no_visible_target".to_string(),
             }],
         );
 
@@ -320,6 +332,7 @@ mod tests {
         assert!(loaded.graph.built);
         assert_eq!(loaded.graph.outgoing[&id1][0].symbol_id, id2);
         assert_eq!(loaded.graph.incoming[&id2][0].symbol_id, id1);
+        assert_eq!(loaded.graph.unresolved_calls[&id1][0].name, "dynamic");
     }
 
     #[test]
@@ -352,7 +365,7 @@ mod tests {
         save_meta(&meta, &meta_path).unwrap();
         let loaded = load_meta(&meta_path).unwrap();
 
-        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.version, 6);
         assert_eq!(loaded.file_mtimes["src/foo.rs"], 1_700_000_000);
         assert_eq!(loaded.dir_mtimes["src"], 1_700_000_100);
         assert_eq!(loaded.source_file_count, 7);

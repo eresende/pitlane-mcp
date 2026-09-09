@@ -109,6 +109,14 @@ Trace a likely execution or data-flow path from a behavior question or source/si
 
 Use this for source-to-sink, config-to-effect, and shortest-path style questions.
 
+Python and TypeScript call edges are extracted from their syntax trees and resolved
+against same-file lexical targets and explicit imports (including aliases and
+namespace imports). Receiver type annotations and straightforward constructor
+assignments are used to distinguish same-name methods. Resolved and ambiguous graph
+edges carry a `resolution` field; ambiguous candidates remain `references` rather
+than `calls`. Advanced `get_symbol(include_references=true)` responses also include
+`unresolved_calls`, with the call-site evidence and a machine-readable reason.
+
 ### `analyze_impact`
 
 Estimate the blast radius of changing a symbol, file, or concept.
