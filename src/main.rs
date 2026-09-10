@@ -16,6 +16,246 @@ use serde::{Deserialize, Serialize};
 
 use pitlane_mcp::tools::watch_project::WatcherRegistry;
 
+// ── Friendly deserialization wrappers ────────────────────────────────
+//
+// rmcp deserializes tool arguments via `serde_json::from_value` and wraps
+// any serde error in `"failed to deserialize parameters: …"`. For the
+// project-path parameter this produces unhelpful messages like
+// `missing field \`path\` at line 1 column 2` that give the agent no hint
+// about accepted spellings or valid examples.
+//
+// Each wrapper type delegates `JsonSchema` to the inner request struct
+// (so rmcp still generates correct per-tool schemas) but provides a
+// custom `Deserialize` impl that checks for the project-path field first
+// and emits a friendly error when it is missing.
+
+/// Build the friendly "missing project path" error message for a tool.
+fn missing_project_path_message(canonical: &str, alias: &str, example_value: &str) -> String {
+    format!(
+        "Missing required project-path parameter. \
+         Use either `{canonical}` or `{alias}`. \
+         Example: {{ \"{canonical}\": \"{example_value}\" }}"
+    )
+}
+
+/// Create a friendly wrapper type for a request struct that requires a
+/// project-path parameter. The wrapper delegates `JsonSchema` to the inner
+/// type and provides custom deserialization that checks for the required
+/// field before delegating.
+macro_rules! friendly_request {
+    ($name:ident, Inner = $inner:ty, canonical = $canonical:literal, alias = $alias:literal, example = $example:literal) => {
+        #[derive(Debug)]
+        pub struct $name($inner);
+
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                <$inner as schemars::JsonSchema>::schema_name()
+            }
+
+            fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                <$inner as schemars::JsonSchema>::json_schema(generator)
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                // First deserialize into a serde_json::Value so we can
+                // inspect the top-level keys before full deserialization.
+                let value = serde_json::Value::deserialize(deserializer)?;
+
+                // Check that the project-path field is present
+                if let Some(obj) = value.as_object() {
+                    if !obj.contains_key($canonical) && !obj.contains_key($alias) {
+                        return Err(serde::de::Error::custom(missing_project_path_message(
+                            $canonical, $alias, $example,
+                        )));
+                    }
+                }
+
+                // Field is present — deserialize the full object,
+                // letting serde handle aliases and all other fields.
+                let inner: $inner =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok($name(inner))
+            }
+        }
+    };
+}
+
+friendly_request!(
+    FriendlyEnsureProjectReadyRequest,
+    Inner = EnsureProjectReadyRequest,
+    canonical = "path",
+    alias = "project",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyIndexProjectRequest,
+    Inner = IndexProjectRequest,
+    canonical = "path",
+    alias = "project",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlySearchSymbolsRequest,
+    Inner = SearchSymbolsRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlySearchContentRequest,
+    Inner = SearchContentRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlySearchFilesRequest,
+    Inner = SearchFilesRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyTraceExecutionPathRequest,
+    Inner = TraceExecutionPathRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyInvestigateRequest,
+    Inner = InvestigateRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyLocateCodeRequest,
+    Inner = LocateCodeRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyReadCodeUnitRequest,
+    Inner = ReadCodeUnitRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyTracePathRequest,
+    Inner = TracePathRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyAnalyzeChangesRequest,
+    Inner = AnalyzeChangesRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyAnalyzeImpactRequest,
+    Inner = AnalyzeImpactRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyNavigateCodeRequest,
+    Inner = NavigateCodeRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyGetSymbolRequest,
+    Inner = GetSymbolRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyGetFileOutlineRequest,
+    Inner = GetFileOutlineRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyGetLinesRequest,
+    Inner = GetLinesRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyFindCalleesRequest,
+    Inner = FindCalleesRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyFindCallersRequest,
+    Inner = FindCallersRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyFindUsagesRequest,
+    Inner = FindUsagesRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyWatchProjectRequest,
+    Inner = WatchProjectRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyGetIndexStatsRequest,
+    Inner = GetIndexStatsRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyDoctorRequest,
+    Inner = DoctorRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyGetIndexChangesRequest,
+    Inner = GetIndexChangesRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+friendly_request!(
+    FriendlyWaitForEmbeddingsRequest,
+    Inner = WaitForEmbeddingsRequest,
+    canonical = "project",
+    alias = "path",
+    example = "/path/to/project"
+);
+
+// ── Request structs ──────────────────────────────────────────────────
+
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EnsureProjectReadyRequest {
     /// Absolute or relative path to the project root. The MCP field `project` is accepted as an alias.
@@ -577,7 +817,7 @@ impl PitlaneMcp {
     )]
     async fn index_project(
         &self,
-        Parameters(req): Parameters<IndexProjectRequest>,
+        Parameters(FriendlyIndexProjectRequest(req)): Parameters<FriendlyIndexProjectRequest>,
         peer: Peer<RoleServer>,
         meta: RequestMetaObject,
     ) -> String {
@@ -608,7 +848,9 @@ impl PitlaneMcp {
     )]
     async fn ensure_project_ready(
         &self,
-        Parameters(req): Parameters<EnsureProjectReadyRequest>,
+        Parameters(FriendlyEnsureProjectReadyRequest(req)): Parameters<
+            FriendlyEnsureProjectReadyRequest,
+        >,
         peer: Peer<RoleServer>,
         meta: RequestMetaObject,
     ) -> String {
@@ -641,7 +883,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn search_symbols(&self, Parameters(req): Parameters<SearchSymbolsRequest>) -> String {
+    async fn search_symbols(
+        &self,
+        Parameters(FriendlySearchSymbolsRequest(req)): Parameters<FriendlySearchSymbolsRequest>,
+    ) -> String {
         let params = tools::search_symbols::SearchSymbolsParams {
             project: req.project,
             query: req.query,
@@ -669,7 +914,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn search_content(&self, Parameters(req): Parameters<SearchContentRequest>) -> String {
+    async fn search_content(
+        &self,
+        Parameters(FriendlySearchContentRequest(req)): Parameters<FriendlySearchContentRequest>,
+    ) -> String {
         let params = tools::search_content::SearchContentParams {
             project: req.project,
             query: req.query,
@@ -698,7 +946,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn search_files(&self, Parameters(req): Parameters<SearchFilesRequest>) -> String {
+    async fn search_files(
+        &self,
+        Parameters(FriendlySearchFilesRequest(req)): Parameters<FriendlySearchFilesRequest>,
+    ) -> String {
         let params = tools::search_files::SearchFilesParams {
             project: req.project,
             query: req.query,
@@ -724,7 +975,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn investigate(&self, Parameters(req): Parameters<InvestigateRequest>) -> String {
+    async fn investigate(
+        &self,
+        Parameters(FriendlyInvestigateRequest(req)): Parameters<FriendlyInvestigateRequest>,
+    ) -> String {
         let params = tools::investigate::InvestigateParams {
             project: req.project,
             query: req.query,
@@ -749,7 +1003,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn locate_code(&self, Parameters(req): Parameters<LocateCodeRequest>) -> String {
+    async fn locate_code(
+        &self,
+        Parameters(FriendlyLocateCodeRequest(req)): Parameters<FriendlyLocateCodeRequest>,
+    ) -> String {
         let params = tools::orchestrator::LocateCodeParams {
             project: req.project,
             query: req.query,
@@ -775,7 +1032,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn read_code_unit(&self, Parameters(req): Parameters<ReadCodeUnitRequest>) -> String {
+    async fn read_code_unit(
+        &self,
+        Parameters(FriendlyReadCodeUnitRequest(req)): Parameters<FriendlyReadCodeUnitRequest>,
+    ) -> String {
         let params = tools::orchestrator::ReadCodeUnitParams {
             project: req.project,
             symbol_id: req.symbol_id,
@@ -801,7 +1061,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn trace_path(&self, Parameters(req): Parameters<TracePathRequest>) -> String {
+    async fn trace_path(
+        &self,
+        Parameters(FriendlyTracePathRequest(req)): Parameters<FriendlyTracePathRequest>,
+    ) -> String {
         let params = tools::orchestrator::TracePathParams {
             project: req.project,
             query: req.query,
@@ -828,7 +1091,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn analyze_impact(&self, Parameters(req): Parameters<AnalyzeImpactRequest>) -> String {
+    async fn analyze_impact(
+        &self,
+        Parameters(FriendlyAnalyzeImpactRequest(req)): Parameters<FriendlyAnalyzeImpactRequest>,
+    ) -> String {
         let params = tools::orchestrator::AnalyzeImpactParams {
             project: req.project,
             query: req.query,
@@ -854,7 +1120,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn analyze_changes(&self, Parameters(req): Parameters<AnalyzeChangesRequest>) -> String {
+    async fn analyze_changes(
+        &self,
+        Parameters(FriendlyAnalyzeChangesRequest(req)): Parameters<FriendlyAnalyzeChangesRequest>,
+    ) -> String {
         match tools::analyze_changes::analyze_changes(
             tools::analyze_changes::AnalyzeChangesParams {
                 project: req.project,
@@ -881,7 +1150,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn navigate_code(&self, Parameters(req): Parameters<NavigateCodeRequest>) -> String {
+    async fn navigate_code(
+        &self,
+        Parameters(FriendlyNavigateCodeRequest(req)): Parameters<FriendlyNavigateCodeRequest>,
+    ) -> String {
         let params = tools::orchestrator::NavigateCodeParams {
             project: req.project,
             query: req.query,
@@ -920,7 +1192,9 @@ impl PitlaneMcp {
     )]
     async fn trace_execution_path(
         &self,
-        Parameters(req): Parameters<TraceExecutionPathRequest>,
+        Parameters(FriendlyTraceExecutionPathRequest(req)): Parameters<
+            FriendlyTraceExecutionPathRequest,
+        >,
     ) -> String {
         let params = tools::trace_execution_path::TraceExecutionPathParams {
             project: req.project,
@@ -949,7 +1223,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn get_symbol(&self, Parameters(req): Parameters<GetSymbolRequest>) -> String {
+    async fn get_symbol(
+        &self,
+        Parameters(FriendlyGetSymbolRequest(req)): Parameters<FriendlyGetSymbolRequest>,
+    ) -> String {
         let params = tools::get_symbol::GetSymbolParams {
             project: req.project,
             symbol_id: req.symbol_id,
@@ -973,7 +1250,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn get_file_outline(&self, Parameters(req): Parameters<GetFileOutlineRequest>) -> String {
+    async fn get_file_outline(
+        &self,
+        Parameters(FriendlyGetFileOutlineRequest(req)): Parameters<FriendlyGetFileOutlineRequest>,
+    ) -> String {
         let params = tools::get_file_outline::GetFileOutlineParams {
             project: req.project,
             file_path: req.file_path,
@@ -994,7 +1274,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn get_lines(&self, Parameters(req): Parameters<GetLinesRequest>) -> String {
+    async fn get_lines(
+        &self,
+        Parameters(FriendlyGetLinesRequest(req)): Parameters<FriendlyGetLinesRequest>,
+    ) -> String {
         let params = tools::get_lines::GetLinesParams {
             project: req.project,
             file_path: req.file_path,
@@ -1044,7 +1327,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn find_callees(&self, Parameters(req): Parameters<FindCalleesRequest>) -> String {
+    async fn find_callees(
+        &self,
+        Parameters(FriendlyFindCalleesRequest(req)): Parameters<FriendlyFindCalleesRequest>,
+    ) -> String {
         let params = tools::find_callees::FindCalleesParams {
             project: req.project,
             symbol_id: req.symbol_id,
@@ -1067,7 +1353,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn find_callers(&self, Parameters(req): Parameters<FindCallersRequest>) -> String {
+    async fn find_callers(
+        &self,
+        Parameters(FriendlyFindCallersRequest(req)): Parameters<FriendlyFindCallersRequest>,
+    ) -> String {
         let params = tools::find_callers::FindCallersParams {
             project: req.project,
             symbol_id: req.symbol_id,
@@ -1091,7 +1380,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn find_usages(&self, Parameters(req): Parameters<FindUsagesRequest>) -> String {
+    async fn find_usages(
+        &self,
+        Parameters(FriendlyFindUsagesRequest(req)): Parameters<FriendlyFindUsagesRequest>,
+    ) -> String {
         let params = tools::find_usages::FindUsagesParams {
             project: req.project,
             symbol_id: req.symbol_id,
@@ -1115,7 +1407,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn watch_project(&self, Parameters(req): Parameters<WatchProjectRequest>) -> String {
+    async fn watch_project(
+        &self,
+        Parameters(FriendlyWatchProjectRequest(req)): Parameters<FriendlyWatchProjectRequest>,
+    ) -> String {
         let params = tools::watch_project::WatchProjectParams {
             project: req.project,
             stop: req.stop,
@@ -1138,7 +1433,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn get_index_stats(&self, Parameters(req): Parameters<GetIndexStatsRequest>) -> String {
+    async fn get_index_stats(
+        &self,
+        Parameters(FriendlyGetIndexStatsRequest(req)): Parameters<FriendlyGetIndexStatsRequest>,
+    ) -> String {
         let params = tools::get_index_stats::GetIndexStatsParams {
             project: req.project,
         };
@@ -1160,7 +1458,7 @@ impl PitlaneMcp {
     )]
     async fn get_index_changes(
         &self,
-        Parameters(req): Parameters<GetIndexChangesRequest>,
+        Parameters(FriendlyGetIndexChangesRequest(req)): Parameters<FriendlyGetIndexChangesRequest>,
     ) -> String {
         let params = tools::index_changes::GetIndexChangesParams {
             project: req.project,
@@ -1183,7 +1481,10 @@ impl PitlaneMcp {
             open_world_hint = false
         )
     )]
-    async fn doctor(&self, Parameters(req): Parameters<DoctorRequest>) -> String {
+    async fn doctor(
+        &self,
+        Parameters(FriendlyDoctorRequest(req)): Parameters<FriendlyDoctorRequest>,
+    ) -> String {
         let params = tools::doctor::DoctorParams {
             project: req.project,
             repair: req.repair,
@@ -1226,7 +1527,9 @@ impl PitlaneMcp {
     )]
     async fn wait_for_embeddings(
         &self,
-        Parameters(req): Parameters<WaitForEmbeddingsRequest>,
+        Parameters(FriendlyWaitForEmbeddingsRequest(req)): Parameters<
+            FriendlyWaitForEmbeddingsRequest,
+        >,
         peer: Peer<RoleServer>,
         meta: RequestMetaObject,
     ) -> String {
@@ -1515,5 +1818,103 @@ mod tests {
         .expect("get_project_outline deserializes");
         assert_eq!(outline.project, "/tmp/demo");
         assert_eq!(outline.path.as_deref(), Some("kernel/sched"));
+    }
+
+    // ── Friendly deserialization error tests ─────────────────────────
+
+    /// Helper: deserialize a JSON value into a friendly wrapper and return
+    /// the error message string (or None on success).
+    fn friendly_error<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Option<String> {
+        serde_json::from_value::<T>(value)
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    #[test]
+    fn friendly_ensure_project_ready_missing_path_names_both_spellings() {
+        let err = friendly_error::<FriendlyEnsureProjectReadyRequest>(serde_json::json!({}))
+            .expect("empty object should fail");
+        assert!(
+            err.contains("`path`"),
+            "error should name canonical field 'path': {err}"
+        );
+        assert!(
+            err.contains("`project`"),
+            "error should name alias field 'project': {err}"
+        );
+        assert!(
+            !err.contains("line 1 column"),
+            "error must not contain serde line/column noise: {err}"
+        );
+    }
+
+    #[test]
+    fn friendly_search_symbols_missing_project_names_both_spellings() {
+        // search_symbols requires both `project` and `query`, but our wrapper
+        // only checks the project-path field. Missing `query` is a different
+        // error.
+        let err =
+            friendly_error::<FriendlySearchSymbolsRequest>(serde_json::json!({ "query": "foo" }))
+                .expect("object without project should fail");
+        assert!(
+            err.contains("`project`"),
+            "error should name canonical field 'project': {err}"
+        );
+        assert!(
+            err.contains("`path`"),
+            "error should name alias field 'path': {err}"
+        );
+        assert!(
+            !err.contains("line 1 column"),
+            "error must not contain serde line/column noise: {err}"
+        );
+    }
+
+    #[test]
+    fn friendly_error_includes_example() {
+        let err = friendly_error::<FriendlyDoctorRequest>(serde_json::json!({}))
+            .expect("empty object should fail");
+        assert!(
+            err.contains("Example:"),
+            "error should include an example: {err}"
+        );
+    }
+
+    #[test]
+    fn friendly_wrapper_succeeds_when_project_present() {
+        // Verify that the wrapper doesn't reject valid inputs.
+        let req: FriendlyGetIndexStatsRequest = serde_json::from_value(serde_json::json!({
+            "project": "/tmp/demo"
+        }))
+        .expect("valid project should deserialize");
+        assert_eq!(req.0.project, "/tmp/demo");
+    }
+
+    #[test]
+    fn friendly_wrapper_succeeds_when_alias_present() {
+        // Verify that the `path` alias also works through the wrapper.
+        let req: FriendlyGetIndexStatsRequest = serde_json::from_value(serde_json::json!({
+            "path": "/tmp/demo"
+        }))
+        .expect("alias 'path' should deserialize");
+        assert_eq!(req.0.project, "/tmp/demo");
+    }
+
+    #[test]
+    fn friendly_wrapper_ensure_project_ready_path_canonical() {
+        let req: FriendlyEnsureProjectReadyRequest = serde_json::from_value(serde_json::json!({
+            "path": "/tmp/demo"
+        }))
+        .expect("canonical 'path' should deserialize");
+        assert_eq!(req.0.path, "/tmp/demo");
+    }
+
+    #[test]
+    fn friendly_wrapper_ensure_project_ready_project_alias() {
+        let req: FriendlyEnsureProjectReadyRequest = serde_json::from_value(serde_json::json!({
+            "project": "/tmp/demo"
+        }))
+        .expect("alias 'project' should deserialize");
+        assert_eq!(req.0.path, "/tmp/demo");
     }
 }

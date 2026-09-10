@@ -5,31 +5,14 @@ use std::{
 
 use serde_json::{json, Value};
 
-fn tools_list_result(protocol_version: &str) -> Value {
-    let initialize = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": protocol_version,
-            "capabilities": {},
-            "clientInfo": {
-                "name": "rmcp-protocol-test",
-                "version": "1"
-            }
-        }
-    });
-    let initialized = json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/initialized"
-    });
-    let list_tools = json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list",
-        "params": {}
-    });
-    let input = format!("{initialize}\n{initialized}\n{list_tools}\n");
+/// Send a sequence of NDJSON MCP messages and return all JSON responses.
+fn send_messages(messages: &[Value]) -> Vec<Value> {
+    let input = messages
+        .iter()
+        .map(|m| m.to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_pitlane-mcp"))
         .env("RUST_LOG", "error")
@@ -56,6 +39,36 @@ fn tools_list_result(protocol_version: &str) -> Value {
         .expect("server output is UTF-8")
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect()
+}
+
+fn tools_list_result(protocol_version: &str) -> Value {
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": protocol_version,
+            "capabilities": {},
+            "clientInfo": {
+                "name": "rmcp-protocol-test",
+                "version": "1"
+            }
+        }
+    });
+    let initialized = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    let list_tools = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/list",
+        "params": {}
+    });
+
+    send_messages(&[initialize, initialized, list_tools])
+        .into_iter()
         .find(|message| message.get("id") == Some(&json!(2)))
         .and_then(|message| message.get("result").cloned())
         .expect("tools/list response")
@@ -146,4 +159,124 @@ fn investigate_exposes_budget_parameters() {
     let required = tool["inputSchema"]["required"].as_array().unwrap();
     assert!(!required.contains(&json!("token_budget")));
     assert!(!required.contains(&json!("include_tests")));
+}
+
+/// End-to-end: calling get_index_stats without the project-path parameter
+/// returns a friendly error that names both accepted spellings and does not
+/// include serde's "at line 1 column N" noise.
+#[test]
+fn missing_project_path_returns_friendly_error() {
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2026-07-28",
+            "capabilities": {},
+            "clientInfo": { "name": "rmcp-protocol-test", "version": "1" }
+        }
+    });
+    let initialized = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    // Call get_index_stats with an empty arguments object (missing project).
+    let call_tool = json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "tools/call",
+        "params": {
+            "name": "get_index_stats",
+            "arguments": {}
+        }
+    });
+
+    let responses = send_messages(&[initialize, initialized, call_tool]);
+    let tool_response = responses
+        .iter()
+        .find(|m| m.get("id") == Some(&json!(3)))
+        .expect("tools/call response");
+
+    // The response should be an error result (isError: true).
+    let content = &tool_response["result"]["content"][0];
+    let text = content["text"]
+        .as_str()
+        .expect("error result includes text content");
+
+    // Acceptance criteria from issue #110:
+    // 1. Error names the parameter and both accepted spellings.
+    assert!(
+        text.contains("`project`") || text.contains("'project'"),
+        "error should name canonical field 'project': {text}"
+    );
+    assert!(
+        text.contains("`path`") || text.contains("'path'"),
+        "error should name alias field 'path': {text}"
+    );
+
+    // 2. No serde line/column noise.
+    assert!(
+        !text.contains("line 1 column"),
+        "error must not contain serde line/column noise: {text}"
+    );
+
+    // 3. Includes an example.
+    assert!(
+        text.contains("Example:"),
+        "error should include a valid example: {text}"
+    );
+}
+
+/// End-to-end: calling ensure_project_ready without the path parameter
+/// returns a friendly error (canonical field is `path` for this tool).
+#[test]
+fn missing_path_on_ensure_project_ready_returns_friendly_error() {
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2026-07-28",
+            "capabilities": {},
+            "clientInfo": { "name": "rmcp-protocol-test", "version": "1" }
+        }
+    });
+    let initialized = json!({
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+    });
+    let call_tool = json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "ensure_project_ready",
+            "arguments": {}
+        }
+    });
+
+    let responses = send_messages(&[initialize, initialized, call_tool]);
+    let tool_response = responses
+        .iter()
+        .find(|m| m.get("id") == Some(&json!(4)))
+        .expect("tools/call response");
+
+    let content = &tool_response["result"]["content"][0];
+    let text = content["text"]
+        .as_str()
+        .expect("error result includes text content");
+
+    // ensure_project_ready uses `path` as canonical, `project` as alias.
+    assert!(
+        text.contains("`path`") || text.contains("'path'"),
+        "error should name canonical field 'path': {text}"
+    );
+    assert!(
+        text.contains("`project`") || text.contains("'project'"),
+        "error should name alias field 'project': {text}"
+    );
+    assert!(
+        !text.contains("line 1 column"),
+        "error must not contain serde line/column noise: {text}"
+    );
 }
