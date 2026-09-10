@@ -38,6 +38,58 @@ that only exists in your working tree).
    sections, validation, compare link).
 4. `cargo publish` to crates.io. Note the quirk above if you keep building
    locally afterwards.
+5. Smoke-test the published artifact and refresh your local install — see
+   [Post-release verification](#post-release-verification).
+
+## Post-release verification
+
+The release workflow builds from tagged source on five platforms, but a quick
+check of what agents will actually download is worth one minute per release:
+
+1. Fetch the pre-built artifact for your platform and unpack it (plain `curl`
+   needs no auth; `gh release download vX.Y.Z --pattern 'pitlane-mcp-<os>-<arch>'`
+   also works, but only from inside a checkout of this repo):
+
+   ```console
+   $ mkdir /tmp/pitlane-check && cd /tmp/pitlane-check
+   $ curl -fsSL -O https://github.com/eresende/pitlane-mcp/releases/download/vX.Y.Z/pitlane-mcp-linux-x86_64.tar.gz
+   $ tar xzf pitlane-mcp-*.tar.gz
+   ```
+
+2. The artifact ships both `pitlane` and `pitlane-mcp`. Check the CLI version:
+
+   ```console
+   $ ./pitlane --version
+   pitlane vX.Y.Z
+   ```
+
+3. Probe the MCP server over stdio: an initialize round-trip plus one
+   `tools/call` exercising a behavior new in this release (for v0.15+, omitting
+   project-path must return the friendly error, not raw serde noise):
+
+   ```console
+   $ printf '%s\n' \
+       '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"check","version":"0"}}}' \
+       '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+       '{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"locate_code","arguments":{}}}' | ./pitlane-mcp
+   ```
+
+   The `id: 1` response completes the handshake, and for v0.15+ the `id: 9`
+   result carries `isError: true` with "Missing required project-path parameter.
+   Use either 'project' or 'path'. Example...".
+
+4. Refresh the local install from source so `~/.cargo/bin` — which other agent
+   harnesses reference directly — runs what you just shipped, and confirm it:
+
+   ```console
+   $ cargo install --path . --locked
+   $ command -v pitlane && pitlane --version
+   /home/eresende/.cargo/bin/pitlane
+   pitlane vX.Y.Z
+   ```
+
+Already-running MCP server processes keep serving the previous build until they
+are restarted; only new launches pick up the fresh binary.
 
 ## Tests
 
