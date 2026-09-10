@@ -3,6 +3,18 @@
 This document describes the MCP tools exposed by `pitlane-mcp`.
 
 > **Project path parameter:** every tool accepts both `path` and `project` for the project root, regardless of which name its schema lists. Exception: `get_project_outline`, where `path` is already used as the subdirectory filter, so only `project` names the project root.
+>
+> If a tool is called without a project path, the server returns an actionable error naming both accepted spellings and showing an example, rather than a raw serde message. For example, calling a tool with `{}` returns:
+>
+> ```
+> Missing required project-path parameter. Use either `project` or `path`. Example: { "project": "/path/to/project" }
+> ```
+>
+> For `get_project_outline` (canonical only) the message explains the `path` caveat:
+>
+> ```
+> Missing required `project` parameter. Note: for this tool `path` is the subdirectory filter, not a project-root alias. Example: { "project": "/path/to/project" }
+> ```
 
 ## Public Tier
 
