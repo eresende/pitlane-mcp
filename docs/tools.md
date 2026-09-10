@@ -2,6 +2,8 @@
 
 This document describes the MCP tools exposed by `pitlane-mcp`.
 
+> **Project path parameter:** every tool accepts both `path` and `project` for the project root, regardless of which name its schema lists. Exception: `get_project_outline`, where `path` is already used as the subdirectory filter, so only `project` names the project root.
+
 ## Public Tier
 
 These tools are visible by default and are the recommended surface for AI agents.

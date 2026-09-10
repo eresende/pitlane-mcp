@@ -37,7 +37,8 @@ pub struct EnsureProjectReadyRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IndexProjectRequest {
-    /// Absolute or relative path to the project root
+    /// Absolute or relative path to the project root. The MCP field `project` is accepted as an alias.
+    #[serde(alias = "project")]
     pub path: String,
     /// Glob patterns to exclude. Built-in defaults apply, and PITLANE_EXCLUDE_DIRS adds process-wide directory-name excludes.
     pub exclude: Option<Vec<String>>,
@@ -50,7 +51,8 @@ pub struct IndexProjectRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SearchSymbolsRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Symbol name or intent description. For behavior/path questions, prefer an intent phrase
     /// and mode="semantic". For known names, use mode="exact" or mode="bm25".
@@ -71,7 +73,8 @@ pub struct SearchSymbolsRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SearchContentRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Literal text or regex pattern to search for inside source, Markdown, JSON, YAML, or TOML files
     pub query: String,
@@ -95,7 +98,8 @@ pub struct SearchContentRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SearchFilesRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// File name, path fragment, or glob pattern to search for
     pub query: String,
@@ -113,7 +117,8 @@ pub struct SearchFilesRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TraceExecutionPathRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Behavior or execution-path intent to trace, e.g. "main regex search execution path"
     pub query: String,
@@ -133,7 +138,8 @@ pub struct TraceExecutionPathRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct InvestigateRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// The question to investigate — can be a behavior question, subsystem query, or execution-path question.
     pub query: String,
@@ -149,7 +155,8 @@ pub struct InvestigateRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct LocateCodeRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Code lookup intent or code-path fragment. The server routes this to the most likely discovery primitive.
     pub query: String,
@@ -167,7 +174,8 @@ pub struct LocateCodeRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ReadCodeUnitRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Stable symbol ID from locate_code/search_symbols.
     pub symbol_id: Option<String>,
@@ -185,7 +193,8 @@ pub struct ReadCodeUnitRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TracePathRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Flow or execution-path intent to trace.
     pub query: String,
@@ -205,7 +214,8 @@ pub struct TracePathRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AnalyzeChangesRequest {
-    /// Git project directory; a cached index is not required.
+    /// Git project directory; a cached index is not required. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Commit, branch or tag to compare against HEAD (not a merge-base comparison).
     pub base_ref: String,
@@ -219,7 +229,8 @@ pub struct AnalyzeChangesRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AnalyzeImpactRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Symbol, file, or concept describing the change target.
     pub query: Option<String>,
@@ -237,7 +248,8 @@ pub struct AnalyzeImpactRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NavigateCodeRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// High-level navigation intent or question.
     pub query: String,
@@ -277,7 +289,8 @@ pub struct NavigateCodeRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GetSymbolRequest {
-    /// Project path
+    /// Project path. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Stable symbol ID from search_symbols or get_file_outline
     pub symbol_id: String,
@@ -289,7 +302,8 @@ pub struct GetSymbolRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GetFileOutlineRequest {
-    /// Project path
+    /// Project path. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Path to the file, relative to project root
     pub file_path: String,
@@ -297,7 +311,8 @@ pub struct GetFileOutlineRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetLinesRequest {
-    /// Project path (used to resolve relative file paths)
+    /// Project path (used to resolve relative file paths). The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// File path, relative to project root or absolute
     pub file_path: String,
@@ -309,7 +324,7 @@ pub struct GetLinesRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct GetProjectOutlineRequest {
-    /// Project path
+    /// Project path. No `path` alias here: this tool's own `path` field is the subdirectory filter.
     pub project: String,
     /// Directory depth to show (default: 2)
     pub depth: Option<u32>,
@@ -323,7 +338,8 @@ pub struct GetProjectOutlineRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FindCalleesRequest {
-    /// Project path
+    /// Project path. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Symbol to find direct outgoing references for
     pub symbol_id: String,
@@ -335,7 +351,8 @@ pub struct FindCalleesRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FindCallersRequest {
-    /// Project path
+    /// Project path. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Symbol to find direct incoming references for
     pub symbol_id: String,
@@ -349,7 +366,8 @@ pub struct FindCallersRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FindUsagesRequest {
-    /// Project path
+    /// Project path. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Symbol to find usages for
     pub symbol_id: String,
@@ -363,7 +381,8 @@ pub struct FindUsagesRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WatchProjectRequest {
-    /// Project path to watch
+    /// Project path to watch. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Pass true to stop an existing watcher (default: false)
     pub stop: Option<bool>,
@@ -373,13 +392,15 @@ pub struct WatchProjectRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetIndexStatsRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DoctorRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Apply safe repairs: force re-index when stale, re-embed when incomplete (default: false)
     pub repair: Option<bool>,
@@ -387,7 +408,8 @@ pub struct DoctorRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetIndexChangesRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Return revisions strictly newer than this index revision
     pub since_revision: Option<u64>,
@@ -397,13 +419,15 @@ pub struct GetIndexChangesRequest {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct GetUsageStatsRequest {
-    /// Filter to a single project path (default: return all projects + global total)
+    /// Filter to a single project path (default: return all projects + global total). The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct WaitForEmbeddingsRequest {
-    /// Project path previously indexed
+    /// Project path previously indexed. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
     pub project: String,
     /// Poll interval in milliseconds (default: 2000)
     pub poll_interval_ms: Option<u64>,
@@ -1344,5 +1368,152 @@ mod tests {
             Some(value) => std::env::set_var("PITLANE_MCP_TOOL_TIER", value),
             None => std::env::remove_var("PITLANE_MCP_TOOL_TIER"),
         }
+    }
+
+    fn swap_project_key(value: serde_json::Value, from: &str, to: &str) -> serde_json::Value {
+        let mut object = value
+            .as_object()
+            .cloned()
+            .expect("test payload is a flat JSON object");
+        let moved = object
+            .remove(from)
+            .unwrap_or_else(|| panic!("`{from}` key missing from test payload"));
+        object.insert(to.to_string(), moved);
+        serde_json::Value::Object(object)
+    }
+
+    macro_rules! assert_project_alias {
+        ($ty:ident, $json:expr) => {{
+            let canonical = serde_json::from_value::<$ty>($json.clone())
+                .unwrap_or_else(|err| panic!("{err}: canonical `project` key must deserialize"));
+            let aliased =
+                serde_json::from_value::<$ty>(swap_project_key($json.clone(), "project", "path"))
+                    .unwrap_or_else(|err| panic!("{err}: alias `path` key must deserialize"));
+            assert_eq!(canonical.project, aliased.project);
+        }};
+    }
+
+    #[test]
+    fn all_tool_requests_accept_path_and_project_aliases() {
+        // ensure_project_ready and index_project: canonical `path`, alias `project`.
+        for (label, value) in [
+            ("path", serde_json::json!({ "path": "/tmp/demo" })),
+            ("project", serde_json::json!({ "project": "/tmp/demo" })),
+        ] {
+            assert_eq!(
+                serde_json::from_value::<EnsureProjectReadyRequest>(value.clone())
+                    .unwrap()
+                    .path,
+                "/tmp/demo",
+                "ensure_project_ready should accept `{label}`"
+            );
+            assert_eq!(
+                serde_json::from_value::<IndexProjectRequest>(value.clone())
+                    .unwrap()
+                    .path,
+                "/tmp/demo",
+                "index_project should accept `{label}`"
+            );
+        }
+
+        // Every other tool: canonical `project`, alias `path`.
+        assert_project_alias!(
+            SearchSymbolsRequest,
+            serde_json::json!({ "project": "/tmp/demo", "query": "q" })
+        );
+        assert_project_alias!(
+            SearchContentRequest,
+            serde_json::json!({ "project": "/tmp/demo", "query": "q" })
+        );
+        assert_project_alias!(
+            SearchFilesRequest,
+            serde_json::json!({ "project": "/tmp/demo", "query": "main.rs" })
+        );
+        assert_project_alias!(
+            TraceExecutionPathRequest,
+            serde_json::json!({ "project": "/tmp/demo", "query": "q" })
+        );
+        assert_project_alias!(
+            InvestigateRequest,
+            serde_json::json!({ "project": "/tmp/demo", "query": "q" })
+        );
+        assert_project_alias!(
+            LocateCodeRequest,
+            serde_json::json!({ "project": "/tmp/demo", "query": "q" })
+        );
+        assert_project_alias!(
+            ReadCodeUnitRequest,
+            serde_json::json!({ "project": "/tmp/demo" })
+        );
+        assert_project_alias!(
+            TracePathRequest,
+            serde_json::json!({ "project": "/tmp/demo", "query": "q" })
+        );
+        assert_project_alias!(
+            AnalyzeChangesRequest,
+            serde_json::json!({ "project": "/tmp/demo", "base_ref": "main" })
+        );
+        assert_project_alias!(
+            AnalyzeImpactRequest,
+            serde_json::json!({ "project": "/tmp/demo" })
+        );
+        assert_project_alias!(
+            NavigateCodeRequest,
+            serde_json::json!({ "project": "/tmp/demo", "query": "q" })
+        );
+        assert_project_alias!(
+            GetSymbolRequest,
+            serde_json::json!({ "project": "/tmp/demo", "symbol_id": "sym" })
+        );
+        assert_project_alias!(
+            GetFileOutlineRequest,
+            serde_json::json!({ "project": "/tmp/demo", "file_path": "src/main.rs" })
+        );
+        assert_project_alias!(
+            GetLinesRequest,
+            serde_json::json!({ "project": "/tmp/demo", "file_path": "src/main.rs", "line_start": 1, "line_end": 10 })
+        );
+        assert_project_alias!(
+            FindCalleesRequest,
+            serde_json::json!({ "project": "/tmp/demo", "symbol_id": "sym" })
+        );
+        assert_project_alias!(
+            FindCallersRequest,
+            serde_json::json!({ "project": "/tmp/demo", "symbol_id": "sym" })
+        );
+        assert_project_alias!(
+            FindUsagesRequest,
+            serde_json::json!({ "project": "/tmp/demo", "symbol_id": "sym" })
+        );
+        assert_project_alias!(
+            WatchProjectRequest,
+            serde_json::json!({ "project": "/tmp/demo" })
+        );
+        assert_project_alias!(
+            GetIndexStatsRequest,
+            serde_json::json!({ "project": "/tmp/demo" })
+        );
+        assert_project_alias!(DoctorRequest, serde_json::json!({ "project": "/tmp/demo" }));
+        assert_project_alias!(
+            GetIndexChangesRequest,
+            serde_json::json!({ "project": "/tmp/demo" })
+        );
+        assert_project_alias!(
+            GetUsageStatsRequest,
+            serde_json::json!({ "project": "/tmp/demo" })
+        );
+        assert_project_alias!(
+            WaitForEmbeddingsRequest,
+            serde_json::json!({ "project": "/tmp/demo" })
+        );
+
+        // get_project_outline keeps `path` as its subdirectory filter, so no alias is added.
+        let outline = serde_json::from_value::<GetProjectOutlineRequest>(serde_json::json!({
+            "project": "/tmp/demo",
+            "path": "kernel/sched"
+        }))
+        .expect("get_project_outline deserializes");
+        assert_eq!(outline.project, "/tmp/demo");
+        assert_eq!(outline.path.as_deref(), Some("kernel/sched"));
     }
 }
