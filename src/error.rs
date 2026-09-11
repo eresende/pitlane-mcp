@@ -26,6 +26,8 @@ pub enum ToolError {
     IndexingInProgress { project: String },
     /// The requested path is outside the configured allowed roots or project root.
     AccessDenied { path: String },
+    /// The requested knowledge document is not in the knowledge index.
+    DocumentNotFound { path: String },
     /// Catch-all for unexpected I/O or internal failures.
     Internal { message: String },
 }
@@ -39,6 +41,7 @@ impl ToolError {
             ToolError::FileLimitExceeded { .. } => "FILE_LIMIT_EXCEEDED",
             ToolError::IndexingInProgress { .. } => "INDEXING_IN_PROGRESS",
             ToolError::AccessDenied { .. } => "ACCESS_DENIED",
+            ToolError::DocumentNotFound { .. } => "DOCUMENT_NOT_FOUND",
             ToolError::Internal { .. } => "INTERNAL_ERROR",
         }
     }
@@ -60,6 +63,9 @@ impl ToolError {
             }
             ToolError::AccessDenied { .. } => {
                 "Check PITLANE_ALLOWED_ROOTS and keep file paths inside the indexed project root."
+            }
+            ToolError::DocumentNotFound { .. } => {
+                "Use search_knowledge to discover indexed documents and their section ids; only .md/.markdown files inside the project that are not excluded are indexed."
             }
             ToolError::Internal { .. } => "Check the project path and try again.",
         }
@@ -103,6 +109,10 @@ impl std::fmt::Display for ToolError {
                 f,
                 "Access to '{}' is denied by the current path policy.",
                 path
+            ),
+            ToolError::DocumentNotFound { path } => write!(
+                f,
+                "Knowledge document '{path}' is not in the knowledge index."
             ),
             ToolError::Internal { message } => write!(f, "{}", message),
         }
@@ -160,6 +170,16 @@ mod tests {
         assert_eq!(e.code(), "ACCESS_DENIED");
         assert!(e.hint().contains("PITLANE_ALLOWED_ROOTS"));
         assert!(e.to_string().contains("/tmp/secret.rs"));
+    }
+
+    #[test]
+    fn test_document_not_found_code_and_hint() {
+        let e = ToolError::DocumentNotFound {
+            path: "docs/gone.md".to_string(),
+        };
+        assert_eq!(e.code(), "DOCUMENT_NOT_FOUND");
+        assert!(e.hint().contains("search_knowledge"));
+        assert!(e.to_string().contains("docs/gone.md"));
     }
 
     #[test]
@@ -234,6 +254,9 @@ mod tests {
             },
             ToolError::AccessDenied {
                 path: "/tmp/blocked".to_string(),
+            },
+            ToolError::DocumentNotFound {
+                path: "docs/gone.md".to_string(),
             },
             ToolError::Internal {
                 message: "oops".to_string(),

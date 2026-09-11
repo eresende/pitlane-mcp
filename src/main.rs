@@ -172,6 +172,7 @@ project_field!(
     FindUsagesRequest => canonical = "project", alias = "path";
     WatchProjectRequest => canonical = "project", alias = "path";
     SearchKnowledgeRequest => canonical = "project", alias = "path";
+    ReadKnowledgeDocumentRequest => canonical = "project", alias = "path";
     GetIndexStatsRequest => canonical = "project", alias = "path";
     DoctorRequest => canonical = "project", alias = "path";
     GetIndexChangesRequest => canonical = "project", alias = "path";
@@ -234,6 +235,17 @@ pub struct SearchKnowledgeRequest {
     pub min_trust: Option<String>,
     /// Maximum number of sections to return (default 8, max 50).
     pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReadKnowledgeDocumentRequest {
+    /// Path to an indexed project. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
+    pub project: String,
+    /// Project-relative Markdown path of the document, as returned by search_knowledge (`file_path`), e.g. "docs/runbooks/retries.md".
+    pub document: String,
+    /// Optional section to read instead of the whole document: a `sections[].section_id` slug (e.g. "retry-policy"), "preamble", or a full section id ("knowledge:docs/x.md#retry-policy").
+    pub section: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -636,6 +648,7 @@ const DEFAULT_PUBLIC_TOOL_NAMES: &[&str] = &[
     "doctor",
     "search_content",
     "search_knowledge",
+    "read_knowledge_document",
 ];
 
 const ADVANCED_TOOL_NAMES: &[&str] = &[
@@ -1028,7 +1041,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Search the project's Markdown knowledge base (docs/README/runbooks) by heading and content with lexical + semantic ranking when embeddings exist; OKF metadata (type/status/trust tier) can be used for filtering. Prefer this for documentation questions; use read_code_unit on a result to open the full section.",
+        description = "Search the project's Markdown knowledge base (docs/README/runbooks) by heading and content with lexical + semantic ranking when embeddings exist; OKF metadata (type/status/trust tier) can be used for filtering. Prefer this for documentation questions; use read_knowledge_document on a result to open the full document or section.",
         meta = tool_meta("search docs documentation markdown knowledge readme runbook"),
         annotations(
             read_only_hint = true,
@@ -1053,6 +1066,31 @@ impl PitlaneMcp {
             embed_config: self.embed_config.clone(),
         };
         match tools::search_knowledge::search_knowledge(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Read the full source Markdown of an indexed knowledge document, or one section by id, after search_knowledge returns a snippet. Returns the authoritative document text plus OKF metadata, the section outline with line coordinates, and the document link graph (related_docs/referenced_by).",
+        meta = tool_meta("read knowledge document section markdown docs full source open"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn read_knowledge_document(
+        &self,
+        Parameters(Friendly(req)): Parameters<Friendly<ReadKnowledgeDocumentRequest>>,
+    ) -> String {
+        let params = tools::read_knowledge_document::ReadKnowledgeDocumentParams {
+            project: req.project,
+            document: req.document,
+            section: req.section,
+        };
+        match tools::read_knowledge_document::read_knowledge_document(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }

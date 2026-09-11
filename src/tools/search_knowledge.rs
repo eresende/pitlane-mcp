@@ -301,7 +301,7 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
             "next_step": if results.is_empty() {
                 "No knowledge sections matched. Try a broader query or check that Markdown files exist in the project (they must not be gitignored)."
             } else {
-                "Use read_code_unit with file_path and line_start/line_end to open the full section, then follow links in neighboring docs."
+                "Use read_knowledge_document with file_path to open the full document, or pass section_id to fetch only that section."
             },
             "avoid": "Avoid loading whole documentation trees into context; fetch sections on demand.",
         },
@@ -323,13 +323,12 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
         if results.is_empty() {
             "search_content"
         } else {
-            "read_code_unit"
+            "read_knowledge_document"
         },
         match &top {
             Some(r) => json!({
-                "file_path": r["file_path"],
-                "line_start": r["line_start"],
-                "line_end": r["line_end"],
+                "document": r["file_path"],
+                "section": r["section_id"],
             }),
             None => json!(params.project),
         },

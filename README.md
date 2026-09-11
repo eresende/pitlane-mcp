@@ -147,6 +147,7 @@ Most users should stay on the default tool tier:
 6. Use `analyze_impact` before edits or refactors, and `analyze_changes` to review a Git diff.
 7. Use `search_content` only when you know a text fragment but not the owning symbol.
 8. Use `search_knowledge` for documentation questions — it searches indexed Markdown (docs, READMEs, runbooks) by heading and content. It understands OKF v0.2 documents natively (`okf_type`/`status`/`min_trust` filters; results carry trust tier, staleness, and related-document links).
+9. Use `read_knowledge_document` to open a document found by `search_knowledge` — the full source Markdown by default, or one section via `section`. Results include OKF metadata, the section outline with line ranges, and `related_docs`/`referenced_by` links.
 
 Default public tier:
 
@@ -160,6 +161,7 @@ Default public tier:
 - `get_index_stats`
 - `search_content`
 - `search_knowledge`
+- `read_knowledge_document`
 
 Advanced primitives are hidden from `tools/list` by default. Set `PITLANE_MCP_TOOL_TIER=all` to expose the full surface.
 

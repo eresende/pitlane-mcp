@@ -15,6 +15,7 @@ pub mod index_changes;
 pub mod index_project;
 pub mod investigate;
 pub mod orchestrator;
+pub mod read_knowledge_document;
 pub mod search_content;
 pub mod search_files;
 pub mod search_knowledge;
