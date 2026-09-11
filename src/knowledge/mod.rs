@@ -7,6 +7,8 @@
 //! its own walk, persistence format, and BM25 schema.
 
 pub mod document;
+pub mod links;
+pub mod okf;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
@@ -31,8 +33,9 @@ use crate::path_policy::{read_regular_file, regular_file_metadata};
 /// Files larger than this are skipped (same limit as code indexing).
 const MAX_KNOWLEDGE_FILE_BYTES: u64 = 1024 * 1024; // 1 MiB
 
-/// Bump when the persisted knowledge layout changes incompatibly.
-pub const KNOWLEDGE_META_VERSION: u32 = 1;
+/// Bump when the persisted knowledge layout changes incompatibly. v2 added
+/// typed OKF metadata and links to `KnowledgeDocument` (Phase 2, issue #118).
+pub const KNOWLEDGE_META_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // Content sources
