@@ -146,6 +146,7 @@ Most users should stay on the default tool tier:
 5. Use `trace_path` for explicit source-to-sink or config-to-effect questions.
 6. Use `analyze_impact` before edits or refactors, and `analyze_changes` to review a Git diff.
 7. Use `search_content` only when you know a text fragment but not the owning symbol.
+8. Use `search_knowledge` for documentation questions — it searches indexed Markdown (docs, READMEs, runbooks) by heading and content.
 
 Default public tier:
 
@@ -158,6 +159,7 @@ Default public tier:
 - `analyze_changes`
 - `get_index_stats`
 - `search_content`
+- `search_knowledge`
 
 Advanced primitives are hidden from `tools/list` by default. Set `PITLANE_MCP_TOOL_TIER=all` to expose the full surface.
 

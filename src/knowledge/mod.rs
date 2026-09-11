@@ -14,6 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use anyhow::Context as _;
 use futures::StreamExt;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
@@ -299,6 +300,44 @@ impl KnowledgeIndex {
         self.meta.files = current_files;
         Ok(IndexResult { parsed, removed })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Orchestration
+// ---------------------------------------------------------------------------
+
+/// Load persisted knowledge state, incrementally index changed files under
+/// `root`, and keep the BM25 index in sync. Persists documents/meta when
+/// anything changed.
+///
+/// Returns `(changed, index)` where `changed` is true when document content was
+/// added/changed/removed (the caller may then want to refresh embeddings).
+pub fn ensure_knowledge_index(root: &Path) -> anyhow::Result<(bool, KnowledgeIndex)> {
+    let dir = crate::index::format::knowledge_dir(root)?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating knowledge dir {}", dir.display()))?;
+
+    let mut index = KnowledgeIndex::load(&dir)?;
+    let result = index.index_project(root, &MarkdownSource)?;
+
+    if !result.anything_changed() {
+        // Documents unchanged: make sure BM25 exists (it may have been deleted).
+        let bm25_dir = dir.join("tantivy");
+        if !crate::index::knowledge_bm25::is_ready(&bm25_dir) {
+            crate::index::knowledge_bm25::invalidate(root);
+            let docs: Vec<document::KnowledgeDocument> =
+                index.documents.values().cloned().collect();
+            crate::index::knowledge_bm25::build(&docs, &bm25_dir)?;
+        }
+        return Ok((false, index));
+    }
+
+    // Documents changed: rebuild BM25, then persist documents + meta.
+    crate::index::knowledge_bm25::invalidate(root);
+    let docs: Vec<document::KnowledgeDocument> = index.documents.values().cloned().collect();
+    crate::index::knowledge_bm25::build(&docs, &dir.join("tantivy"))?;
+    index.save(&dir)?;
+    Ok((true, index))
 }
 
 // ---------------------------------------------------------------------------

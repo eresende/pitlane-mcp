@@ -201,6 +201,22 @@ Diagnose index health: freshness, effective exclusions, skipped oversized files,
 
 Every check carries a `status` (`ok`/`warn`/`error`/`info`), a `detail`, and — when something is wrong — a targeted `repair` hint. Set `"repair": true` to apply the safe repairs automatically: force re-index when the index is stale, and kick off background embedding when vectors are incomplete. Repairs only touch rebuildable artifacts (index, embeddings), never user files. Parse failures are not persisted historically, so `doctor` re-derives structural diagnostics at call time.
 
+### `search_knowledge`
+
+Search the project's Markdown knowledge base (docs, READMEs, runbooks) by heading
+and content.
+
+```json
+{ "project": "/your/project", "query": "how does retry with backoff work" }
+```
+
+Notes:
+
+- The index is built lazily and incrementally on first use; files are tracked by mtime/size plus a content hash, so re-calls only touch changed documents.
+- Ranking blends BM25 over section text/headings with semantic cosine similarity when `PITLANE_EMBED_URL`/`PITLANE_EMBED_MODEL` are set. Section embeddings generate in the background after changes; lexical results are always available without them.
+- Optional filters: `tag` (document front-matter tag, case-insensitive) and `path_filter` (substring of the relative file path).
+- Results include `file_path`, heading hierarchy, line range, a snippet, and score breakdown — open full sections with `read_code_unit` using those coordinates.
+
 ### `search_content`
 
 Search source, Markdown, JSON, YAML, and TOML text for a known snippet, log string,

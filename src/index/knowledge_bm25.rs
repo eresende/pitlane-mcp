@@ -126,6 +126,11 @@ pub fn build(docs: &[KnowledgeDocument], dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// True when a previously built BM25 index exists for `dir` (sentinel present).
+pub fn is_ready(dir: &Path) -> bool {
+    dir.join(READY_SENTINEL).exists()
+}
+
 /// Build only when the `.ready.v1` sentinel is absent.
 pub fn ensure(docs: &[KnowledgeDocument], dir: &Path) -> anyhow::Result<()> {
     if dir.join(READY_SENTINEL).exists() {
