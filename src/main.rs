@@ -171,6 +171,7 @@ project_field!(
     FindCallersRequest => canonical = "project", alias = "path";
     FindUsagesRequest => canonical = "project", alias = "path";
     WatchProjectRequest => canonical = "project", alias = "path";
+    SearchKnowledgeRequest => canonical = "project", alias = "path";
     GetIndexStatsRequest => canonical = "project", alias = "path";
     DoctorRequest => canonical = "project", alias = "path";
     GetIndexChangesRequest => canonical = "project", alias = "path";
@@ -212,6 +213,21 @@ pub struct IndexProjectRequest {
     /// Maximum number of source files to index (default: 100 000). Raise for very large
     /// mono-repos. Omit this field, or set it to 0, to use the default.
     pub max_files: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SearchKnowledgeRequest {
+    /// Path to an indexed project. The MCP field `path` is accepted as an alias.
+    #[serde(alias = "path")]
+    pub project: String,
+    /// Natural-language query describing the information need (e.g., "how does retry with backoff work").
+    pub query: String,
+    /// Optional document-level tag filter from front matter (`tags`/`categories`). Case-insensitive.
+    pub tag: Option<String>,
+    /// Optional substring filter on relative file paths (e.g., "docs/runbooks").
+    pub path_filter: Option<String>,
+    /// Maximum number of sections to return (default 8, max 50).
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
@@ -613,6 +629,7 @@ const DEFAULT_PUBLIC_TOOL_NAMES: &[&str] = &[
     "get_index_stats",
     "doctor",
     "search_content",
+    "search_knowledge",
 ];
 
 const ADVANCED_TOOL_NAMES: &[&str] = &[
@@ -999,6 +1016,34 @@ impl PitlaneMcp {
             max_depth: req.max_depth,
         };
         match tools::orchestrator::trace_path(params).await {
+            Ok(v) => value_to_text(v),
+            Err(e) => err_to_text(e),
+        }
+    }
+
+    #[tool(
+        description = "Search the project's Markdown knowledge base (docs/README/runbooks) by heading and content with lexical + semantic ranking when embeddings exist. Prefer this for documentation questions; use read_code_unit on a result to open the full section.",
+        meta = tool_meta("search docs documentation markdown knowledge readme runbook"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn search_knowledge(
+        &self,
+        Parameters(Friendly(req)): Parameters<Friendly<SearchKnowledgeRequest>>,
+    ) -> String {
+        let params = tools::search_knowledge::SearchKnowledgeParams {
+            project: req.project,
+            query: req.query,
+            tag: req.tag,
+            path_filter: req.path_filter,
+            limit: req.limit,
+            embed_config: self.embed_config.clone(),
+        };
+        match tools::search_knowledge::search_knowledge(params).await {
             Ok(v) => value_to_text(v),
             Err(e) => err_to_text(e),
         }

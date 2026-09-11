@@ -17,6 +17,7 @@ pub mod investigate;
 pub mod orchestrator;
 pub mod search_content;
 pub mod search_files;
+pub mod search_knowledge;
 pub mod search_symbols;
 pub mod semantic_rank;
 pub mod steering;

@@ -1,5 +1,6 @@
 pub mod bm25;
 pub mod format;
+pub mod knowledge_bm25;
 pub mod repo_profile;
 
 use crate::graph::NavigationGraph;

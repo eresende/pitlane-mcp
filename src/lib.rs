@@ -5,6 +5,7 @@ pub mod graph;
 pub mod index;
 pub mod indexer;
 pub mod indexing;
+pub mod knowledge;
 pub mod path_policy;
 pub mod session;
 pub mod stats;

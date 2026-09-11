@@ -226,6 +226,11 @@ pub fn index_dir(project_path: &Path) -> anyhow::Result<std::path::PathBuf> {
     Ok(home.join(".pitlane").join("indexes").join(hash))
 }
 
+/// Per-project knowledge index directory: `<index_dir>/knowledge`.
+pub fn knowledge_dir(project_path: &Path) -> anyhow::Result<std::path::PathBuf> {
+    Ok(index_dir(project_path)?.join("knowledge"))
+}
+
 fn dirs_home() -> anyhow::Result<std::path::PathBuf> {
     std::env::var("HOME")
         .map(std::path::PathBuf::from)

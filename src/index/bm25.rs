@@ -24,7 +24,7 @@ use crate::sync_utils::{rw_read, rw_write};
 // ---------------------------------------------------------------------------
 
 /// Tokenizer name used in the schema and registered on every index.
-const TOKENIZER_NAME: &str = "code";
+pub(crate) const TOKENIZER_NAME: &str = "code";
 const READY_SENTINEL: &str = ".ready.v2";
 
 /// A tokenizer that splits on non-alphanumeric characters *and* at
@@ -149,7 +149,7 @@ fn tokenize_code(text: &str) -> Vec<Token> {
 
 /// Register the `"code"` tokenizer on `index`. Must be called before any
 /// write or read operation that touches TEXT fields.
-fn register_tokenizer(index: &Index) {
+pub(crate) fn register_tokenizer(index: &Index) {
     index
         .tokenizers()
         .register(TOKENIZER_NAME, CamelCaseTokenizer);
@@ -398,7 +398,7 @@ pub fn search(
     Ok(ids)
 }
 
-fn escape_query(s: &str) -> String {
+pub(crate) fn escape_query(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 8);
     for c in s.chars() {
         // Note: `'` must be escaped too — tantivy's QueryParser treats it as a
