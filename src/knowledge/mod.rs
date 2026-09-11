@@ -704,7 +704,13 @@ mod tests {
             .modified()
             .unwrap();
         std::fs::write(&path, "# A\nModified.\n").unwrap();
-        File::open(&path).unwrap().set_modified(old_mtime).unwrap();
+        // Windows requires write access to update file timestamps.
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old_mtime)
+            .unwrap();
 
         let result = index.index_project(&root, &MarkdownSource).unwrap();
         assert_eq!(result.parsed, 1);
