@@ -10,8 +10,8 @@ pub mod document;
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 
 use anyhow::Context as _;
@@ -199,9 +199,8 @@ impl KnowledgeIndex {
 
     /// Incrementally index all files handled by `source` under `root`.
     ///
-    /// Files whose mtime and size match the persisted state are not re-read;
-    /// a content hash catches edits that preserve both. Unchanged documents
-    /// are kept in memory from the previous load.
+    /// Hash eligible files on every pass to detect edits that preserve mtime
+    /// and size. Only changed documents are reparsed.
     pub fn index_project(
         &mut self,
         root: &Path,
@@ -251,14 +250,6 @@ impl KnowledgeIndex {
             let mtime = mtime_secs(metadata.modified().ok());
             let size = metadata.len();
 
-            // Fast path: mtime + size unchanged → keep the existing document.
-            if let Some(state) = self.meta.files.get(&rel_str) {
-                if state.mtime == mtime && state.size == size {
-                    current_files.insert(rel_str, state.clone());
-                    continue;
-                }
-            }
-
             let bytes = read_regular_file(path)?;
             let Ok(text) = std::str::from_utf8(&bytes) else {
                 tracing::warn!(file = %rel_str, "skipping non-UTF-8 knowledge file");
@@ -266,9 +257,13 @@ impl KnowledgeIndex {
             };
             let hash = crate::embed::document::document_hash(text);
 
-            // Slow path: mtime/size drifted — the hash decides.
+            // Reuse parsed content only when its hash still matches.
             if let Some(state) = self.meta.files.get(&rel_str) {
-                if state.hash == hash {
+                if state.hash == hash
+                    && self
+                        .documents
+                        .contains_key(&document::KnowledgeDocument::doc_id_for(&rel_str))
+                {
                     current_files.insert(rel_str, FileState { mtime, size, hash });
                     continue;
                 }
@@ -313,6 +308,30 @@ impl KnowledgeIndex {
 /// Returns `(changed, index)` where `changed` is true when document content was
 /// added/changed/removed (the caller may then want to refresh embeddings).
 pub fn ensure_knowledge_index(root: &Path) -> anyhow::Result<(bool, KnowledgeIndex)> {
+    with_knowledge_index(root, |changed, index| Ok((changed, index)))
+}
+
+static INDEX_LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Keep indexing and the associated lexical read in one project transaction.
+pub(crate) fn with_knowledge_index<T>(
+    root: &Path,
+    read: impl FnOnce(bool, KnowledgeIndex) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let canonical = root.canonicalize()?;
+    let lock = INDEX_LOCKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entry(canonical.clone())
+        .or_default()
+        .clone();
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let (changed, index) = ensure_knowledge_index_unlocked(&canonical)?;
+    read(changed, index)
+}
+
+fn ensure_knowledge_index_unlocked(root: &Path) -> anyhow::Result<(bool, KnowledgeIndex)> {
     let dir = crate::index::format::knowledge_dir(root)?;
     std::fs::create_dir_all(&dir)
         .with_context(|| format!("creating knowledge dir {}", dir.display()))?;
@@ -684,7 +703,7 @@ mod tests {
             .unwrap()
             .modified()
             .unwrap();
-        std::fs::write(&path, "# A\nEdited.\n").unwrap();
+        std::fs::write(&path, "# A\nModified.\n").unwrap();
         File::open(&path).unwrap().set_modified(old_mtime).unwrap();
 
         let result = index.index_project(&root, &MarkdownSource).unwrap();
@@ -692,7 +711,7 @@ mod tests {
         assert!(index.documents["knowledge:a.md"]
             .sections
             .iter()
-            .any(|s| s.content.contains("Edited")));
+            .any(|s| s.content.contains("Modified")));
     }
 
     #[test]

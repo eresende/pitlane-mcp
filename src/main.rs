@@ -629,6 +629,7 @@ const DEFAULT_PUBLIC_TOOL_NAMES: &[&str] = &[
     "get_index_stats",
     "doctor",
     "search_content",
+    "search_knowledge",
 ];
 
 const ADVANCED_TOOL_NAMES: &[&str] = &[

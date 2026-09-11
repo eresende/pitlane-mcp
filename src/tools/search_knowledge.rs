@@ -15,7 +15,7 @@ use crate::embed::store::{EmbedStore, EmbedStoreMetadata};
 use crate::embed::EmbedConfig;
 use crate::error::ToolError;
 use crate::index::format::knowledge_dir;
-use crate::knowledge::{document, ensure_knowledge_index, generate_knowledge_embeddings};
+use crate::knowledge::{document, generate_knowledge_embeddings, with_knowledge_index};
 use crate::path_policy::resolve_project_path;
 use crate::tools::steering::{attach_steering, build_steering};
 
@@ -63,12 +63,24 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
     }
 
     let canonical = resolve_project_path(&params.project)?;
+    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
+    let fetch = candidate_fetch(limit);
     // Incremental indexing may walk many files — keep it off the async runtime.
     let root_for_blocking = canonical.clone();
-    let (changed, index) =
-        tokio::task::spawn_blocking(move || ensure_knowledge_index(&root_for_blocking))
-            .await
-            .map_err(|e| anyhow::anyhow!("knowledge indexing task failed: {e}"))??;
+    let query = params.query.clone();
+    let (changed, index, hits) = tokio::task::spawn_blocking(move || {
+        with_knowledge_index(&root_for_blocking, |changed, index| {
+            let hits = crate::index::knowledge_bm25::search(
+                &query,
+                &root_for_blocking,
+                &knowledge_dir(&root_for_blocking)?.join("tantivy"),
+                fetch,
+            )?;
+            Ok((changed, index, hits))
+        })
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("knowledge indexing task failed: {e}"))??;
 
     if changed && !index.documents.is_empty() {
         tracing::info!(
@@ -82,18 +94,9 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
     // double-spawn; steady-state requests with a fresh store never spawn.
     maybe_spawn_knowledge_embeds(&canonical, &index, changed, params.embed_config.clone());
 
-    let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let kdir = knowledge_dir(&canonical)?;
 
     // ── Lexical candidates (BM25 over sections) ────────────────────────────
-    let fetch = candidate_fetch(limit);
-    let hits = crate::index::knowledge_bm25::search(
-        &params.query,
-        &canonical,
-        &kdir.join("tantivy"),
-        fetch,
-    )?;
-
     let mut candidates: Vec<Candidate> = Vec::new();
     for hit in &hits {
         if let Some(mut cand) =
@@ -181,6 +184,7 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
         // No semantic signal: keep BM25 order (already ranked).
         std::mem::take(&mut candidates)
             .into_iter()
+            .take(limit)
             .map(|c| (round_frac3(f64::from(c.bm25_score.unwrap_or(0.0))), c))
             .collect::<Vec<_>>()
     };
@@ -398,16 +402,8 @@ pub(crate) fn maybe_spawn_knowledge_embeds(
         Ok(kdir) => kdir.join("embeddings.bin"),
         Err(_) => return,
     };
-    let fresh = EmbedStoreMetadata::load(&store_path)
-        .ok()
-        .flatten()
-        .is_some_and(|m| {
-            m.is_compatible(
-                &cfg.model,
-                &crate::embed::document::document_fingerprint(&cfg.model),
-                &crate::embed::endpoint_fingerprint(&cfg.url, &cfg.headers),
-            ) && m.dimension > 0
-        });
+    let fresh = load_compatible_store(&store_path, &cfg)
+        .is_some_and(|store| knowledge_embeddings_complete(index, &store));
     if !dirty && fresh {
         return;
     }
@@ -435,6 +431,25 @@ pub(crate) fn maybe_spawn_knowledge_embeds(
             tracing::info!(stored = result.stored, skipped = result.skipped, elapsed_ms = result.elapsed_ms, project = %key.display(), "knowledge-embed: background generation complete");
         }
     });
+}
+
+fn knowledge_embeddings_complete(
+    index: &crate::knowledge::KnowledgeIndex,
+    store: &EmbedStore,
+) -> bool {
+    index.documents.values().all(|doc| {
+        doc.sections
+            .iter()
+            .filter(|s| !s.is_empty())
+            .all(|section| {
+                let id = section.full_id(&doc.doc_id);
+                store.vectors.get(&id).is_some_and(|v| !v.is_empty())
+                    && store.hashes.get(&id)
+                        == Some(&crate::embed::document::document_hash(
+                            &section.embedding_text(doc),
+                        ))
+            })
+    })
 }
 
 /// Load the embedding store only when its metadata is compatible with `cfg`.
@@ -586,5 +601,63 @@ mod tests {
         assert_eq!(response["results_count"], 1);
         assert_eq!(response["results"][0]["file_path"], "docs/retry.md");
         // README is excluded by the path filter even though it matches lexically.
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_searches_respect_limits_after_edits() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("docs.md");
+        for version in ["original", "modified"] {
+            std::fs::write(
+                &path,
+                (0..70)
+                    .map(|i| format!("# Retry {i}\nRetry {version} body.\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+            let mut tasks = Vec::new();
+            for limit in [0, 1, 8, 50, 100, 1, 8, 50] {
+                let project = dir.path().to_string_lossy().to_string();
+                tasks.push(tokio::spawn(async move {
+                    let response = search_knowledge(SearchKnowledgeParams {
+                        project,
+                        query: "retry".into(),
+                        tag: None,
+                        path_filter: None,
+                        limit: Some(limit),
+                        embed_config: None,
+                    })
+                    .await
+                    .unwrap();
+                    assert_eq!(response["results_count"], limit.min(50));
+                    for result in response["results"].as_array().unwrap() {
+                        assert!(result["snippet"].as_str().unwrap().contains(version));
+                    }
+                }));
+            }
+            for task in tasks {
+                task.await.unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn embedding_completeness_detects_partial_and_outdated_stores() {
+        let doc = document::parse_markdown("a.md", "# A\nOne.\n## B\nTwo.\n");
+        let mut index = crate::knowledge::KnowledgeIndex::default();
+        index.documents.insert(doc.doc_id.clone(), doc.clone());
+        let mut store = EmbedStore::new();
+        for section in &doc.sections {
+            assert!(!knowledge_embeddings_complete(&index, &store));
+            let id = section.full_id(&doc.doc_id);
+            store.update(id.clone(), vec![1.0]);
+            store.hashes.insert(
+                id,
+                crate::embed::document::document_hash(&section.embedding_text(&doc)),
+            );
+        }
+        assert!(knowledge_embeddings_complete(&index, &store));
+        index.documents.get_mut(&doc.doc_id).unwrap().sections[0].content = "New body".into();
+        assert!(!knowledge_embeddings_complete(&index, &store));
     }
 }

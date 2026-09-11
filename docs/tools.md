@@ -212,7 +212,7 @@ and content.
 
 Notes:
 
-- The index is built lazily and incrementally on first use; files are tracked by mtime/size plus a content hash, so re-calls only touch changed documents.
+- The index is built lazily on first use. Each search hashes eligible Markdown files to catch edits even when timestamps and sizes are preserved; only changed documents are reparsed.
 - Ranking blends BM25 over section text/headings with semantic cosine similarity when `PITLANE_EMBED_URL`/`PITLANE_EMBED_MODEL` are set. Section embeddings generate in the background after changes; lexical results are always available without them.
 - Optional filters: `tag` (document front-matter tag, case-insensitive) and `path_filter` (substring of the relative file path).
 - Results include `file_path`, heading hierarchy, line range, a snippet, and score breakdown — open full sections with `read_code_unit` using those coordinates.
