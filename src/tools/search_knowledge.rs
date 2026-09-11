@@ -239,15 +239,18 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
         out.truncate(limit);
         out
     } else {
-        // No semantic signal: keep BM25 order (already ranked).
-        std::mem::take(&mut candidates)
+        // No semantic signal: BM25 order adjusted by metadata, then re-sorted
+        // because the adjustment can reorder near-equal lexical scores.
+        let mut out: Vec<(f64, Candidate)> = std::mem::take(&mut candidates)
             .into_iter()
-            .take(limit)
             .map(|c| {
                 let score = adjusted(&c, c.bm25_score.unwrap_or(0.0));
                 (round_frac3(f64::from(score)), c)
             })
-            .collect::<Vec<_>>()
+            .collect();
+        out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        out.truncate(limit);
+        out
     };
 
     // ── Response ────────────────────────────────────────────────────────────
