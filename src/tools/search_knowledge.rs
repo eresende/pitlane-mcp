@@ -565,6 +565,22 @@ pub(crate) fn maybe_spawn_knowledge_embeds(
     });
 }
 
+/// True when the on-disk embedding store is compatible with `cfg` and covers
+/// every non-empty section of `index`. Used by the one-shot CLI to decide
+/// whether embeddings must be regenerated synchronously before a search (the
+/// MCP server instead refreshes them via `maybe_spawn_knowledge_embeds`).
+pub fn knowledge_store_fresh(
+    canonical: &Path,
+    index: &crate::knowledge::KnowledgeIndex,
+    cfg: &EmbedConfig,
+) -> bool {
+    match knowledge_dir(canonical) {
+        Ok(kdir) => load_compatible_store(&kdir.join("embeddings.bin"), cfg)
+            .is_some_and(|store| knowledge_embeddings_complete(index, &store)),
+        Err(_) => false,
+    }
+}
+
 fn knowledge_embeddings_complete(
     index: &crate::knowledge::KnowledgeIndex,
     store: &EmbedStore,

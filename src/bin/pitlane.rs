@@ -278,6 +278,42 @@ enum Command {
         #[arg(long)]
         include_tests: bool,
     },
+    /// Search the project's Markdown knowledge base (docs, READMEs, runbooks)
+    SearchKnowledge {
+        /// Path to the indexed project
+        project: String,
+        /// Natural-language query describing the information need
+        query: String,
+        /// Document-level tag filter from front matter (`tags`/`categories`)
+        #[arg(long)]
+        tag: Option<String>,
+        /// Substring filter on relative file paths (e.g. "docs/runbooks")
+        #[arg(long = "path-filter", value_name = "SUBSTR")]
+        path_filter: Option<String>,
+        /// OKF concept-type filter (front matter `type`, e.g. "Playbook")
+        #[arg(long = "okf-type", value_name = "TYPE")]
+        okf_type: Option<String>,
+        /// OKF lifecycle filter: draft, stable, or deprecated
+        #[arg(long)]
+        status: Option<String>,
+        /// Minimum OKF trust tier: unverified, machine-confirmed, or human-reviewed
+        #[arg(long = "min-trust", value_name = "TIER")]
+        min_trust: Option<String>,
+        /// Maximum number of sections to return (default: 8, max: 50)
+        #[arg(long, default_value_t = 8)]
+        limit: usize,
+    },
+    /// Read the full source Markdown of an indexed knowledge document, or one section
+    ReadKnowledgeDocument {
+        /// Path to the indexed project
+        project: String,
+        /// Project-relative Markdown path (from search-knowledge `file_path`)
+        document: String,
+        /// Section to read instead of the whole document: a `sections[].section_id`
+        /// slug, "preamble", or a full section id ("knowledge:docs/x.md#slug")
+        #[arg(long)]
+        section: Option<String>,
+    },
 }
 
 fn embeddings_count_in_store(path: &std::path::Path) -> usize {
@@ -686,6 +722,72 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
             };
             tools::investigate::investigate(params).await?
         }
+
+        Command::SearchKnowledge {
+            project,
+            query,
+            tag,
+            path_filter,
+            okf_type,
+            status,
+            min_trust,
+            limit,
+        } => {
+            let embed_config = pitlane_mcp::embed::EmbedConfig::try_from_env()?.map(Arc::new);
+
+            // One-shot process: background embedding tasks would die with the
+            // CLI (same reason `index` passes embed_config=None and embeds
+            // synchronously). Refresh the index, regenerate embeddings inline
+            // when the store is missing or stale, then search — so semantic
+            // ranking works instead of silently degrading to lexical-only.
+            if let Some(cfg) = embed_config.as_ref() {
+                let canonical = resolve_project_path(&project)?;
+                let (changed, index) = pitlane_mcp::knowledge::ensure_knowledge_index(&canonical)?;
+                if changed
+                    || !tools::search_knowledge::knowledge_store_fresh(&canonical, &index, cfg)
+                {
+                    let docs: Vec<pitlane_mcp::knowledge::document::KnowledgeDocument> =
+                        index.documents.values().cloned().collect();
+                    let store_path = pitlane_mcp::index::format::knowledge_dir(&canonical)?
+                        .join("embeddings.bin");
+                    let result = pitlane_mcp::knowledge::generate_knowledge_embeddings(
+                        &docs,
+                        cfg,
+                        &store_path,
+                    )
+                    .await;
+                    if let Some(err) = result.error {
+                        eprintln!("warning: knowledge embedding generation failed: {err}");
+                    }
+                }
+            }
+
+            let params = tools::search_knowledge::SearchKnowledgeParams {
+                project,
+                query,
+                tag,
+                path_filter,
+                okf_type,
+                status,
+                min_trust,
+                limit: Some(limit),
+                embed_config,
+            };
+            tools::search_knowledge::search_knowledge(params).await?
+        }
+
+        Command::ReadKnowledgeDocument {
+            project,
+            document,
+            section,
+        } => {
+            let params = tools::read_knowledge_document::ReadKnowledgeDocumentParams {
+                project,
+                document,
+                section,
+            };
+            tools::read_knowledge_document::read_knowledge_document(params).await?
+        }
     };
     Ok(result)
 }
@@ -825,6 +927,169 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn clap_parses_search_knowledge_command() {
+        let cli = Cli::try_parse_from([
+            "pitlane",
+            "search-knowledge",
+            "/tmp/kb",
+            "retry backoff",
+            "--tag",
+            "ops",
+            "--path-filter",
+            "docs/",
+            "--okf-type",
+            "Playbook",
+            "--status",
+            "stable",
+            "--min-trust",
+            "human-reviewed",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::SearchKnowledge {
+                project,
+                query,
+                tag,
+                path_filter,
+                okf_type,
+                status,
+                min_trust,
+                limit,
+            } => {
+                assert_eq!(project, "/tmp/kb");
+                assert_eq!(query, "retry backoff");
+                assert_eq!(tag.as_deref(), Some("ops"));
+                assert_eq!(path_filter.as_deref(), Some("docs/"));
+                assert_eq!(okf_type.as_deref(), Some("Playbook"));
+                assert_eq!(status.as_deref(), Some("stable"));
+                assert_eq!(min_trust.as_deref(), Some("human-reviewed"));
+                assert_eq!(limit, 5);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clap_parses_read_knowledge_document_command() {
+        let cli = Cli::try_parse_from([
+            "pitlane",
+            "read-knowledge-document",
+            "/tmp/kb",
+            "docs/guide.md",
+            "--section",
+            "guide-backoff",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Command::ReadKnowledgeDocument {
+                project,
+                document,
+                section,
+            } => {
+                assert_eq!(project, "/tmp/kb");
+                assert_eq!(document, "docs/guide.md");
+                assert_eq!(section.as_deref(), Some("guide-backoff"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+
+        // Section is optional: whole-document read by default.
+        let cli = Cli::try_parse_from([
+            "pitlane",
+            "read-knowledge-document",
+            "/tmp/kb",
+            "docs/guide.md",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::ReadKnowledgeDocument { section, .. } => assert_eq!(section, None),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_command_search_knowledge_finds_and_filters_sections() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("guide.md"),
+            "# Retry policy\nExponential backoff with jitter.\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("docs")).unwrap();
+        std::fs::write(
+            dir.path().join("docs/other.md"),
+            "# Other\nUnrelated body text.\n",
+        )
+        .unwrap();
+
+        let result = run_command(Command::SearchKnowledge {
+            project: dir.path().to_string_lossy().to_string(),
+            query: "retry backoff".to_string(),
+            tag: None,
+            path_filter: None,
+            okf_type: None,
+            status: None,
+            min_trust: None,
+            limit: 8,
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["results_count"], 1);
+        assert_eq!(result["results"][0]["file_path"], "guide.md");
+
+        // The path filter narrows matching to docs/.
+        let result = run_command(Command::SearchKnowledge {
+            project: dir.path().to_string_lossy().to_string(),
+            query: "unrelated body".to_string(),
+            tag: None,
+            path_filter: Some("docs/".to_string()),
+            okf_type: None,
+            status: None,
+            min_trust: None,
+            limit: 8,
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["results_count"], 1);
+        assert_eq!(result["results"][0]["file_path"], "docs/other.md");
+    }
+
+    #[tokio::test]
+    async fn run_command_read_knowledge_document_serves_source_and_section() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("guide.md"),
+            "# Guide\nIntro.\n## Backoff\nUse jitter.\n",
+        )
+        .unwrap();
+
+        let result = run_command(Command::ReadKnowledgeDocument {
+            project: dir.path().to_string_lossy().to_string(),
+            document: "guide.md".to_string(),
+            section: None,
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            result["content"],
+            "# Guide\nIntro.\n## Backoff\nUse jitter.\n"
+        );
+
+        let result = run_command(Command::ReadKnowledgeDocument {
+            project: dir.path().to_string_lossy().to_string(),
+            document: "guide.md".to_string(),
+            section: Some("guide-backoff".to_string()),
+        })
+        .await
+        .unwrap();
+        assert_eq!(result["section"]["content"], "## Backoff\nUse jitter.");
     }
 
     #[tokio::test]
