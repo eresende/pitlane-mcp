@@ -214,8 +214,11 @@ Notes:
 
 - The index is built lazily on first use. Each search hashes eligible Markdown files to catch edits even when timestamps and sizes are preserved; only changed documents are reparsed.
 - Ranking blends BM25 over section text/headings with semantic cosine similarity when `PITLANE_EMBED_URL`/`PITLANE_EMBED_MODEL` are set. Section embeddings generate in the background after changes; lexical results are always available without them.
-- Optional filters: `tag` (document front-matter tag, case-insensitive) and `path_filter` (substring of the relative file path).
+- Optional filters: `tag` (document front-matter tag, case-insensitive), `path_filter` (substring of the relative file path), and OKF metadata filters: `okf_type` (front-matter `type`, case-insensitive), `status` (`draft`/`stable`/`deprecated`), and `min_trust` (`unverified` < `machine-confirmed` < `human-reviewed`). OKF filters only match documents that carry OKF metadata.
 - Results include `file_path`, heading hierarchy, line range, a snippet, and score breakdown — open full sections with `read_code_unit` using those coordinates.
+- [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format) (OKF) v0.2 documents are understood natively: front matter is parsed as full YAML, and `type`/`description`/`resource`/`status`/`generated`/`verified`/`stale_after`/`sources` metadata is extracted, filtered on, and returned with each result. The derived trust tier (`verified` by `human:` actors ⇒ human-reviewed) and staleness (`stale_after` passed) are advisory ranking signals: verified concepts rank slightly higher, stale/deprecated/draft concepts slightly lower. Plain-Markdown documents remain fully usable without OKF metadata.
+- Markdown links to other knowledge documents (bundle-relative `/x.md` or relative `./x.md`) are preserved as `related_docs` in results, exposing the bundle's relationship graph.
+- Unknown front-matter keys (including OKF extension and computation fields such as `runtime`) are preserved in the index and available for future use; malformed front matter is treated as plain Markdown.
 
 ### `search_content`
 

@@ -3,15 +3,18 @@
 //! A knowledge document is one source file (e.g. a Markdown page) parsed into
 //! heading-aware sections. Each section keeps its heading hierarchy and line
 //! range so retrieval results can be read back with exact coordinates, and the
-//! front matter is preserved as a generic metadata bag so OKF-specific fields
-//! (relationships, provenance, ...) can be modeled in later phases without
-//! changing the core structures.
+//! front matter is parsed as full YAML and preserved as a generic metadata
+//! bag so OKF-specific fields (relationships, provenance, ...) can be modeled
+//! in later phases without changing the core structures.
 
 use std::collections::HashMap;
 
 use pulldown_cmark::{Event, Parser as MarkdownParser, Tag, TagEnd};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+use super::links::{extract_links, KnowledgeLink};
+use super::okf::{extract_okf, OkfMeta};
 
 /// A knowledge document — one source file parsed into heading-aware sections.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -26,10 +29,19 @@ pub struct KnowledgeDocument {
     #[serde(default)]
     pub tags: Vec<String>,
     /// Raw front matter as compact JSON (empty string when absent) for fields
-    /// not yet modeled explicitly. Stored as a string because bincode cannot
-    /// deserialize `serde_json::Value` (it deserializes via `deserialize_any`).
+    /// not modeled explicitly (including OKF extension keys). Stored as a
+    /// string because bincode cannot deserialize `serde_json::Value` (it
+    /// deserializes via `deserialize_any`).
     #[serde(default)]
     pub front_matter: String,
+    /// Extracted OKF metadata, when the front matter carries a non-empty
+    /// `type` key (Open Knowledge Format v0.2).
+    #[serde(default)]
+    pub okf: Option<OkfMeta>,
+    /// Markdown links to other knowledge documents, normalized to
+    /// bundle-relative paths (spec §6). Deduplicated by target, document order.
+    #[serde(default)]
+    pub links: Vec<KnowledgeLink>,
     /// Heading-aware sections in document order.
     pub sections: Vec<KnowledgeSection>,
 }
@@ -100,6 +112,7 @@ impl KnowledgeSection {
 pub fn parse_markdown(relative_path: &str, source: &str) -> KnowledgeDocument {
     let (front_matter, body_start) = split_front_matter(source);
     let body = &source[body_start..];
+    let okf = extract_okf(&front_matter);
 
     let line_starts = line_starts(source);
     let total_lines = source.lines().count().max(1);
@@ -201,7 +214,8 @@ pub fn parse_markdown(relative_path: &str, source: &str) -> KnowledgeDocument {
         });
     }
 
-    let title = extract_title(&front_matter)
+    let fm_json = front_matter_value(&front_matter);
+    let title = extract_title(&fm_json)
         .or_else(|| {
             headings
                 .iter()
@@ -215,11 +229,13 @@ pub fn parse_markdown(relative_path: &str, source: &str) -> KnowledgeDocument {
         doc_id: KnowledgeDocument::doc_id_for(relative_path),
         file_path: relative_path.to_string(),
         title,
-        tags: extract_tags(&front_matter),
+        tags: extract_tags(&fm_json),
+        okf,
+        links: extract_links(body, relative_path),
         front_matter: if front_matter.is_null() {
             String::new()
         } else {
-            front_matter.to_string()
+            serde_json::to_string(&fm_json).unwrap_or_default()
         },
         sections,
     }
@@ -239,95 +255,74 @@ fn line_of(starts: &[usize], offset: usize) -> usize {
 
 /// Split leading YAML front matter from `source`.
 ///
-/// Returns the parsed front matter (or `Value::Null`) and the byte offset where
-/// the document body begins. Only a minimal YAML subset is supported (top-level
-/// `key: value` pairs, inline `[a, b]` lists, block `- item` lists); full YAML
-/// parsing is a later-phase upgrade. Unknown keys are preserved verbatim.
-fn split_front_matter(source: &str) -> (Value, usize) {
+/// Returns the parsed front matter (or `serde_yaml::Value::Null`) and the byte
+/// offset where the document body begins. Full YAML is supported (nested
+/// mappings, block/inline lists, flow `{a: b}` pairs) so OKF fields like
+/// `generated: { by, at }` and `sources:` entries parse correctly. YAML that
+/// fails to parse, or a block without a closing delimiter, is treated as plain
+/// Markdown. Unknown keys are preserved verbatim.
+fn split_front_matter(source: &str) -> (serde_yaml::Value, usize) {
     let mut lines = source.split_inclusive('\n');
     let Some(first) = lines.next() else {
-        return (Value::Null, 0);
+        return (serde_yaml::Value::Null, 0);
     };
     if first.trim_end() != "---" {
-        return (Value::Null, 0);
+        return (serde_yaml::Value::Null, 0);
     }
     let mut offset = first.len();
-    let mut block: Vec<&str> = Vec::new();
+    let mut block = String::new();
     for line in lines {
         if line.trim_end() == "---" || line.trim_end() == "..." {
-            return (parse_front_matter_block(&block), offset + line.len());
+            match serde_yaml::from_str(&block) {
+                Ok(value) => return (value, offset + line.len()),
+                Err(_) => return (serde_yaml::Value::Null, 0),
+            }
         }
-        block.push(line);
+        block.push_str(line);
         offset += line.len();
     }
     // No closing delimiter — treat the file as plain Markdown.
-    (Value::Null, 0)
+    (serde_yaml::Value::Null, 0)
 }
 
-fn parse_front_matter_block(block: &[&str]) -> Value {
-    let mut obj = Map::new();
-    let mut list_key: Option<String> = None;
-    for raw in block {
-        let line = raw.trim_end();
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let indented = line.starts_with(' ') || line.starts_with('\t');
-        if indented && trimmed.starts_with("- ") {
-            // Block list item under the most recent empty-valued key.
-            if let Some(key) = &list_key {
-                if let Some(Value::Array(items)) = obj.get_mut(key) {
-                    items.push(Value::String(parse_scalar(&trimmed[2..])));
-                }
+/// Convert a `serde_yaml::Value` into a `serde_json::Value` for the generic
+/// front-matter bag.
+fn front_matter_value(value: &serde_yaml::Value) -> Value {
+    match value {
+        serde_yaml::Value::Null => Value::Null,
+        serde_yaml::Value::Bool(b) => Value::Bool(*b),
+        serde_yaml::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Number(serde_json::Number::from(i))
+            } else if let Some(u) = n.as_u64() {
+                Value::Number(serde_json::Number::from(u))
+            } else {
+                n.as_f64()
+                    .and_then(serde_json::Number::from_f64)
+                    .map_or(Value::String(n.to_string()), Value::Number)
             }
-            continue;
         }
-        if indented {
-            // Nested mappings are not modeled in Phase 1: drop the empty list
-            // placeholder that preceded them.
-            if let Some(key) = list_key.take() {
-                if matches!(obj.get(&key), Some(Value::Array(items)) if items.is_empty()) {
-                    obj.remove(&key);
-                }
+        serde_yaml::Value::String(s) => Value::String(s.clone()),
+        serde_yaml::Value::Sequence(items) => {
+            Value::Array(items.iter().map(front_matter_value).collect())
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut obj = Map::new();
+            for (k, v) in map {
+                let key = match k {
+                    serde_yaml::Value::String(s) => s.clone(),
+                    // Non-string mapping keys are stringified through JSON.
+                    other => front_matter_value(other)
+                        .to_string()
+                        .trim_matches('"')
+                        .to_string(),
+                };
+                obj.insert(key, front_matter_value(v));
             }
-            continue;
+            Value::Object(obj)
         }
-        list_key = None;
-        let Some(colon) = line.find(':') else {
-            continue;
-        };
-        let key = line[..colon].trim().to_string();
-        let value = line[colon + 1..].trim();
-        if key.is_empty() {
-            continue;
-        }
-        if value.is_empty() {
-            list_key = Some(key.clone());
-            obj.insert(key, Value::Array(Vec::new()));
-        } else if value.starts_with('[') && value.ends_with(']') {
-            let inner = &value[1..value.len() - 1];
-            let items: Vec<Value> = inner
-                .split(',')
-                .map(|s| Value::String(parse_scalar(s)))
-                .filter(|v| v.as_str().is_none_or(|s| !s.is_empty()))
-                .collect();
-            obj.insert(key, Value::Array(items));
-        } else {
-            obj.insert(key, Value::String(parse_scalar(value)));
-        }
-    }
-    Value::Object(obj)
-}
-
-fn parse_scalar(s: &str) -> String {
-    let s = s.trim();
-    if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
-    {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
+        // Unknown tags are flattened to their inner scalar.
+        serde_yaml::Value::Tagged(tag) => front_matter_value(&tag.value),
     }
 }
 
@@ -529,9 +524,34 @@ mod tests {
         assert_eq!(doc.tags, Vec::<String>::new());
         let fm = doc.front_matter_value();
         assert_eq!(fm["empty"], Value::Array(vec![Value::String("a".into())]));
-        // Nested mappings are skipped in Phase 1.
-        assert!(fm.get("nested").is_none());
+        // Full YAML parses nested mappings.
+        assert_eq!(fm["nested"]["deep"], Value::String("value".into()));
         assert_eq!(fm["ok"], Value::String("yes".into()));
+    }
+
+    #[test]
+    fn okf_front_matter_is_extracted_and_bag_preserved() {
+        let source = "---\ntype: Metric\ntitle: Revenue\nstatus: stable\ngenerated: { by: agent/gemini, at: 2026-06-20T22:53:05Z }\nverified: { by: human:ana, at: 2026-06-25T09:00:00Z }\nruntime: bigquery\n---\n# Definition\nBody.\n";
+        let doc = parse_markdown("finance/revenue.md", source);
+        let okf = doc.okf.as_ref().unwrap();
+        assert_eq!(okf.doc_type, "Metric");
+        assert_eq!(okf.trust_tier, super::super::okf::TrustTier::HumanReviewed);
+        assert_eq!(okf.generated_by.as_deref(), Some("agent/gemini"));
+        // Unmodeled OKF keys stay in the generic bag.
+        assert_eq!(doc.front_matter_value()["runtime"], "bigquery");
+
+        // Plain Markdown (no `type`) gets no OKF metadata.
+        let doc = parse_markdown("a.md", "---\ntitle: Plain\n---\nBody.\n");
+        assert!(doc.okf.is_none());
+    }
+
+    #[test]
+    fn malformed_yaml_front_matter_is_treated_as_body() {
+        let source = "---\ntitle: [unclosed\nmore: {broken\n---\nBody.\n";
+        let doc = parse_markdown("a.md", source);
+        assert_eq!(doc.front_matter, String::new());
+        assert!(doc.okf.is_none());
+        assert!(doc.sections.iter().any(|s| s.section_id == "preamble"));
     }
 
     #[test]

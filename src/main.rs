@@ -226,6 +226,12 @@ pub struct SearchKnowledgeRequest {
     pub tag: Option<String>,
     /// Optional substring filter on relative file paths (e.g., "docs/runbooks").
     pub path_filter: Option<String>,
+    /// Optional OKF concept-type filter (front matter `type`, e.g. "Playbook", "Metric"). Case-insensitive. Only OKF documents match.
+    pub okf_type: Option<String>,
+    /// Optional OKF lifecycle filter: "draft", "stable", or "deprecated".
+    pub status: Option<String>,
+    /// Optional minimum OKF trust tier: "unverified", "machine-confirmed", or "human-reviewed". Results must be at least this verified.
+    pub min_trust: Option<String>,
     /// Maximum number of sections to return (default 8, max 50).
     pub limit: Option<usize>,
 }
@@ -1022,7 +1028,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Search the project's Markdown knowledge base (docs/README/runbooks) by heading and content with lexical + semantic ranking when embeddings exist. Prefer this for documentation questions; use read_code_unit on a result to open the full section.",
+        description = "Search the project's Markdown knowledge base (docs/README/runbooks) by heading and content with lexical + semantic ranking when embeddings exist; OKF metadata (type/status/trust tier) can be used for filtering. Prefer this for documentation questions; use read_code_unit on a result to open the full section.",
         meta = tool_meta("search docs documentation markdown knowledge readme runbook"),
         annotations(
             read_only_hint = true,
@@ -1040,6 +1046,9 @@ impl PitlaneMcp {
             query: req.query,
             tag: req.tag,
             path_filter: req.path_filter,
+            okf_type: req.okf_type,
+            status: req.status,
+            min_trust: req.min_trust,
             limit: req.limit,
             embed_config: self.embed_config.clone(),
         };
