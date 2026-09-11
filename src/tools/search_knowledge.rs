@@ -142,7 +142,7 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
         let Some(scan_store) = store.as_ref() else {
             return Ok(empty_response(&index, &params.query));
         };
-        for (id, _vec) in scan_store.vectors.iter() {
+        for id in scan_store.vectors.keys() {
             if let Some(cand) = resolve_candidate(&index, id, params.tag.as_deref())
                 .filter(|c| path_matches(params.path_filter.as_deref(), &c.file_path))
             {
