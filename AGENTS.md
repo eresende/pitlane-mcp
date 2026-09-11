@@ -33,7 +33,7 @@ Advanced primitive tools are hidden from `tools/list` unless the server is start
 4. Use `trace_path` for behavior, source-to-sink, config-to-effect, shortest-path, and other execution-path questions.
 5. Use `analyze_impact` for blast-radius questions before edits or refactors. Use `analyze_changes` to map a Git diff to revision-qualified symbols, impact evidence, and test candidates.
 6. Use `search_content` when you know a text snippet, log string, import path, macro name, or regex fragment but do not know the symbol boundary yet.
-7. Use `search_knowledge` for documentation questions — it searches indexed Markdown (docs, READMEs, runbooks) by heading and content, with hybrid lexical/semantic ranking when embeddings exist.
+7. Use `search_knowledge` for documentation questions — it searches indexed Markdown (docs, READMEs, runbooks) by heading and content, with hybrid lexical/semantic ranking when embeddings exist. It understands OKF v0.2 documents natively: filter by concept `type`/`status`/trust tier via `okf_type`/`status`/`min_trust`, and results carry trust, staleness, and cross-document `related_docs` relationships.
 7. Use `get_index_stats` to orient yourself in unfamiliar repos before broader exploration.
 8. Fall back to direct file reads only when editing or when full-file context is genuinely required.
 9. Treat `read_code_unit` as the preferred diff-aware read surface. Use its `read_state.status` field to decide whether to reuse the payload, expand, or reread:

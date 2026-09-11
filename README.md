@@ -146,7 +146,7 @@ Most users should stay on the default tool tier:
 5. Use `trace_path` for explicit source-to-sink or config-to-effect questions.
 6. Use `analyze_impact` before edits or refactors, and `analyze_changes` to review a Git diff.
 7. Use `search_content` only when you know a text fragment but not the owning symbol.
-8. Use `search_knowledge` for documentation questions — it searches indexed Markdown (docs, READMEs, runbooks) by heading and content.
+8. Use `search_knowledge` for documentation questions — it searches indexed Markdown (docs, READMEs, runbooks) by heading and content. It understands OKF v0.2 documents natively (`okf_type`/`status`/`min_trust` filters; results carry trust tier, staleness, and related-document links).
 
 Default public tier:
 
