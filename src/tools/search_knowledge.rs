@@ -15,7 +15,8 @@ use crate::embed::store::{EmbedStore, EmbedStoreMetadata};
 use crate::embed::EmbedConfig;
 use crate::error::ToolError;
 use crate::index::format::knowledge_dir;
-use crate::knowledge::{document, generate_knowledge_embeddings, with_knowledge_index};
+use crate::knowledge::okf::{OkfMeta, TrustTier};
+use crate::knowledge::{document, generate_knowledge_embeddings, okf, with_knowledge_index};
 use crate::path_policy::resolve_project_path;
 use crate::tools::steering::{attach_steering, build_steering};
 
@@ -36,8 +37,23 @@ pub struct SearchKnowledgeParams {
     pub tag: Option<String>,
     /// Optional substring filter on the relative file path.
     pub path_filter: Option<String>,
+    /// Optional OKF concept-type filter (`type` front matter), case-insensitive.
+    pub okf_type: Option<String>,
+    /// Optional OKF lifecycle filter: `draft`, `stable`, or `deprecated`.
+    pub status: Option<String>,
+    /// Optional minimum OKF trust tier: `unverified`, `machine-confirmed`,
+    /// or `human-reviewed`.
+    pub min_trust: Option<String>,
     pub limit: Option<usize>,
     pub embed_config: Option<Arc<EmbedConfig>>,
+}
+
+/// Document-level filters resolved once per call.
+struct DocFilter<'a> {
+    tag: Option<&'a str>,
+    okf_type: Option<&'a str>,
+    status: Option<&'a str>,
+    min_trust: Option<TrustTier>,
 }
 
 /// One ranked result section with its score breakdown.
@@ -51,6 +67,14 @@ struct Candidate {
     line_end: usize,
     snippet: String,
     bm25_score: Option<f32>,
+    /// OKF metadata when the document is an OKF concept.
+    okf: Option<OkfMeta>,
+    /// Outgoing links to other knowledge documents.
+    links: Vec<crate::knowledge::links::KnowledgeLink>,
+    /// True when the document's `stale_after` instant has passed.
+    stale: bool,
+    /// Score adjustment from OKF trust/lifecycle signals.
+    metadata_adjustment: f32,
 }
 
 pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<Value> {
@@ -63,6 +87,39 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
     }
 
     let canonical = resolve_project_path(&params.project)?;
+    // Validate filter values up front so typos fail fast instead of silently
+    // returning nothing.
+    let doc_filter = DocFilter {
+        tag: params
+            .tag
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty()),
+        okf_type: params
+            .okf_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty()),
+        status: params
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+        min_trust: params.min_trust.as_deref().and_then(TrustTier::parse),
+    };
+    if let Some(min_trust) = params
+        .min_trust
+        .as_deref()
+        .filter(|_| doc_filter.min_trust.is_none())
+    {
+        return Err(ToolError::InvalidArgument {
+            param: "min_trust".to_string(),
+            message: format!(
+                "invalid trust tier {min_trust:?}: use unverified, machine-confirmed, or human-reviewed"
+            ),
+        }
+        .into());
+    }
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
     let fetch = candidate_fetch(limit);
     // Incremental indexing may walk many files — keep it off the async runtime.
@@ -99,9 +156,8 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
     // ── Lexical candidates (BM25 over sections) ────────────────────────────
     let mut candidates: Vec<Candidate> = Vec::new();
     for hit in &hits {
-        if let Some(mut cand) =
-            resolve_candidate(&index, hit.section_id.as_str(), params.tag.as_deref())
-                .filter(|c| path_matches(params.path_filter.as_deref(), &c.file_path))
+        if let Some(mut cand) = resolve_candidate(&index, hit.section_id.as_str(), &doc_filter)
+            .filter(|c| path_matches(params.path_filter.as_deref(), &c.file_path))
         {
             cand.bm25_score = Some(hit.score);
             candidates.push(cand);
@@ -143,7 +199,7 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
             return Ok(empty_response(&index, &params.query));
         };
         for id in scan_store.vectors.keys() {
-            if let Some(cand) = resolve_candidate(&index, id, params.tag.as_deref())
+            if let Some(cand) = resolve_candidate(&index, id, &doc_filter)
                 .filter(|c| path_matches(params.path_filter.as_deref(), &c.file_path))
             {
                 candidates.push(cand);
@@ -152,8 +208,10 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
     }
 
     let sem_weight = semantic_weight();
-    // Hybrid: weighted blend of cosine similarity and max-normalized BM25.
-    // Without a query vector we keep the lexical ranking as-is.
+    // Hybrid: weighted blend of cosine similarity and max-normalized BM25,
+    // plus an OKF trust/lifecycle adjustment. Without a query vector we keep
+    // the lexical ranking as-is (still adjusted).
+    let adjusted = |cand: &Candidate, base: f32| (base + cand.metadata_adjustment).max(0.0);
     let scored: Vec<(f64, Candidate)> = if let Some(qv) = query_vec.as_ref() {
         let max_bm25 = candidates
             .iter()
@@ -175,7 +233,7 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
                 (_, Some(l)) => l,
                 (None, None) => 0.0,
             };
-            out.push((round_frac3(f64::from(score)), cand));
+            out.push((round_frac3(f64::from(adjusted(&cand, score))), cand));
         }
         out.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         out.truncate(limit);
@@ -185,7 +243,10 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
         std::mem::take(&mut candidates)
             .into_iter()
             .take(limit)
-            .map(|c| (round_frac3(f64::from(c.bm25_score.unwrap_or(0.0))), c))
+            .map(|c| {
+                let score = adjusted(&c, c.bm25_score.unwrap_or(0.0));
+                (round_frac3(f64::from(score)), c)
+            })
             .collect::<Vec<_>>()
     };
 
@@ -197,6 +258,7 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
     let results: Vec<Value> = scored
         .into_iter()
         .map(|(score, c)| {
+            let okf = c.okf.as_ref();
             json!({
                 "section_id": c.full_section_id,
                 "file_path": c.file_path,
@@ -207,6 +269,21 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
                 "tags": if c.tags.is_empty() { Value::Null } else { json!(c.tags) },
                 "snippet": c.snippet,
                 "score": score,
+                "okf_type": okf.and_then(|m| (!m.doc_type.is_empty()).then(|| json!(m.doc_type))),
+                "description": okf.and_then(|m| m.description.as_deref().map(|d| json!(d))),
+                "resource": okf.and_then(|m| m.resource.as_deref().map(|r| json!(r))),
+                "status": okf.and_then(|m| m.status.as_deref().map(|st| json!(st))),
+                "trust_tier": okf.map(|m| json!(m.trust_tier.as_str())),
+                "stale": c.stale,
+                "metadata_adjustment": round_frac3(f64::from(c.metadata_adjustment)),
+                "related_docs": if c.links.is_empty() {
+                    Value::Null
+                } else {
+                    json!(c.links.iter().map(|l| json!({
+                        "target": l.target,
+                        "text": l.text,
+                    })).collect::<Vec<_>>())
+                },
             })
         })
         .collect();
@@ -263,16 +340,41 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
 fn resolve_candidate(
     index: &crate::knowledge::KnowledgeIndex,
     full_id: &str,
-    tag_filter: Option<&str>,
+    filter: &DocFilter<'_>,
 ) -> Option<Candidate> {
     let (doc_id, slug) = full_id.split_once('#')?;
     let doc = index.documents.get(doc_id)?;
-    if let Some(tag) = tag_filter.filter(|t| !t.trim().is_empty()) {
+    if let Some(tag) = filter.tag {
         if !matches_tag(&doc.tags, tag) {
             return None;
         }
     }
+    let okf = doc.okf.clone();
+    if let Some(meta) = &okf {
+        if let Some(okf_type) = filter.okf_type {
+            if !meta.doc_type.eq_ignore_ascii_case(okf_type) {
+                return None;
+            }
+        }
+        if let Some(status) = filter.status {
+            match meta.status.as_deref().unwrap_or("stable") {
+                s if s.eq_ignore_ascii_case(status) => {}
+                _ => return None,
+            }
+        }
+        if let Some(min_trust) = filter.min_trust {
+            if meta.trust_tier < min_trust {
+                return None;
+            }
+        }
+    } else if filter.okf_type.is_some() || filter.status.is_some() || filter.min_trust.is_some() {
+        // OKF filters never match plain-Markdown documents.
+        return None;
+    }
     let section = doc.sections.iter().find(|s| s.section_id == slug)?.clone();
+    let stale = okf
+        .as_ref()
+        .is_some_and(|m| okf::is_stale(m, okf::now_secs()));
     Some(Candidate {
         full_section_id: full_id.to_string(),
         file_path: doc.file_path.clone(),
@@ -287,7 +389,35 @@ fn resolve_candidate(
         line_end: section.line_end,
         snippet: make_snippet(&section.content),
         bm25_score: None,
+        metadata_adjustment: metadata_adjustment(okf.as_ref(), stale),
+        stale,
+        okf,
+        links: doc.links.clone(),
     })
+}
+
+/// Score adjustment from OKF trust and lifecycle signals. Advisory nudges, in
+/// the same units as the blended hybrid score: verified concepts gain a little,
+/// stale, deprecated, and draft concepts lose a little. Plain-Markdown
+/// documents are unaffected.
+fn metadata_adjustment(meta: Option<&OkfMeta>, stale: bool) -> f32 {
+    let Some(meta) = meta else {
+        return 0.0;
+    };
+    let mut adjustment: f32 = match meta.trust_tier {
+        TrustTier::HumanReviewed => 0.05,
+        TrustTier::MachineConfirmed => 0.02,
+        TrustTier::Unverified => 0.0,
+    };
+    if stale {
+        adjustment -= 0.10;
+    }
+    match meta.status.as_deref().unwrap_or("stable") {
+        "deprecated" => adjustment -= 0.10,
+        "draft" => adjustment -= 0.02,
+        _ => {}
+    }
+    adjustment.clamp(-0.25, 0.25)
 }
 
 fn matches_tag(tags: &[String], tag: &str) -> bool {
@@ -518,9 +648,112 @@ mod tests {
         );
         index.documents.insert(doc.doc_id.clone(), doc);
 
-        let hit = resolve_candidate(&index, "knowledge:docs/a.md#a-sub", Some("OPS"));
-        assert!(hit.is_some());
-        assert!(resolve_candidate(&index, "knowledge:docs/a.md#a-sub", Some("dev")).is_none());
+        let no_filter = DocFilter {
+            tag: None,
+            okf_type: None,
+            status: None,
+            min_trust: None,
+        };
+        let tag_filter = DocFilter {
+            tag: Some("OPS"),
+            ..no_filter
+        };
+        assert!(resolve_candidate(&index, "knowledge:docs/a.md#a-sub", &tag_filter).is_some());
+        let dev_filter = DocFilter {
+            tag: Some("dev"),
+            ..no_filter
+        };
+        assert!(resolve_candidate(&index, "knowledge:docs/a.md#a-sub", &dev_filter).is_none());
+    }
+
+    #[test]
+    fn okf_filters_exclude_plain_markdown_and_match_metadata() {
+        let mut index = crate::knowledge::KnowledgeIndex::default();
+        let okf_doc = document::parse_markdown(
+            "kb/revenue.md",
+            "---\ntype: Attested Computation\nstatus: stable\nverified: { by: human:ana, at: 2026-06-25T09:00:00Z }\n---\n# Computation\nSELECT 1\n",
+        );
+        let plain_doc = document::parse_markdown("notes.md", "Plain notes.\n");
+        index
+            .documents
+            .insert(okf_doc.doc_id.clone(), okf_doc.clone());
+        index.documents.insert(plain_doc.doc_id.clone(), plain_doc);
+
+        let base = DocFilter {
+            tag: None,
+            okf_type: None,
+            status: None,
+            min_trust: None,
+        };
+        let section_id = "knowledge:kb/revenue.md#computation";
+
+        let type_filter = DocFilter {
+            okf_type: Some("attested computation"),
+            ..base
+        };
+        assert!(resolve_candidate(&index, section_id, &type_filter).is_some());
+        // Plain Markdown documents never match OKF filters.
+        assert!(resolve_candidate(&index, "knowledge:notes.md#preamble", &type_filter).is_none());
+
+        let stale_filter = DocFilter {
+            status: Some("deprecated"),
+            ..base
+        };
+        assert!(resolve_candidate(&index, section_id, &stale_filter).is_none());
+
+        let human_only = DocFilter {
+            min_trust: Some(TrustTier::HumanReviewed),
+            ..base
+        };
+        assert!(resolve_candidate(&index, section_id, &human_only).is_some());
+        let machine_floor = DocFilter {
+            min_trust: Some(TrustTier::MachineConfirmed),
+            ..base
+        };
+        // Machine-confirmed floor also passes human-reviewed docs.
+        assert!(resolve_candidate(&index, section_id, &machine_floor).is_some());
+    }
+
+    #[test]
+    fn metadata_adjustment_follows_trust_and_lifecycle() {
+        assert_eq!(metadata_adjustment(None, false), 0.0);
+
+        let mut meta = OkfMeta {
+            doc_type: "Metric".into(),
+            ..Default::default()
+        };
+        assert_eq!(metadata_adjustment(Some(&meta), false), 0.0);
+
+        meta.trust_tier = TrustTier::HumanReviewed;
+        assert_eq!(metadata_adjustment(Some(&meta), false), 0.05);
+        // Stale verified doc: +0.05 − 0.10.
+        assert_eq!(metadata_adjustment(Some(&meta), true), -0.05);
+
+        meta.status = Some("deprecated".into());
+        assert_eq!(metadata_adjustment(Some(&meta), false), -0.05);
+
+        meta.status = Some("draft".into());
+        assert!((metadata_adjustment(Some(&meta), false) - 0.03).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stale_metadata_is_reported_and_penalized() {
+        let mut index = crate::knowledge::KnowledgeIndex::default();
+        // stale_after far in the past.
+        let doc = document::parse_markdown(
+            "kb/old.md",
+            "---\ntype: Metric\nstale_after: 2000-01-01T00:00:00Z\n---\n# Metric\nBody.\n",
+        );
+        index.documents.insert(doc.doc_id.clone(), doc);
+        let base = DocFilter {
+            tag: None,
+            okf_type: None,
+            status: None,
+            min_trust: None,
+        };
+        let cand = resolve_candidate(&index, "knowledge:kb/old.md#metric", &base).unwrap();
+        assert!(cand.stale);
+        assert_eq!(cand.metadata_adjustment, -0.10);
     }
 
     #[tokio::test]
@@ -594,6 +827,9 @@ mod tests {
             tag: None,
             path_filter: Some("docs/".to_string()),
             limit: Some(5),
+            okf_type: None,
+            status: None,
+            min_trust: None,
             embed_config: None,
         };
         let response = search_knowledge(params).await.unwrap();
@@ -625,6 +861,9 @@ mod tests {
                         tag: None,
                         path_filter: None,
                         limit: Some(limit),
+                        okf_type: None,
+                        status: None,
+                        min_trust: None,
                         embed_config: None,
                     })
                     .await
