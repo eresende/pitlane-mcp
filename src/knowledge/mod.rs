@@ -11,12 +11,19 @@ pub mod document;
 use std::collections::{HashMap, HashSet};
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use futures::StreamExt;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+use crate::embed::client::{
+    effective_batch_size, effective_max_concurrency, effective_request_delay_ms, EmbedClient,
+};
+use crate::embed::store::{EmbedStore, EmbedStoreMetadata};
+use crate::embed::EmbedConfig;
 use crate::indexer::extra_excluded_dir_names;
 use crate::path_policy::{read_regular_file, regular_file_metadata};
 
@@ -294,6 +301,161 @@ impl KnowledgeIndex {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Embeddings
+// ---------------------------------------------------------------------------
+
+/// Generate embeddings for every non-empty section of `docs` and save to
+/// `store_path`. Sections whose stored document hash matches are skipped,
+/// so re-runs only embed new or changed sections. Uses the same client,
+/// batching, and store format as code embeddings but a separate store file.
+pub async fn generate_knowledge_embeddings(
+    docs: &[document::KnowledgeDocument],
+    config: &EmbedConfig,
+    store_path: &Path,
+) -> crate::embed::EmbedResult {
+    let start = std::time::Instant::now();
+
+    let section_docs: Vec<(String, String, u64)> = docs
+        .iter()
+        .flat_map(|doc| {
+            doc.sections.iter().filter(|s| !s.is_empty()).map(|s| {
+                let text = s.embedding_text(doc);
+                let hash = crate::embed::document::document_hash(&text);
+                (s.full_id(&doc.doc_id), text, hash)
+            })
+        })
+        .collect();
+
+    let mut store = EmbedStore::load(store_path).unwrap_or_default();
+    let fingerprint = crate::embed::document::document_fingerprint(&config.model);
+    let compatible = EmbedStoreMetadata::load(store_path)
+        .ok()
+        .flatten()
+        .is_some_and(|meta| {
+            meta.is_compatible(
+                &config.model,
+                &fingerprint,
+                &crate::embed::endpoint_fingerprint(&config.url, &config.headers),
+            )
+        });
+    if !compatible {
+        store = EmbedStore::new();
+    }
+
+    // Drop vectors for sections that no longer exist.
+    let live_ids: HashSet<String> = section_docs.iter().map(|(id, _, _)| id.clone()).collect();
+    store.retain_ids(&live_ids);
+
+    let to_embed: Vec<(String, String, u64)> = section_docs
+        .into_iter()
+        .filter(|(id, _, hash)| {
+            !store.vectors.contains_key(id) || store.hashes.get(id) != Some(hash)
+        })
+        .collect();
+
+    let total = to_embed.len();
+    let mut stored = 0usize;
+    let mut skipped = 0usize;
+
+    if total > 0 {
+        tracing::info!(total, "knowledge-embed: starting embedding generation");
+        let client = Arc::new(EmbedClient::new(Arc::new(EmbedConfig {
+            url: config.url.clone(),
+            model: config.model.clone(),
+            headers: config.headers.clone(),
+        })));
+
+        let batch_size = effective_batch_size();
+        let chunks: Vec<Vec<(String, String, u64)>> = to_embed
+            .chunks(batch_size)
+            .map(|chunk| chunk.to_vec())
+            .collect();
+        let total_chunks = chunks.len();
+        let request_delay_ms = effective_request_delay_ms();
+
+        let chunk_futures = chunks.into_iter().enumerate().map(|(i, chunk)| {
+            let client = Arc::clone(&client);
+            async move {
+                if request_delay_ms > 0 && i > 0 {
+                    tokio::time::sleep(std::time::Duration::from_millis(request_delay_ms)).await;
+                }
+                let texts: Vec<String> = chunk.iter().map(|(_, t, _)| t.clone()).collect();
+                let ids: Vec<String> = chunk.iter().map(|(id, _, _)| id.clone()).collect();
+                let hashes: Vec<u64> = chunk.iter().map(|(_, _, h)| *h).collect();
+                let results = client.embed_batch(&texts).await;
+                (
+                    i,
+                    ids.into_iter().zip(results).zip(hashes).collect::<Vec<_>>(),
+                )
+            }
+        });
+
+        let mut completed = 0usize;
+        let mut stream =
+            futures::stream::iter(chunk_futures).buffer_unordered(effective_max_concurrency());
+        while let Some((chunk_idx, batch)) = stream.next().await {
+            let batch_len = batch.len();
+            for ((id, maybe_vec), hash) in batch {
+                match maybe_vec {
+                    Some(vec) => {
+                        if let Some(existing_dim) = store.dimension() {
+                            if vec.len() != existing_dim {
+                                tracing::warn!(
+                                    "knowledge-embed: dimension mismatch for {id}: got {} expected {existing_dim}; skipping",
+                                    vec.len()
+                                );
+                                skipped += 1;
+                                continue;
+                            }
+                        }
+                        store.update(id.clone(), vec);
+                        store.hashes.insert(id, hash);
+                        stored += 1;
+                    }
+                    None => skipped += 1,
+                }
+            }
+            completed += batch_len;
+            let is_last = chunk_idx + 1 == total_chunks;
+            if chunk_idx % 10 == 0 || is_last {
+                tracing::info!(
+                    completed,
+                    total,
+                    stored,
+                    skipped,
+                    "knowledge-embed: progress"
+                );
+            }
+        }
+    }
+
+    let error = match store.save(store_path).and_then(|_| {
+        EmbedStoreMetadata {
+            format_version: crate::embed::document::DOCUMENT_FORMAT_VERSION,
+            model: config.model.clone(),
+            dimension: store.dimension().unwrap_or(0),
+            document_fingerprint: fingerprint,
+            endpoint_fingerprint: crate::embed::endpoint_fingerprint(&config.url, &config.headers),
+        }
+        .save(store_path)
+    }) {
+        Ok(()) => None,
+        Err(e) => {
+            let msg = format!("failed to write knowledge embeddings store: {e}");
+            tracing::error!("{msg}");
+            Some(msg)
+        }
+    };
+
+    crate::embed::EmbedResult {
+        stored,
+        skipped,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+        error,
+    }
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     let tmp = path.with_extension("tmp");
     let mut file = std::fs::File::create(&tmp)?;
@@ -365,7 +527,10 @@ fn should_descend(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::embed::store::EmbedStore;
     use crate::knowledge::document::parse_markdown;
+    use reqwest::header::HeaderMap;
+    use serde_json::{json, Value};
     use std::fs::File;
     use std::path::PathBuf;
 
@@ -538,5 +703,108 @@ mod tests {
         let result = index.index_project(&root, &MarkdownSource).unwrap();
         assert_eq!(result.parsed, 1);
         assert!(index.documents.contains_key("knowledge:visible.md"));
+    }
+
+    fn embed_config(url: String) -> EmbedConfig {
+        EmbedConfig {
+            url,
+            model: "test".into(),
+            headers: HeaderMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_knowledge_embeddings_stores_and_skips_unchanged() {
+        use httpmock::prelude::*;
+        let docs = vec![parse_markdown(
+            "docs/setup.md",
+            "# Setup\nInstall the server.\n## Retry policy\nConfigure `retry_count`.\n## Empty heading\n",
+        )];
+        let data: Vec<Value> = (0..4u32)
+            .map(|i| json!({"index": i, "embedding": [f64::from(i), 1.0 - f64::from(i) / 4.0]}))
+            .collect();
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(json!({"data": data}).to_string());
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("embeddings.bin");
+        let config = embed_config(server.url("/"));
+
+        // Two non-empty sections ("setup", "setup-retry-policy"); the empty one is skipped.
+        let result = generate_knowledge_embeddings(&docs, &config, &store_path).await;
+        assert_eq!(result.stored, 2);
+        assert!(result.error.is_none());
+
+        // Second run: hashes match → nothing to embed.
+        let result = generate_knowledge_embeddings(&docs, &config, &store_path).await;
+        assert_eq!((result.stored, result.skipped), (0, 0));
+
+        let store = EmbedStore::load(&store_path).unwrap();
+        assert!(store.vectors.contains_key("knowledge:docs/setup.md#setup"));
+        assert!(store
+            .vectors
+            .contains_key("knowledge:docs/setup.md#setup-retry-policy"));
+        // Empty section must not be embedded.
+        // Empty section must not be embedded (slug includes parent: "setup-empty-heading").
+        assert!(!store
+            .vectors
+            .contains_key("knowledge:docs/setup.md#setup-empty-heading"));
+    }
+
+    #[tokio::test]
+    async fn changed_sections_reembedded_removed_dropped() {
+        use httpmock::prelude::*;
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST);
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(
+                    json!({"data": [
+                        {"index": 0, "embedding": [1.0]},
+                        {"index": 1, "embedding": [0.5]}
+                    ]})
+                    .to_string(),
+                );
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("embeddings.bin");
+        let config = embed_config(server.url("/"));
+
+        let v1 = vec![parse_markdown("a.md", "# A\nOne.\n## B\nTwo.\n")];
+        assert_eq!(
+            generate_knowledge_embeddings(&v1, &config, &store_path)
+                .await
+                .stored,
+            2
+        );
+
+        // Edit section A only → one re-embed.
+        let v2 = vec![parse_markdown("a.md", "# A\nOne, edited.\n## B\nTwo.\n")];
+        assert_eq!(
+            generate_knowledge_embeddings(&v2, &config, &store_path)
+                .await
+                .stored,
+            1
+        );
+
+        // Drop section B → its vector is removed.
+        let v3 = vec![parse_markdown("a.md", "# A\nOne, edited.\n")];
+        assert_eq!(
+            generate_knowledge_embeddings(&v3, &config, &store_path)
+                .await
+                .stored,
+            0
+        );
+
+        let store = EmbedStore::load(&store_path).unwrap();
+        assert_eq!(store.vectors.len(), 1);
+        assert!(store.vectors.contains_key("knowledge:a.md#a"));
     }
 }

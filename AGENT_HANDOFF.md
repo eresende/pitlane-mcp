@@ -13,6 +13,12 @@ metadata bag now so Phase 2 (OKF fields/relationships) can build on it.
 - [x] Unit 1: `src/knowledge/document.rs` — `KnowledgeDocument`, `KnowledgeSection`,
       heading-aware Markdown sectioning (pulldown_cmark), minimal YAML front-matter
       subset parser, slug-based stable section IDs, embedding-text helper. Unit tests.
+- [x] Unit 2: `src/index/knowledge_bm25.rs` — tantivy schema/build/ensure/search over
+      sections (OR semantics, field boosts, shared "code" tokenizer + escape_query).
+- [x] Unit 3: `src/knowledge/mod.rs` — `ContentSource` trait + `MarkdownSource`,
+      `KnowledgeIndex` with incremental indexing (mtime+size fast path, blake3 hash
+      fallback), documents.bin/meta.json persistence under <index_dir>/knowledge/,
+      code-index exclusion policy (defaults + .gitignore + saved excludes).
 
 ## Important decisions
 - Separate storage under existing per-project index dir:
@@ -34,26 +40,28 @@ metadata bag now so Phase 2 (OKF fields/relationships) can build on it.
 - Tags from front matter `tags` and/or `categories`.
 
 ## Files changed
-- `src/knowledge/mod.rs` (new, stub)
+- `src/knowledge/mod.rs` (new)
 - `src/knowledge/document.rs` (new)
+- `src/index/knowledge_bm25.rs` (new)
+- `src/index/mod.rs` (declare module)
+- `src/index/format.rs` (add `knowledge_dir()`)
+- `src/index/bm25.rs` (pub(crate): register_tokenizer, TOKENIZER_NAME, escape_query)
 - `src/lib.rs` (add `pub mod knowledge;`)
 
 ## Tests / results
-- `cargo test -p pitlane-mcp --lib knowledge::` → (fill in after run)
+- `cargo test --lib` → 714 passed, 0 failed. Clippy clean.
+- Commits: 4ea9d62 (unit 1), bfccd44 (unit 2), a5b82bf (unit 3).
 
 ## Unresolved issues
-- None yet. Watch for: pulldown_cmark 0.13 event API details; setext headings.
+- None blocking. Notes: bincode cannot deserialize serde_json::Value → front matter
+  persisted as JSON string (accessor `front_matter_value()`). Setext headings fold
+  the whole preceding paragraph into the heading (CommonMark) — parser handles it.
 
 ## Next actions (in order, each atomic + tested)
-1. `src/index/knowledge_bm25.rs` — tantivy schema/build/ensure/search over sections
-   (fields: section_id [STRING|STORED], name, hierarchy, content, tags, file_path,
-   doc_title; reuse the "code" tokenizer approach or a plain text one), tests.
-2. `src/knowledge/mod.rs` — `ContentSource` trait + `FilesystemMarkdownSource`
-   (walk .md/.markdown, skip symlinks/binary/>1MiB, honor excludes),
-   `KnowledgeIndex` load/save/incremental (mtime+size+blake3 per file in meta.json),
-   tests.
-3. Embedding integration — knowledge section embedding docs + separate store under
-   `knowledge/`, reuse embed client; wire into index_project flow.
-4. `src/tools/search_knowledge.rs` — MCP tool (query, optional tag/path filters,
+1. Embedding integration — knowledge section embedding docs + separate store under
+   `knowledge/embeddings.bin`, reuse embed client; wire into index_project flow so
+   initial code indexing also indexes knowledge (BM25 ensure + embeddings when
+   configured).
+2. `src/tools/search_knowledge.rs` — MCP tool (query, optional tag/path filters,
    limit) with lexical BM25 + semantic hybrid when embeddings exist; register in
    main.rs; update README/docs.
