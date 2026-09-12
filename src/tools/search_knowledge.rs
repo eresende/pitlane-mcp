@@ -762,16 +762,25 @@ mod tests {
             "kb/old.md",
             "---\ntype: Metric\nstale_after: 2000-01-01T00:00:00Z\n---\n# Metric\nBody.\n",
         );
+        // The spec §5.5 date-only spelling must be reported and penalized too.
+        let date_doc = document::parse_markdown(
+            "kb/old-date.md",
+            "---\ntype: Metric\nstale_after: 2000-01-01\n---\n# Metric\nBody.\n",
+        );
         index.documents.insert(doc.doc_id.clone(), doc);
+        index.documents.insert(date_doc.doc_id.clone(), date_doc);
         let base = DocFilter {
             tag: None,
             okf_type: None,
             status: None,
             min_trust: None,
         };
-        let cand = resolve_candidate(&index, "knowledge:kb/old.md#metric", &base).unwrap();
-        assert!(cand.stale);
-        assert_eq!(cand.metadata_adjustment, -0.10);
+        for slug in ["kb/old.md", "kb/old-date.md"] {
+            let cand =
+                resolve_candidate(&index, &format!("knowledge:{slug}#metric"), &base).unwrap();
+            assert!(cand.stale, "{slug} should be stale");
+            assert_eq!(cand.metadata_adjustment, -0.10, "{slug}");
+        }
     }
 
     #[tokio::test]

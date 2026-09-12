@@ -284,7 +284,7 @@ fn section_id_list(doc: &KnowledgeDocument) -> String {
 fn served_reason(doc: &KnowledgeDocument, stale: bool, what: &str) -> String {
     let mut reason = format!("Served {what} of '{}'.", doc.title);
     if stale {
-        reason.push_str(" Warning: the document is stale (its `stale_after` instant has passed).");
+        reason.push_str(" Warning: the document is stale (its `stale_after` date has passed).");
     }
     reason
 }
@@ -476,18 +476,30 @@ mod tests {
     #[tokio::test]
     async fn stale_okf_documents_are_flagged() {
         let dir = TempDir::new().unwrap();
+        // Full RFC 3339 spelling.
         std::fs::write(
             dir.path().join("old.md"),
             "---\ntype: Metric\nstale_after: 2000-01-01T00:00:00Z\n---\n# Old\nBody.\n",
         )
         .unwrap();
+        // Spec §5.5 date-only spelling must be flagged too.
+        std::fs::write(
+            dir.path().join("old-date.md"),
+            "---\ntype: Metric\nstale_after: 2000-01-01\n---\n# Old\nBody.\n",
+        )
+        .unwrap();
         let root = dir.path().canonicalize().unwrap();
 
-        let response = read(&root, "old.md", Some("old")).await.unwrap();
-        assert_eq!(response["stale"], true);
-        assert!(response["steering"]["why_this_matched"]
-            .as_str()
-            .unwrap()
-            .contains("stale"));
+        for file in ["old.md", "old-date.md"] {
+            let response = read(&root, file, Some("old")).await.unwrap();
+            assert_eq!(response["stale"], true, "{file} should be stale");
+            assert!(
+                response["steering"]["why_this_matched"]
+                    .as_str()
+                    .unwrap()
+                    .contains("stale"),
+                "{file}"
+            );
+        }
     }
 }
