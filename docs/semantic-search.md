@@ -38,24 +38,8 @@ uses the same search path before reading source.
 
 ## Configuration
 
-- `PITLANE_EMBED_DOCUMENT_PROFILE=metadata_code|metadata|legacy`
-- `PITLANE_EMBED_MAX_CHARS` (default `6000`)
-- `PITLANE_EMBED_BODY_CHARS` (default `3000`)
-- `PITLANE_EMBED_MAX_IDENTIFIERS` (default `64`)
-- `PITLANE_EMBED_TASK_PREFIX_MODE=auto|none|nomic`
-- `PITLANE_EMBED_DOCUMENT_PREFIX` and `PITLANE_EMBED_QUERY_PREFIX` override task prefixes
-- `PITLANE_EMBED_API_KEY` adds an `Authorization: Bearer ...` header
-- `PITLANE_EMBED_HEADERS` adds arbitrary request headers from a JSON object of string values
-- `PITLANE_EMBED_MAX_CONCURRENCY` limits concurrent endpoint requests (default `16`)
-- `PITLANE_EMBED_MAX_RETRIES` retries `429` and transient `5xx` responses (default `3`)
-- `PITLANE_EMBED_RETRY_BASE_MS` sets exponential backoff when `Retry-After` is absent (default `500`)
-- `PITLANE_EMBED_REQUEST_DELAY_MS` minimum delay between consecutive requests to avoid hitting RPM limits (default `0`, disabled)
-- `PITLANE_SEMANTIC_LEXICAL_WEIGHT` (default `0.10`)
-- `PITLANE_SEMANTIC_BM25_WEIGHT` (default `0.03`)
-- `PITLANE_SEMANTIC_TEST_PENALTY` (default `0.12`)
-- `PITLANE_SEMANTIC_AUXILIARY_PENALTY` (default `0.03`)
-- `PITLANE_SEMANTIC_KIND_WEIGHT` (default `0.01`)
-- `PITLANE_SEMANTIC_SESSION_WEIGHT` (default `0`)
+See the [canonical configuration reference](configuration.md) for every
+embedding, document-generation, ranking, and timeout environment variable.
 
 `PITLANE_EMBED_URL` can target any reachable OpenAI-compatible embedding endpoint,
 including company gateways. The endpoint must accept `model` and `input` fields

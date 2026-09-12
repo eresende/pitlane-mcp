@@ -28,18 +28,9 @@ pitlane search /your/project "error handling when file cannot be read" --mode se
 
 ## Environment Variables
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `PITLANE_EMBED_URL` | yes | — | Full URL of the embedding endpoint (e.g. `http://localhost:11434/api/embed`) |
-| `PITLANE_EMBED_MODEL` | yes | — | Model identifier to pass in requests (e.g. `nomic-embed-text`) |
-| `PITLANE_EMBED_API_KEY` | no | — | Bearer token sent as `Authorization: Bearer ...` |
-| `PITLANE_EMBED_HEADERS` | no | — | JSON object of additional string request headers, such as `{"x-tenant-id":"engineering"}` |
-| `PITLANE_EMBED_BATCH_SIZE` | no | `256` | Number of symbols per HTTP request. Reduce for large/slow models. |
-| `PITLANE_EMBED_TIMEOUT` | no | `120` | Per-request timeout in seconds. Increase for large models. |
-| `PITLANE_EMBED_MAX_CONCURRENCY` | no | `16` | Maximum number of concurrent embedding requests. Reduce for rate-limited gateways. |
-| `PITLANE_EMBED_MAX_RETRIES` | no | `3` | Retries for `429` and transient `5xx` responses. |
-| `PITLANE_EMBED_RETRY_BASE_MS` | no | `500` | Initial exponential-backoff delay when `Retry-After` is absent. |
-| `PITLANE_EMBED_REQUEST_DELAY_MS` | no | `0` | Minimum delay in milliseconds between consecutive requests. Set to `700` for endpoints limited to 100 RPM. |
+See the [canonical configuration reference](docs/configuration.md) for every
+embedding environment variable, its default, validation rules, and the related
+ranking controls.
 
 Both `PITLANE_EMBED_URL` and `PITLANE_EMBED_MODEL` must be set to non-empty strings for embeddings to be enabled. Either absent or empty disables the feature entirely.
 

@@ -4,6 +4,9 @@ This directory contains the focused documentation for `pitlane-mcp`.
 
 ## Pages
 
+- [Configuration](configuration.md)
+  Canonical reference for supported environment variables and their defaults.
+
 - [Tool Reference](tools.md)
   Default and advanced MCP tool surface, plus symbol ID format.
 
@@ -18,6 +21,9 @@ This directory contains the focused documentation for `pitlane-mcp`.
 
 - [Security](security.md)
   Filesystem scope, confinement, storage, and practical deployment guidance.
+
+- [Semantic Search](semantic-search.md)
+  Embedding pipeline, document construction, and hybrid ranking internals.
 
 - [Development Notes](development.md)
   Local build/test/release workflow, including the stale-binary quirk after `cargo publish`.

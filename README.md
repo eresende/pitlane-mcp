@@ -168,6 +168,7 @@ Advanced primitives are hidden from `tools/list` by default. Set `PITLANE_MCP_TO
 ## Documentation
 
 - [Docs Index](docs/README.md)
+- [Configuration](docs/configuration.md)
 - [Tool Reference](docs/tools.md)
 - [Agent Guidance](docs/agent-guidance.md)
 - [Languages and Symbol Kinds](docs/languages.md)
