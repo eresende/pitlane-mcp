@@ -301,7 +301,7 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
             "next_step": if results.is_empty() {
                 "No knowledge sections matched. Try a broader query or check that Markdown files exist in the project (they must not be gitignored)."
             } else {
-                "Use read_code_unit with file_path and line_start/line_end to open the full section, then follow links in neighboring docs."
+                "Use read_knowledge_document with file_path to open the full document, or pass section_id to fetch only that section."
             },
             "avoid": "Avoid loading whole documentation trees into context; fetch sections on demand.",
         },
@@ -323,13 +323,12 @@ pub async fn search_knowledge(params: SearchKnowledgeParams) -> anyhow::Result<V
         if results.is_empty() {
             "search_content"
         } else {
-            "read_code_unit"
+            "read_knowledge_document"
         },
         match &top {
             Some(r) => json!({
-                "file_path": r["file_path"],
-                "line_start": r["line_start"],
-                "line_end": r["line_end"],
+                "document": r["file_path"],
+                "section": r["section_id"],
             }),
             None => json!(params.project),
         },
@@ -566,6 +565,22 @@ pub(crate) fn maybe_spawn_knowledge_embeds(
     });
 }
 
+/// True when the on-disk embedding store is compatible with `cfg` and covers
+/// every non-empty section of `index`. Used by the one-shot CLI to decide
+/// whether embeddings must be regenerated synchronously before a search (the
+/// MCP server instead refreshes them via `maybe_spawn_knowledge_embeds`).
+pub fn knowledge_store_fresh(
+    canonical: &Path,
+    index: &crate::knowledge::KnowledgeIndex,
+    cfg: &EmbedConfig,
+) -> bool {
+    match knowledge_dir(canonical) {
+        Ok(kdir) => load_compatible_store(&kdir.join("embeddings.bin"), cfg)
+            .is_some_and(|store| knowledge_embeddings_complete(index, &store)),
+        Err(_) => false,
+    }
+}
+
 fn knowledge_embeddings_complete(
     index: &crate::knowledge::KnowledgeIndex,
     store: &EmbedStore,
@@ -747,16 +762,25 @@ mod tests {
             "kb/old.md",
             "---\ntype: Metric\nstale_after: 2000-01-01T00:00:00Z\n---\n# Metric\nBody.\n",
         );
+        // The spec §5.5 date-only spelling must be reported and penalized too.
+        let date_doc = document::parse_markdown(
+            "kb/old-date.md",
+            "---\ntype: Metric\nstale_after: 2000-01-01\n---\n# Metric\nBody.\n",
+        );
         index.documents.insert(doc.doc_id.clone(), doc);
+        index.documents.insert(date_doc.doc_id.clone(), date_doc);
         let base = DocFilter {
             tag: None,
             okf_type: None,
             status: None,
             min_trust: None,
         };
-        let cand = resolve_candidate(&index, "knowledge:kb/old.md#metric", &base).unwrap();
-        assert!(cand.stale);
-        assert_eq!(cand.metadata_adjustment, -0.10);
+        for slug in ["kb/old.md", "kb/old-date.md"] {
+            let cand =
+                resolve_candidate(&index, &format!("knowledge:{slug}#metric"), &base).unwrap();
+            assert!(cand.stale, "{slug} should be stale");
+            assert_eq!(cand.metadata_adjustment, -0.10, "{slug}");
+        }
     }
 
     #[tokio::test]

@@ -87,7 +87,8 @@ pub struct OkfMeta {
     pub resource: Option<String>,
     /// `status`: `draft` | `stable` | `deprecated`; absent ⇒ `stable`.
     pub status: Option<String>,
-    /// `stale_after` as a raw ISO 8601 datetime string.
+    /// `stale_after` raw value: the spec §5.5 date-only `YYYY-MM-DD`
+    /// spelling, or a full RFC 3339 timestamp.
     pub stale_after: Option<String>,
     pub trust_tier: TrustTier,
     pub generated_by: Option<String>,
@@ -147,8 +148,11 @@ pub fn extract_okf(front_matter: &serde_yaml::Value) -> Option<OkfMeta> {
     })
 }
 
-/// True when the document's `stale_after` instant is at or before `now_secs`.
-/// Malformed timestamps are never stale.
+/// True when the document's `stale_after` (spec §5.5) has passed: a full RFC
+/// 3339 instant, or the spec's bare `YYYY-MM-DD` date. Date-only values are
+/// compared from UTC midnight of that day, so a concept is stale on/after its
+/// `stale_after` day itself — matching the reference implementation's
+/// `today >= stale_after`. Malformed values are never stale.
 pub fn is_stale(meta: &OkfMeta, now_secs: i64) -> bool {
     meta.stale_after
         .as_deref()
@@ -156,11 +160,39 @@ pub fn is_stale(meta: &OkfMeta, now_secs: i64) -> bool {
         .is_some_and(|t| now_secs >= t)
 }
 
-/// Parse an ISO 8601 datetime with explicit offset into Unix seconds.
+/// Parse a `stale_after` value into Unix seconds: a full RFC 3339 datetime
+/// with explicit offset, or the OKF spec §5.5 date-only `YYYY-MM-DD` spelling
+/// (as UTC midnight, so a concept is stale from the start of that day).
+/// Returns `None` for anything else, including the basic (`20260101`) and
+/// week (`2026-W01-1`) forms the okf reference's strict ISO_DATE grammar
+/// rejects.
 pub fn parse_iso8601_secs(s: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(s.trim())
-        .ok()
-        .map(|dt| dt.timestamp())
+    let s = s.trim();
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp());
+    }
+    // Strict `YYYY-MM-DD`: exactly four digits, dash, two digits, dash, two
+    // digits. `from_ymd_opt` then validates calendar legality (month and day
+    // ranges, leap years).
+    let bytes = s.as_bytes();
+    if bytes.len() != 10
+        || !bytes[..4].iter().all(|b| b.is_ascii_digit())
+        || bytes[4] != b'-'
+        || !bytes[5..7].iter().all(|b| b.is_ascii_digit())
+        || bytes[7] != b'-'
+        || !bytes[8..].iter().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    let year = std::str::from_utf8(&bytes[..4]).ok()?.parse::<i32>().ok()?;
+    let month = std::str::from_utf8(&bytes[5..7])
+        .ok()?
+        .parse::<u32>()
+        .ok()?;
+    let day = std::str::from_utf8(&bytes[8..]).ok()?.parse::<u32>().ok()?;
+    chrono::NaiveDate::from_ymd_opt(year, month, day)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.and_utc().timestamp())
 }
 
 /// Current time as Unix seconds (0 on clock failure, matching FileState).
@@ -347,6 +379,72 @@ mod tests {
 
         meta.stale_after = None;
         assert!(!is_stale(&meta, i64::MAX / 2));
+    }
+
+    #[test]
+    fn stale_after_date_only_spelling_is_stale_from_that_day() {
+        // Spec §5.5 names the bare date; a concept is stale on/after the day.
+        let far_past = OkfMeta {
+            doc_type: "Metric".into(),
+            stale_after: Some("2000-01-01".into()),
+            ..Default::default()
+        };
+        assert!(is_stale(
+            &far_past,
+            parse_iso8601_secs("2026-09-23T12:00:00Z").unwrap()
+        ));
+
+        // Boundary: on the cut-off day itself (UTC midnight) the doc is stale.
+        let today = OkfMeta {
+            doc_type: "Metric".into(),
+            stale_after: Some("2026-09-23".into()),
+            ..Default::default()
+        };
+        assert!(is_stale(
+            &today,
+            parse_iso8601_secs("2026-09-23T00:00:00Z").unwrap()
+        ));
+
+        // Date-only and its RFC 3339 midnight equate to the same instant.
+        assert_eq!(
+            parse_iso8601_secs("2000-01-01"),
+            parse_iso8601_secs("2000-01-01T00:00:00Z")
+        );
+
+        // A future cut-off is not stale yet.
+        let future = OkfMeta {
+            doc_type: "Metric".into(),
+            stale_after: Some("2099-12-31".into()),
+            ..Default::default()
+        };
+        assert!(!is_stale(
+            &future,
+            parse_iso8601_secs("2026-09-23T12:00:00Z").unwrap()
+        ));
+    }
+
+    #[test]
+    fn stale_after_rejects_non_date_spellings() {
+        // Basic and week forms (rejected by the reference's ISO_DATE too),
+        // non-padded parts, impossible dates, and garbage.
+        for bad in [
+            "20260101",
+            "2026-W01-1",
+            "2026-1-1",
+            "2026-09-1",
+            "2026-13-01",
+            "2026-00-01",
+            "2026-09-32",
+            "2026-02-30",
+            "2026-09-23 00:00:00",
+            "not a date",
+            "",
+        ] {
+            assert_eq!(parse_iso8601_secs(bad), None, "expected {bad:?} rejected");
+        }
+        // Full RFC 3339 timestamps still parse through the timestamp path.
+        assert!(parse_iso8601_secs("2026-09-23T00:00:00Z").is_some());
+        assert!(parse_iso8601_secs("2026-09-23T12:30:00-05:00").is_some());
     }
 
     #[test]

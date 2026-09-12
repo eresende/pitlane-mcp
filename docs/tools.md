@@ -215,10 +215,29 @@ Notes:
 - The index is built lazily on first use. Each search hashes eligible Markdown files to catch edits even when timestamps and sizes are preserved; only changed documents are reparsed.
 - Ranking blends BM25 over section text/headings with semantic cosine similarity when `PITLANE_EMBED_URL`/`PITLANE_EMBED_MODEL` are set. Section embeddings generate in the background after changes; lexical results are always available without them.
 - Optional filters: `tag` (document front-matter tag, case-insensitive), `path_filter` (substring of the relative file path), and OKF metadata filters: `okf_type` (front-matter `type`, case-insensitive), `status` (`draft`/`stable`/`deprecated`), and `min_trust` (`unverified` < `machine-confirmed` < `human-reviewed`). OKF filters only match documents that carry OKF metadata.
-- Results include `file_path`, heading hierarchy, line range, a snippet, and score breakdown — open full sections with `read_code_unit` using those coordinates.
+- Results include `file_path`, heading hierarchy, line range, a snippet, and score breakdown — open the full document with `read_knowledge_document`, or pass a result's `section_id` to fetch only that section.
 - [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format) (OKF) v0.2 documents are understood natively: front matter is parsed as full YAML, and `type`/`description`/`resource`/`status`/`generated`/`verified`/`stale_after`/`sources` metadata is extracted, filtered on, and returned with each result. The derived trust tier (`verified` by `human:` actors ⇒ human-reviewed) and staleness (`stale_after` passed) are advisory ranking signals: verified concepts rank slightly higher, stale/deprecated/draft concepts slightly lower. Plain-Markdown documents remain fully usable without OKF metadata.
 - Markdown links to other knowledge documents (bundle-relative `/x.md` or relative `./x.md`) are preserved as `related_docs` in results, exposing the bundle's relationship graph.
 - Unknown front-matter keys (including OKF extension and computation fields such as `runtime`) are preserved in the index and available for future use; malformed front matter is treated as plain Markdown.
+
+### `read_knowledge_document`
+
+Read the full source Markdown of an indexed knowledge document, or one section's
+exact line range, after `search_knowledge` returns a snippet.
+
+```json
+{ "project": "/your/project", "document": "docs/runbooks/retries.md" }
+```
+
+Pass `"section"` to fetch only one part: a `sections[].section_id` slug (e.g.
+`retries-backoff`), `preamble`, or a full section id
+(`knowledge:docs/retries.md#retries-backoff`).
+
+Notes:
+
+- The source Markdown stays authoritative; the tool serves it from disk, refreshing the index first under the same lock, so the text always matches the reported section coordinates.
+- Responses include title/tags, OKF metadata (`okf_type`, `description`, `resource`, `status`, `trust_tier`, `stale`), the parsed `front_matter` bag, a section outline with line ranges, and the link graph: `related_docs` (outgoing links) and `referenced_by` (documents linking in).
+- Unindexed or non-Markdown paths fail with `DOCUMENT_NOT_FOUND`; unknown sections fail with `INVALID_ARGUMENT` listing the available ids; paths outside the project (including `../` traversal and absolute paths) are rejected with `ACCESS_DENIED`.
 
 ### `search_content`
 

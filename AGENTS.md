@@ -15,6 +15,7 @@ Default public tier:
 - `doctor`
 - `search_content`
 - `search_knowledge`
+- `read_knowledge_document`
 
 Advanced primitive tools are hidden from `tools/list` unless the server is started with `PITLANE_MCP_TOOL_TIER=all`.
 
@@ -34,13 +35,14 @@ Advanced primitive tools are hidden from `tools/list` unless the server is start
 5. Use `analyze_impact` for blast-radius questions before edits or refactors. Use `analyze_changes` to map a Git diff to revision-qualified symbols, impact evidence, and test candidates.
 6. Use `search_content` when you know a text snippet, log string, import path, macro name, or regex fragment but do not know the symbol boundary yet.
 7. Use `search_knowledge` for documentation questions — it searches indexed Markdown (docs, READMEs, runbooks) by heading and content, with hybrid lexical/semantic ranking when embeddings exist. It understands OKF v0.2 documents natively: filter by concept `type`/`status`/trust tier via `okf_type`/`status`/`min_trust`, and results carry trust, staleness, and cross-document `related_docs` relationships.
-7. Use `get_index_stats` to orient yourself in unfamiliar repos before broader exploration.
-8. Fall back to direct file reads only when editing or when full-file context is genuinely required.
-9. Treat `read_code_unit` as the preferred diff-aware read surface. Use its `read_state.status` field to decide whether to reuse the payload, expand, or reread:
+8. Use `read_knowledge_document` to open a document found by `search_knowledge`: the full source Markdown by default, or one section via `section` (a `sections[].section_id` slug or the full `section_id`). Results include OKF metadata, the section outline with line ranges, and the link graph (`related_docs` outgoing, `referenced_by` incoming).
+9. Use `get_index_stats` to orient yourself in unfamiliar repos before broader exploration.
+10. Fall back to direct file reads only when editing or when full-file context is genuinely required.
+11. Treat `read_code_unit` as the preferred diff-aware read surface. Use its `read_state.status` field to decide whether to reuse the payload, expand, or reread:
    `new` means first read in this session
    `unchanged` means the same target was reread with identical content, so expand instead of rereading again
    `changed` means the same target changed since the previous read, so use the refreshed payload before expanding
-10. When `locate_code`, `trace_path`, or `analyze_impact` return `session_state`, use it to understand whether the top target was already seen and whether the server intentionally promoted an unseen nearby alternative.
+12. When `locate_code`, `trace_path`, or `analyze_impact` return `session_state`, use it to understand whether the top target was already seen and whether the server intentionally promoted an unseen nearby alternative.
 
 # Search Strategy
 
