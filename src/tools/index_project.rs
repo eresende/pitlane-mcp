@@ -11,7 +11,7 @@ use rmcp::RoleServer;
 use serde_json::{json, Value};
 use walkdir::WalkDir;
 
-use tracing::info;
+use tracing::debug;
 
 use crate::embed::EmbedConfig;
 use crate::error::ToolError;
@@ -22,7 +22,7 @@ use crate::index::SymbolIndex;
 use crate::indexer::{
     default_exclude_patterns, extra_excluded_dir_names, is_declaration_file,
     is_excluded_dir_name_with_custom, is_supported_extension, load_gitignore_patterns, registry,
-    warn_walkdir_error, Indexer,
+    warn_walkdir_error, Indexer, Phase3Progress,
 };
 use crate::path_policy::{canonical_regular_file, is_regular_file, resolve_project_path};
 
@@ -50,13 +50,20 @@ pub struct IndexProjectParams {
     /// Optional embedding configuration. When `Some`, embeddings are generated
     /// after indexing. Passed programmatically — not part of the MCP tool schema.
     pub embed_config: Option<Arc<EmbedConfig>>,
+    /// Optional progress callback for the CLI. Called during file walking/parsing
+    /// with `(current, total)` — the first call always has `current=0, total=file_count`.
+    /// Only used when no MCP peer is present (i.e. the `pitlane index` CLI command).
+    pub on_index_progress: Option<Box<dyn Fn(usize, usize) + Send + Sync>>,
+    /// Optional progress callback for Phase 3 (symbol insertion + graph rebuild).
+    /// Only used when no MCP peer is present.
+    pub on_phase3_progress: Option<Box<dyn Fn(Phase3Progress) + Send + Sync>>,
 }
 
 pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Value> {
     let start = Instant::now();
     let canonical = resolve_project_path(&params.path)?;
 
-    info!(path = %canonical.display(), "index_project: start");
+    debug!(path = %canonical.display(), "index_project: start");
 
     let force = params.force.unwrap_or(false);
     let mut exclude = params.exclude.take().unwrap_or_default();
@@ -186,7 +193,7 @@ pub async fn index_project(mut params: IndexProjectParams) -> anyhow::Result<Val
 }
 
 async fn do_index_project(
-    params: IndexProjectParams,
+    mut params: IndexProjectParams,
     canonical: std::path::PathBuf,
     exclude: Vec<String>,
     idx_dir: std::path::PathBuf,
@@ -202,11 +209,13 @@ async fn do_index_project(
     };
     let progress_token = params.progress_token.clone();
     let peer = params.peer.clone();
+    let on_index_progress = params.on_index_progress.take();
+    let on_phase3_progress = params.on_phase3_progress.take();
 
     let parsers = registry::build_default_registry();
     let indexer = Indexer::new(parsers);
 
-    info!(path = %canonical.display(), "index_project: walking files");
+    debug!(path = %canonical.display(), "index_project: walking files");
 
     // Progress notifications bridge: the rayon callback sends (current, total)
     // into a channel; a concurrent async task drains it and sends notifications.
@@ -245,7 +254,7 @@ async fn do_index_project(
                 let tx = tx_for_cb.clone();
                 Some(Box::new(move |current, total| {
                     if current == 0 {
-                        tracing::info!(total, "index_project: discovered files, starting parse");
+                        tracing::debug!(total, "index_project: discovered files, starting parse");
                     }
                     let msg = if current == 0 {
                         format!("Indexing {total} files…")
@@ -265,11 +274,53 @@ async fn do_index_project(
                     );
                 }))
             } else {
+                // on_index_progress is captured by the outer `move ||` closure
+                // and moved into this inner single-use closure.
                 Some(Box::new(move |current, total| {
                     if current == 0 {
-                        tracing::info!(total, "index_project: discovered files, starting parse");
+                        tracing::debug!(total, "index_project: discovered files, starting parse");
                     }
-                    let _ = (current, total);
+                    if let Some(ref cb) = on_index_progress {
+                        cb(current, total);
+                    }
+                }))
+            }
+        }
+    };
+
+    // Build the Phase 3 progress callback (symbol insertion + graph rebuild).
+    let make_phase3_cb = {
+        let has_peer = drain_handle.is_some();
+        let tx_for_cb = progress_tx.clone();
+        move || -> Option<Box<dyn Fn(Phase3Progress) + Send + Sync>> {
+            if has_peer {
+                let tx = tx_for_cb.clone();
+                Some(Box::new(move |progress| {
+                    let (current, total, msg) = match progress {
+                        Phase3Progress::InsertingSymbols { current, total } => (
+                            current,
+                            total,
+                            format!("Inserting symbols… {current}/{total}"),
+                        ),
+                        Phase3Progress::RebuildingGraph { total_symbols } => (
+                            total_symbols,
+                            total_symbols,
+                            "Rebuilding graph…".to_string(),
+                        ),
+                    };
+                    let result = tx.try_send((current, total, msg));
+                    tracing::debug!(
+                        current,
+                        total,
+                        sent = result.is_ok(),
+                        "index_project: phase 3 progress tick"
+                    );
+                }))
+            } else {
+                Some(Box::new(move |progress| {
+                    if let Some(ref cb) = on_phase3_progress {
+                        cb(progress);
+                    }
                 }))
             }
         }
@@ -279,11 +330,13 @@ async fn do_index_project(
     let exclude_for_indexing = exclude.clone();
     let (mut index, file_count) = tokio::task::spawn_blocking(move || {
         let cb = make_cb();
+        let phase3_cb = make_phase3_cb();
         indexer.index_project_with_progress(
             &canonical_clone,
             &exclude_for_indexing,
             max_files,
             cb.as_deref(),
+            phase3_cb.as_deref(),
         )
     })
     .await
@@ -298,7 +351,7 @@ async fn do_index_project(
         let _ = handle.await;
     }
 
-    info!(
+    debug!(
         file_count,
         symbol_count = index.symbol_count(),
         "index_project: parsing complete"
@@ -892,6 +945,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
         let err = index_project(params).await.unwrap_err();
         let tool_err = err
@@ -924,6 +979,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
         let err = index_project(params).await.unwrap_err();
         let tool_err = err
@@ -957,6 +1014,8 @@ mod tests {
                 progress_token: None,
                 peer: None,
                 embed_config: None,
+                on_index_progress: None,
+                on_phase3_progress: None,
             }))
             .unwrap_err();
 
@@ -984,6 +1043,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         })
         .await
         .unwrap();
@@ -1000,6 +1061,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         })
         .await
         .unwrap();
@@ -1021,6 +1084,8 @@ mod tests {
             progress_token: p.progress_token.clone(),
             peer: p.peer.clone(),
             embed_config: p.embed_config.clone(),
+            on_index_progress: None,
+            on_phase3_progress: None,
         }
     }
 
@@ -1041,6 +1106,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
         let initial = index_project(clone_params(&base)).await.unwrap();
         assert_eq!(initial["file_count"], json!(2));
@@ -1053,6 +1120,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
             path: base.path.clone(),
         };
         let resp = index_project(narrowed).await.unwrap();
@@ -1085,6 +1154,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         })
         .await
         .unwrap();
@@ -1103,6 +1174,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         })
         .await
         .unwrap();
@@ -1131,6 +1204,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         })
         .await
         .unwrap();
@@ -1148,6 +1223,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         })
         .await
         .unwrap();
@@ -1176,6 +1253,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
 
         let response = index_project(params).await.unwrap();
@@ -1237,6 +1316,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config,
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
 
         let response = index_project(params).await.unwrap();
@@ -1291,6 +1372,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config,
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
 
         let response = index_project(params).await.unwrap();

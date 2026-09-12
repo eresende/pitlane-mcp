@@ -100,6 +100,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: None,
+            on_index_progress: None,
+            on_phase3_progress: None,
         })
         .await
         .unwrap();
