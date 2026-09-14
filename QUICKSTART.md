@@ -67,6 +67,24 @@ Add this to `.vscode/mcp.json` or `.kiro/settings/mcp.json`:
 }
 ```
 
+### Muse Code
+
+Add this to `~/.config/muse/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "pitlane-mcp": {
+      "type": "stdio",
+      "command": "pitlane-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Use the absolute path to `pitlane-mcp` in `command` if it is not on your `PATH`.
+
 ## 3. Learn the Tool Hierarchy
 
 The fastest way to use `pitlane-mcp` correctly is to use tools by intent.
