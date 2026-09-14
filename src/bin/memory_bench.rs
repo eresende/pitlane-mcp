@@ -154,6 +154,8 @@ fn run_bench(path: &str) {
                 progress_token: None,
                 peer: None,
                 embed_config: None,
+                on_index_progress: None,
+                on_phase3_progress: None,
             }))
             .unwrap_or_else(|e| {
                 eprintln!("Indexing failed: {e}");

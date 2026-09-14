@@ -37,6 +37,12 @@ use language::LanguageParser;
 const MAX_FILE_BYTES: u64 = 1024 * 1024; // 1 MiB
 pub const EXCLUDE_DIRS_ENV_VAR: &str = "PITLANE_EXCLUDE_DIRS";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase3Progress {
+    InsertingSymbols { current: usize, total: usize },
+    RebuildingGraph { total_symbols: usize },
+}
+
 pub struct Indexer {
     parsers: Vec<Box<dyn LanguageParser>>,
     /// Map from file extension to parser index
@@ -72,7 +78,7 @@ impl Indexer {
         root: &Path,
         exclude_patterns: &[String],
     ) -> anyhow::Result<(SymbolIndex, usize)> {
-        self.index_project_with_progress(root, exclude_patterns, usize::MAX, None)
+        self.index_project_with_progress(root, exclude_patterns, usize::MAX, None, None)
     }
 
     /// Like `index_project` but accepts an optional progress callback and a file-count cap.
@@ -81,12 +87,16 @@ impl Indexer {
     /// aborts with `ToolError::FileLimitExceeded`. The walk stops as soon as `max_files + 1`
     /// eligible files are found, so it never reads the full filesystem for large paths.
     /// Pass `usize::MAX` to disable the cap.
+    ///
+    /// `on_progress` is called during file walking/parsing with `(current, total_files)`.
+    /// `on_phase3_progress` reports symbol insertion and graph rebuild as distinct stages.
     pub fn index_project_with_progress(
         &self,
         root: &Path,
         exclude_patterns: &[String],
         max_files: usize,
         on_progress: Option<&(dyn Fn(usize, usize) + Send + Sync)>,
+        on_phase3_progress: Option<&(dyn Fn(Phase3Progress) + Send + Sync)>,
     ) -> anyhow::Result<(SymbolIndex, usize)> {
         let exclude_set = Self::build_exclude_set(exclude_patterns)?;
         let extra_excluded_dirs = extra_excluded_dir_names();
@@ -203,8 +213,10 @@ impl Indexer {
                     if let Some(cb) = on_progress {
                         let prev = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let current = prev + 1;
-                        // Fire on every tick_interval boundary.
-                        if current.is_multiple_of(tick_interval) {
+                        // Fire on every tick_interval boundary **and** always
+                        // fire for the very last file so the bar always reaches
+                        // total_files (even when total_files is not a multiple).
+                        if current.is_multiple_of(tick_interval) || current == total_files {
                             cb(current, total_files);
                         }
                     }
@@ -216,17 +228,39 @@ impl Indexer {
         // Phase 3 — insert symbols into the index (sequential: SymbolIndex is &mut).
         let mut index = SymbolIndex::new();
         let file_count = parsed.len();
+        let total_symbols: usize = parsed.iter().map(|v| v.len()).sum();
+        let insert_tick_interval = ((total_symbols / 20).max(100)).max(1); // every ~5%, min 100
+        let mut inserted = 0usize;
+        let mut next_insert_tick = insert_tick_interval;
+        if let Some(cb) = on_phase3_progress {
+            cb(Phase3Progress::InsertingSymbols {
+                current: 0,
+                total: total_symbols,
+            });
+        }
         for symbols in parsed {
             for symbol in symbols {
                 index.insert(symbol);
+                inserted += 1;
+            }
+            if let Some(cb) = on_phase3_progress {
+                if inserted >= next_insert_tick || inserted == total_symbols {
+                    cb(Phase3Progress::InsertingSymbols {
+                        current: inserted,
+                        total: total_symbols,
+                    });
+                    while next_insert_tick <= inserted {
+                        next_insert_tick = next_insert_tick.saturating_add(insert_tick_interval);
+                    }
+                }
             }
         }
-        index.rebuild_navigation_graph();
 
-        // Notify: Phase 2+3 complete (always fire the final tick).
-        if let Some(cb) = on_progress {
-            cb(file_count, total_files);
+        // Notify: graph rebuild step.
+        if let Some(cb) = on_phase3_progress {
+            cb(Phase3Progress::RebuildingGraph { total_symbols });
         }
+        index.rebuild_navigation_graph();
 
         Ok((index, file_count))
     }
@@ -1397,6 +1431,48 @@ mod tests {
     }
 
     #[test]
+    fn test_phase3_progress_reports_start_intermediate_completion_and_graph() {
+        let dir = TempDir::new().unwrap();
+        for file_idx in 0..3 {
+            let source = (0..60)
+                .map(|fn_idx| format!("fn f_{file_idx}_{fn_idx}() {{}}\n"))
+                .collect::<String>();
+            std::fs::write(dir.path().join(format!("f{file_idx}.rs")), source).unwrap();
+        }
+
+        let events = std::sync::Mutex::new(Vec::new());
+        let record = |progress| events.lock().unwrap().push(progress);
+        create_indexer()
+            .index_project_with_progress(dir.path(), &[], usize::MAX, None, Some(&record))
+            .unwrap();
+
+        let events = events.into_inner().unwrap();
+        assert_eq!(
+            events.first(),
+            Some(&Phase3Progress::InsertingSymbols {
+                current: 0,
+                total: 180,
+            })
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Phase3Progress::InsertingSymbols { current, total }
+                if *current > 0 && current < total
+        )));
+        assert_eq!(
+            events.get(events.len() - 2),
+            Some(&Phase3Progress::InsertingSymbols {
+                current: 180,
+                total: 180,
+            })
+        );
+        assert_eq!(
+            events.last(),
+            Some(&Phase3Progress::RebuildingGraph { total_symbols: 180 })
+        );
+    }
+
+    #[test]
     fn test_index_project_enforces_max_files_cap() {
         let dir = TempDir::new().unwrap();
         for i in 0..5 {
@@ -1405,7 +1481,7 @@ mod tests {
 
         // Cap of 3 should fail: we have 5 eligible files.
         let err = create_indexer()
-            .index_project_with_progress(dir.path(), &[], 3, None)
+            .index_project_with_progress(dir.path(), &[], 3, None, None)
             .unwrap_err();
         let tool_err = err.downcast_ref::<crate::error::ToolError>().unwrap();
         assert!(matches!(
@@ -1415,7 +1491,7 @@ mod tests {
 
         // Cap of 5 should succeed.
         let (_, file_count) = create_indexer()
-            .index_project_with_progress(dir.path(), &[], 5, None)
+            .index_project_with_progress(dir.path(), &[], 5, None, None)
             .unwrap();
         assert_eq!(file_count, 5);
     }

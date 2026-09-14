@@ -33,6 +33,8 @@ pub async fn ensure_project_ready(params: EnsureProjectReadyParams) -> anyhow::R
         progress_token: params.progress_token.clone(),
         peer: params.peer.clone(),
         embed_config: params.embed_config.clone(),
+        on_index_progress: None,
+        on_phase3_progress: None,
     })
     .await?;
 

@@ -150,8 +150,8 @@ fn is_credential_header(name: &str) -> bool {
 ///
 /// When `force` is true, clears any existing store before embedding.
 /// Symbols already present in the store are skipped (unless `force`).
-/// `progress_cb` is called after each batch with `(completed, total)` — pass `None`
-/// to disable progress reporting.
+/// `progress_cb` is called once with `(0, total)`, periodically as batches complete,
+/// and once with `(total, total)`. Pass `None` to disable progress reporting.
 /// Returns an `EmbedResult` summarising what happened.
 pub async fn generate_embeddings(
     index: &SymbolIndex,
@@ -181,7 +181,7 @@ pub async fn generate_embeddings(
     // Model, prefix, or document changes must never reuse stale vectors.
     if force || !compatible {
         if !force && !store.vectors.is_empty() {
-            tracing::info!("embed: cache metadata changed; rebuilding all vectors");
+            tracing::debug!("embed: cache metadata changed; rebuilding all vectors");
         }
         store = EmbedStore::new();
     }
@@ -213,8 +213,12 @@ pub async fn generate_embeddings(
     let mut stored = 0usize;
     let mut skipped = 0usize;
 
+    if let Some(cb) = progress_cb {
+        cb(0, total);
+    }
+
     if total > 0 {
-        tracing::info!(total, "embed: starting embedding generation");
+        tracing::debug!(total, "embed: starting embedding generation");
 
         // Record start timestamp in the progress registry.
         if let Some(proj) = project_path {
@@ -239,10 +243,8 @@ pub async fn generate_embeddings(
             })
             .collect();
 
-        let total_chunks = chunks.len();
-
         // 5. Dispatch concurrently via buffer_unordered, collecting results with
-        //    chunk index so we can report progress in order.
+        //    completion counts so progress remains monotonic regardless of response order.
         let request_delay_ms = effective_request_delay_ms();
         let chunk_futures = chunks.into_iter().enumerate().map(|(i, chunk)| {
             let client = Arc::clone(&client);
@@ -255,18 +257,16 @@ pub async fn generate_embeddings(
                 let ids: Vec<String> = chunk.iter().map(|(id, _, _)| id.clone()).collect();
                 let hashes: Vec<u64> = chunk.iter().map(|(_, _, h)| *h).collect();
                 let results = client.embed_batch(&texts).await;
-                (
-                    i,
-                    ids.into_iter().zip(results).zip(hashes).collect::<Vec<_>>(),
-                )
+                ids.into_iter().zip(results).zip(hashes).collect::<Vec<_>>()
             }
         });
 
         let mut completed_symbols = 0usize;
+        let mut completed_chunks = 0usize;
         let mut stream =
             futures::stream::iter(chunk_futures).buffer_unordered(effective_max_concurrency());
 
-        while let Some((chunk_idx, batch)) = stream.next().await {
+        while let Some(batch) = stream.next().await {
             let batch_size = batch.len();
             for ((id, maybe_vec), hash) in batch {
                 match maybe_vec {
@@ -292,18 +292,20 @@ pub async fn generate_embeddings(
                 }
             }
             completed_symbols += batch_size;
+            completed_chunks += 1;
 
             // Update in-memory progress registry so wait_for_embeddings sees live numbers.
             if let Some(proj) = project_path {
                 progress::set(proj, stored, total);
             }
 
-            // Log progress every 10 batches or on the last batch
-            let is_last = chunk_idx + 1 == total_chunks;
-            if chunk_idx % 10 == 0 || is_last {
+            // Log progress every 10 completed batches and always on final completion.
+            // Completion order is intentionally unrelated to the original chunk index.
+            let is_complete = completed_symbols == total;
+            if completed_chunks.is_multiple_of(10) || is_complete {
                 let pct = (completed_symbols as f64 * 100.0 / total.max(1) as f64 * 100.0).round()
                     / 100.0;
-                tracing::info!(
+                tracing::debug!(
                     completed = completed_symbols,
                     total,
                     pct,
@@ -536,6 +538,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: embed_config.clone(),
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
 
         let response = index_project(params).await.unwrap();
@@ -641,6 +645,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: embed_config.clone(),
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
         let resp1 = index_project(params1).await.unwrap();
         assert_eq!(resp1["embeddings"], serde_json::json!("running"));
@@ -663,6 +669,8 @@ mod tests {
             progress_token: None,
             peer: None,
             embed_config: embed_config.clone(),
+            on_index_progress: None,
+            on_phase3_progress: None,
         };
         let resp2 = index_project(params2).await.unwrap();
 
@@ -1135,12 +1143,28 @@ mod tests {
 
             let dir = tempdir().expect("tempdir");
             let store_path = dir.path().join("embeddings.bin");
+            let progress = std::sync::Mutex::new(Vec::new());
+            let record_progress = |current, total| {
+                progress.lock().unwrap().push((current, total));
+            };
 
             // Run generate_embeddings synchronously via a Tokio runtime.
             let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
             rt.block_on(async {
-                generate_embeddings(&index, &config, &store_path, true, None, None).await;
+                generate_embeddings(
+                    &index,
+                    &config,
+                    &store_path,
+                    true,
+                    Some(&record_progress),
+                    None,
+                )
+                .await;
             });
+
+            let progress = progress.into_inner().unwrap();
+            prop_assert_eq!(progress.first(), Some(&(0, n)));
+            prop_assert_eq!(progress.last(), Some(&(n, n)));
 
             // Assert exactly ceil(N / effective batch size) HTTP requests were issued.
             let expected_batches = n.div_ceil(batch_size);
