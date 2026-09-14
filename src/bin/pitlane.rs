@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
@@ -328,6 +328,82 @@ fn embeddings_count_in_store(path: &std::path::Path) -> usize {
 type ProgressCallback = Box<dyn Fn(usize, usize) + Send + Sync>;
 type Phase3ProgressCallback = Box<dyn Fn(Phase3Progress) + Send + Sync>;
 
+/// Tracing writer that keeps log lines from splicing into an active
+/// progress bar.
+///
+/// Both the `indicatif` bars below and `tracing_subscriber` render to
+/// stderr, so a warning emitted mid-run (oversized file, embedding retry)
+/// would otherwise land in the middle of the bar's current line. Complete
+/// lines are buffered here and printed *above* the active bar via
+/// `ProgressBar::println`; when no bar is active they go straight to
+/// stderr. Nothing is filtered: warnings stay visible either way.
+#[derive(Clone, Debug, Default)]
+struct BarSafeWriter {
+    state: Arc<Mutex<BarSafeState>>,
+}
+
+#[derive(Debug, Default)]
+struct BarSafeState {
+    active_bar: Option<ProgressBar>,
+    pending: Vec<u8>,
+}
+
+/// Split complete `\n`-terminated lines off the front of `buf`, leaving a
+/// partial trailing fragment buffered. `tracing_subscriber` may deliver one
+/// event in several `write` calls, so reassembly keeps each log record on
+/// exactly one output line.
+fn drain_complete_lines(buf: &mut Vec<u8>) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+        let raw: Vec<u8> = buf.drain(..=pos).collect();
+        let mut line = String::from_utf8_lossy(&raw).into_owned();
+        line.pop(); // trailing '\n'
+        if line.ends_with('\r') {
+            line.pop(); // tolerate '\r\n'
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+fn print_line(bar: &Option<ProgressBar>, line: &str) {
+    // A bar whose draw target is piped/redirected reports `is_hidden` and
+    // drops `println` messages, so fall back to plain stderr there (nothing
+    // is being drawn to corrupt). Only a visible bar gets `println`.
+    match bar {
+        Some(bar) if !bar.is_hidden() => bar.println(line),
+        _ => eprintln!("{line}"),
+    }
+}
+
+impl BarSafeWriter {
+    fn set_active_bar(&self, bar: Option<ProgressBar>) {
+        self.state.lock().unwrap().active_bar = bar;
+    }
+}
+
+impl std::io::Write for BarSafeWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut state = self.state.lock().unwrap();
+        state.pending.extend_from_slice(buf);
+        let lines = drain_complete_lines(&mut state.pending);
+        for line in &lines {
+            print_line(&state.active_bar, line);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if !state.pending.is_empty() {
+            let tail = String::from_utf8_lossy(&state.pending).into_owned();
+            state.pending.clear();
+            print_line(&state.active_bar, &tail);
+        }
+        Ok(())
+    }
+}
+
 fn spinner_style() -> ProgressStyle {
     ProgressStyle::with_template("[{elapsed_precise}] {spinner:.cyan} {msg}").unwrap()
 }
@@ -411,12 +487,18 @@ fn make_embed_progress_bar() -> (ProgressBar, ProgressCallback) {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Route all tracing output through the bar-safe writer so warnings
+    // never splice into a progress bar's current line.
+    let log_writer = BarSafeWriter::default();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_env("RUST_LOG")
                 .add_directive("pitlane_mcp=info".parse().unwrap()),
         )
-        .with_writer(std::io::stderr)
+        .with_writer({
+            let log_writer = log_writer.clone();
+            move || log_writer.clone()
+        })
         .init();
 
     let cli = Cli::parse();
@@ -478,14 +560,17 @@ async fn main() -> anyhow::Result<()> {
             Ok(())
         }
         command => {
-            let result = run_command(command).await?;
+            let result = run_command(command, &log_writer).await?;
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
     }
 }
 
-async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
+async fn run_command(
+    command: Command,
+    log_writer: &BarSafeWriter,
+) -> anyhow::Result<serde_json::Value> {
     let result = match command {
         Command::Index {
             path,
@@ -497,6 +582,7 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
 
             // ── Phase 1: symbol indexing with progress bar ──────────────
             let (index_pb, index_cb, phase3_cb) = make_index_progress_bar();
+            log_writer.set_active_bar(Some(index_pb.clone()));
             let params = tools::index_project::IndexProjectParams {
                 path: path.clone(),
                 exclude: if exclude.is_empty() {
@@ -514,6 +600,7 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
             };
             let index_result = tools::index_project::index_project(params).await;
             index_pb.finish_and_clear();
+            log_writer.set_active_bar(None);
             let mut result = index_result?;
 
             // ── Phase 2: embeddings with progress bar (if configured) ──
@@ -525,6 +612,7 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
                 let force_embed = force;
 
                 let (embed_pb, embed_cb) = make_embed_progress_bar();
+                log_writer.set_active_bar(Some(embed_pb.clone()));
                 let embed_result = pitlane_mcp::embed::generate_embeddings(
                     &index,
                     &cfg,
@@ -535,6 +623,7 @@ async fn run_command(command: Command) -> anyhow::Result<serde_json::Value> {
                 )
                 .await;
                 embed_pb.finish_and_clear();
+                log_writer.set_active_bar(None);
 
                 let embed_status = if embed_result.error.is_some() {
                     "error"
@@ -921,6 +1010,47 @@ mod tests {
     }
 
     #[test]
+    fn drain_complete_lines_splits_and_buffers_partials() {
+        // One write, two lines.
+        let mut buf = b"first\nsecond\n".to_vec();
+        assert_eq!(drain_complete_lines(&mut buf), vec!["first", "second"]);
+        assert!(buf.is_empty());
+
+        // A partial fragment stays buffered until its newline arrives.
+        let mut buf = b"half".to_vec();
+        assert!(drain_complete_lines(&mut buf).is_empty());
+        buf.extend_from_slice(b" line\ntrailing");
+        assert_eq!(drain_complete_lines(&mut buf), vec!["half line"]);
+        assert_eq!(buf, b"trailing");
+
+        // Tolerates CRLF and never panics on non-UTF8 bytes.
+        let mut buf = b"cr\r\n".to_vec();
+        assert_eq!(drain_complete_lines(&mut buf), vec!["cr"]);
+        let mut buf = vec![0xff, 0xfe, b'\n'];
+        assert_eq!(drain_complete_lines(&mut buf).len(), 1);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn bar_safe_writer_tracks_active_bar_and_buffers() {
+        let writer = BarSafeWriter::default();
+        assert!(writer.state.lock().unwrap().active_bar.is_none());
+
+        writer.set_active_bar(Some(ProgressBar::hidden()));
+        assert!(writer.state.lock().unwrap().active_bar.is_some());
+
+        // Writes with an active bar buffer through the writer without
+        // touching real stderr (no newline yet, so nothing is emitted).
+        let mut writer = writer;
+        let written = std::io::Write::write(&mut writer, b"partial-fragment").unwrap();
+        assert_eq!(written, b"partial-fragment".len());
+        assert_eq!(writer.state.lock().unwrap().pending, b"partial-fragment");
+
+        writer.set_active_bar(None);
+        assert!(writer.state.lock().unwrap().active_bar.is_none());
+    }
+
+    #[test]
     fn clap_parses_trace_path_command() {
         let cli = Cli::try_parse_from([
             "pitlane",
@@ -1126,32 +1256,38 @@ mod tests {
         )
         .unwrap();
 
-        let result = run_command(Command::SearchKnowledge {
-            project: dir.path().to_string_lossy().to_string(),
-            query: "retry backoff".to_string(),
-            tag: None,
-            path_filter: None,
-            okf_type: None,
-            status: None,
-            min_trust: None,
-            limit: 8,
-        })
+        let result = run_command(
+            Command::SearchKnowledge {
+                project: dir.path().to_string_lossy().to_string(),
+                query: "retry backoff".to_string(),
+                tag: None,
+                path_filter: None,
+                okf_type: None,
+                status: None,
+                min_trust: None,
+                limit: 8,
+            },
+            &BarSafeWriter::default(),
+        )
         .await
         .unwrap();
         assert_eq!(result["results_count"], 1);
         assert_eq!(result["results"][0]["file_path"], "guide.md");
 
         // The path filter narrows matching to docs/.
-        let result = run_command(Command::SearchKnowledge {
-            project: dir.path().to_string_lossy().to_string(),
-            query: "unrelated body".to_string(),
-            tag: None,
-            path_filter: Some("docs/".to_string()),
-            okf_type: None,
-            status: None,
-            min_trust: None,
-            limit: 8,
-        })
+        let result = run_command(
+            Command::SearchKnowledge {
+                project: dir.path().to_string_lossy().to_string(),
+                query: "unrelated body".to_string(),
+                tag: None,
+                path_filter: Some("docs/".to_string()),
+                okf_type: None,
+                status: None,
+                min_trust: None,
+                limit: 8,
+            },
+            &BarSafeWriter::default(),
+        )
         .await
         .unwrap();
         assert_eq!(result["results_count"], 1);
@@ -1167,11 +1303,14 @@ mod tests {
         )
         .unwrap();
 
-        let result = run_command(Command::ReadKnowledgeDocument {
-            project: dir.path().to_string_lossy().to_string(),
-            document: "guide.md".to_string(),
-            section: None,
-        })
+        let result = run_command(
+            Command::ReadKnowledgeDocument {
+                project: dir.path().to_string_lossy().to_string(),
+                document: "guide.md".to_string(),
+                section: None,
+            },
+            &BarSafeWriter::default(),
+        )
         .await
         .unwrap();
         assert_eq!(
@@ -1179,11 +1318,14 @@ mod tests {
             "# Guide\nIntro.\n## Backoff\nUse jitter.\n"
         );
 
-        let result = run_command(Command::ReadKnowledgeDocument {
-            project: dir.path().to_string_lossy().to_string(),
-            document: "guide.md".to_string(),
-            section: Some("guide-backoff".to_string()),
-        })
+        let result = run_command(
+            Command::ReadKnowledgeDocument {
+                project: dir.path().to_string_lossy().to_string(),
+                document: "guide.md".to_string(),
+                section: Some("guide-backoff".to_string()),
+            },
+            &BarSafeWriter::default(),
+        )
         .await
         .unwrap();
         assert_eq!(result["section"]["content"], "## Backoff\nUse jitter.");
@@ -1199,16 +1341,19 @@ mod tests {
         .unwrap();
         let project = setup_project(&dir).await;
 
-        let result = run_command(Command::TracePath {
-            project,
-            query: "branch to leaf".to_string(),
-            source: Some("branch".to_string()),
-            sink: Some("leaf".to_string()),
-            lang: None,
-            file: None,
-            max_symbols: Some(5),
-            max_depth: Some(2),
-        })
+        let result = run_command(
+            Command::TracePath {
+                project,
+                query: "branch to leaf".to_string(),
+                source: Some("branch".to_string()),
+                sink: Some("leaf".to_string()),
+                lang: None,
+                file: None,
+                max_symbols: Some(5),
+                max_depth: Some(2),
+            },
+            &BarSafeWriter::default(),
+        )
         .await
         .unwrap();
 
@@ -1228,15 +1373,18 @@ mod tests {
         .unwrap();
         let project = setup_project(&dir).await;
 
-        let result = run_command(Command::AnalyzeImpact {
-            project,
-            query: Some("leaf".to_string()),
-            symbol_id: None,
-            file_path: None,
-            scope: None,
-            depth: Some(2),
-            limit: Some(5),
-        })
+        let result = run_command(
+            Command::AnalyzeImpact {
+                project,
+                query: Some("leaf".to_string()),
+                symbol_id: None,
+                file_path: None,
+                scope: None,
+                depth: Some(2),
+                limit: Some(5),
+            },
+            &BarSafeWriter::default(),
+        )
         .await
         .unwrap();
 
