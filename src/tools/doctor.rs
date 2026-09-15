@@ -122,6 +122,29 @@ fn count_oversized_files(root: &Path, exclude_patterns: &[String]) -> anyhow::Re
     Ok(count)
 }
 
+/// Detail payload for an incompatible embedding store. `is_compatible` compares
+/// four fields (format version, model, document fingerprint, endpoint
+/// fingerprint), so report all four store/current pairs — otherwise a mismatch
+/// in one of the non-version fields is indistinguishable (issue #127).
+fn embeddings_incompatible_detail(
+    meta: &crate::embed::store::EmbedStoreMetadata,
+    model: &str,
+    fingerprint: &str,
+    endpoint: &str,
+) -> Value {
+    json!({
+        "status": "incompatible",
+        "store_format_version": meta.format_version,
+        "current_format_version": crate::embed::document::DOCUMENT_FORMAT_VERSION,
+        "store_model": meta.model,
+        "current_model": model,
+        "store_document_fingerprint": meta.document_fingerprint,
+        "current_document_fingerprint": fingerprint,
+        "store_endpoint_fingerprint": meta.endpoint_fingerprint,
+        "current_endpoint_fingerprint": endpoint,
+    })
+}
+
 pub async fn doctor(params: DoctorParams) -> anyhow::Result<Value> {
     let canonical = resolve_project_path(&params.project)?;
     let idx_dir = index_dir(&canonical)?;
@@ -257,11 +280,12 @@ pub async fn doctor(params: DoctorParams) -> anyhow::Result<Value> {
                         if !meta.is_compatible(&cfg.model, &fingerprint, &endpoint) {
                             checks.push(Check::warn(
                                 "embeddings",
-                                json!({
-                                    "status": "incompatible",
-                                    "store_format_version": meta.format_version,
-                                    "current_format_version": crate::embed::document::DOCUMENT_FORMAT_VERSION,
-                                }),
+                                embeddings_incompatible_detail(
+                                    &meta,
+                                    &cfg.model,
+                                    &fingerprint,
+                                    &endpoint,
+                                ),
                                 "Embedding store was built with a different model/format. It will be rebuilt automatically; semantic search may degrade until then.".to_string(),
                             ));
                         } else {
@@ -545,6 +569,43 @@ mod tests {
             .unwrap();
         assert_eq!(skipped["detail"]["oversized"], json!(1));
         assert_eq!(skipped["status"], "warn");
+    }
+
+    #[test]
+    fn test_incompatible_detail_reports_all_compared_fields() {
+        use crate::embed::document::DOCUMENT_FORMAT_VERSION;
+        use crate::embed::store::EmbedStoreMetadata;
+
+        // Issue #127: format versions match, but the endpoint differs. The
+        // old payload only reported the two (equal) versions, hiding the
+        // actual culprit.
+        let meta = EmbedStoreMetadata {
+            format_version: DOCUMENT_FORMAT_VERSION,
+            model: "BAAI/bge-m3".to_string(),
+            dimension: 1024,
+            document_fingerprint: "v3;model=BAAI/bge-m3".to_string(),
+            endpoint_fingerprint: "abc123".to_string(),
+        };
+        assert!(!meta.is_compatible("BAAI/bge-m3", "v3;model=BAAI/bge-m3", "def456"));
+
+        let detail =
+            embeddings_incompatible_detail(&meta, "BAAI/bge-m3", "v3;model=BAAI/bge-m3", "def456");
+        assert_eq!(detail["status"], json!("incompatible"));
+        assert_eq!(
+            detail["store_format_version"],
+            detail["current_format_version"]
+        );
+        assert_eq!(detail["store_model"], detail["current_model"]);
+        assert_eq!(
+            detail["store_document_fingerprint"],
+            detail["current_document_fingerprint"]
+        );
+        assert_ne!(
+            detail["store_endpoint_fingerprint"],
+            detail["current_endpoint_fingerprint"]
+        );
+        assert_eq!(detail["store_endpoint_fingerprint"], json!("abc123"));
+        assert_eq!(detail["current_endpoint_fingerprint"], json!("def456"));
     }
 
     #[tokio::test]
