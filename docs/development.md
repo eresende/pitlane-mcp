@@ -30,14 +30,20 @@ that only exists in your working tree).
 
 ## Releasing
 
-1. Bump `version` in `Cargo.toml` (and `Cargo.lock` via a build) and commit to `main`.
+1. Make sure `main` is synced with `origin` and CI is green on it, then bump
+   `version` in `Cargo.toml` (and `Cargo.lock` via a build) and commit to `main`.
 2. Push a tag `vX.Y.Z` — `.github/workflows/release.yml` builds five platform
    binaries, creates the GitHub release, and updates the Homebrew tap.
+   Watch the run to completion (`gh run list`, then `gh run view <id>`);
+   all five build jobs plus the Homebrew update must succeed.
 3. Replace the generated release notes with hand-written notes matching the
    format of previous releases (title with hook, intro paragraph, themed
    sections, validation, compare link).
-4. `cargo publish` to crates.io. Note the quirk above if you keep building
-   locally afterwards.
+4. `cargo publish` to crates.io. `--dry-run` verifies the package but needs
+   no token, so it cannot validate registry auth — confirm `cargo` can read
+   your credentials (e.g. `head -c 20 ~/.cargo/credentials.toml`) before
+   tagging, especially if you run a credential-protection tool that may
+   deny access. Note the quirk above if you keep building locally afterwards.
 5. Smoke-test the published artifact and refresh your local install — see
    [Post-release verification](#post-release-verification).
 
