@@ -1805,7 +1805,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pitlane-mcp"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "bincode",
