@@ -28,6 +28,12 @@ Verify the rebuilt binary actually contains your change before drawing
 conclusions from end-to-end runs (`pitlane --version`, or check a behaviour
 that only exists in your working tree).
 
+## Branches, commits, and pull requests
+
+- Name branches `<type>/<short-kebab-description>`, using a Conventional Commit type such as `feat`, `fix`, `docs`, `chore`, `perf`, `refactor`, or `test`. For example: `fix/compact-analyze-impact-evidence` or `feat/add-json-output`. Do not use tool- or vendor-specific prefixes such as `codex/`.
+- Write commit subjects using Conventional Commits: `<type>(<optional-scope>): <concise imperative description>`. Keep the type and scope lowercase. Once a pull request exists, append its number as `(#<pr-number>)`, matching the repository's existing history.
+- Use the same Conventional Commit subject for the pull request title, but omit `(#<pr-number>)`; GitHub adds the pull request number when squash-merging.
+
 ## Releasing
 
 1. Make sure `main` is synced with `origin` and CI is green on it, then bump
