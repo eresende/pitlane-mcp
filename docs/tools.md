@@ -141,6 +141,14 @@ Estimate the blast radius of changing a symbol, file, or concept.
 
 Use this before edits or refactors.
 
+`limit` applies independently to the ranked `impact_symbols` and `impact_files`
+lists. Each symbol reports its complete deduplicated `evidence_count` and
+provenance totals, but serializes at most the two highest-ranked
+`support_edges`; `omitted_evidence_count` reports the remainder. File entries
+are summary-only and include `impacted_symbol_count` without repeating symbol
+evidence. Top-level `evidence_truncated` and `omitted_evidence_count` indicate
+when returned symbol evidence was compacted.
+
 ### `analyze_changes`
 
 Map a Git diff to changed symbols, likely affected graph neighbors, and test candidates.

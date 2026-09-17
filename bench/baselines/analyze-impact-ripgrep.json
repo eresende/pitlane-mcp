@@ -1,0 +1,20 @@
+{
+  "serialized_bytes": 13120,
+  "returned_impact_symbols": 12,
+  "returned_impact_files": 12,
+  "total_impact_symbols": 685,
+  "total_impact_files": 74,
+  "symbol_reason_entries": 0,
+  "file_reason_entries": 0,
+  "reason_bytes": 0,
+  "duplicate_reason_entries": 0,
+  "support_edge_entries": 20,
+  "unique_support_edges": 20,
+  "duplicate_support_edges": 0,
+  "symbol_direct_calls": 15,
+  "symbol_direct_references": 11,
+  "file_direct_calls": 0,
+  "file_direct_references": 0,
+  "summary_direct_calls": 15,
+  "summary_direct_references": 11
+}

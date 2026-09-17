@@ -107,6 +107,11 @@ fn committed_change_ignores_worktree_and_reuses_impact_evidence() {
     let caller = impact.iter().find(|s| s["name"] == "caller").unwrap();
     assert_eq!(caller["certainty"], "heuristic");
     assert!(!caller["support_edges"].as_array().unwrap().is_empty());
+    assert!(result["target_impact"]["impact_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|file| file.get("support_edges").is_none()));
     assert!(result["target_impact"]["test_candidates"]
         .as_array()
         .unwrap()

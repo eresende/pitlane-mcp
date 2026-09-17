@@ -238,7 +238,7 @@ enum Command {
         /// Maximum traversal depth
         #[arg(long)]
         depth: Option<usize>,
-        /// Maximum impacted symbols/files to return
+        /// Maximum impacted symbols and files to return independently
         #[arg(long)]
         limit: Option<usize>,
     },

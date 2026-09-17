@@ -441,7 +441,8 @@ pub struct AnalyzeImpactRequest {
     pub scope: Option<String>,
     /// Maximum traversal depth (default: 2)
     pub depth: Option<usize>,
-    /// Maximum impacted symbols/files to return (default: 8)
+    /// Maximum impacted symbols and files to return independently (default: 8, maximum: 12).
+    /// Symbol evidence is deduplicated and limited to the two best support edges.
     pub limit: Option<usize>,
 }
 
@@ -1099,7 +1100,7 @@ impl PitlaneMcp {
     }
 
     #[tool(
-        description = "Estimate the blast radius of changing a symbol, file, or concept. Use this before edits or refactors.",
+        description = "Estimate the blast radius of changing a symbol, file, or concept. Returns independently bounded symbol and file lists, with deduplicated provenance and at most two support edges per symbol. Use this before edits or refactors.",
         meta = tool_meta("impact blast radius callers usages refactor change"),
         annotations(
             read_only_hint = true,

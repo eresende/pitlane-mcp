@@ -350,6 +350,11 @@ fn revision_impact(
             "limit": params.limit.unwrap_or(8).clamp(1, 12),
             "total_impact_symbols": 0, "total_impact_files": 0,
             "omitted_impact_symbols": 0, "omitted_impact_files": 0,
+            "total_evidence_count": 0, "omitted_evidence_count": 0,
+            "evidence_truncated": false,
+            "edge_provenance_summary": {
+                "direct_calls": 0, "direct_references": 0, "dominant_signal": "calls",
+            },
         }));
     }
     let profile = crate::index::repo_profile::build_repo_profile(root, index);
@@ -377,7 +382,7 @@ fn revision_impact(
         for item in result[key].as_array_mut().unwrap() {
             item["revision"] = json!(revision);
             item["certainty"] = json!("heuristic");
-            if let Some(edges) = item["support_edges"].as_array_mut() {
+            if let Some(edges) = item.get_mut("support_edges").and_then(Value::as_array_mut) {
                 for edge in edges {
                     edge["certainty"] = json!(if edge["relation"] == "calls" {
                         "heuristic_call"
