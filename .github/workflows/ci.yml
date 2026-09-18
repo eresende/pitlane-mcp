@@ -88,15 +88,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Package the crate
-        run: cargo package
+        # A cargo-cached `target/` can already contain `target/package/<name>-<version>`
+        # for a previous version, which would make the lookup below ambiguous.
+        run: |
+          set -euo pipefail
+          rm -rf target/package
+          cargo package
       - name: Build the packaged crate's tests
         # `cargo package` verification only builds the library and binaries, so a
         # test fixture living outside `tests/` (for example under the excluded
         # `bench/`) would break `cargo test` for anyone consuming the crate.
-        # `find -type d` skips the sibling `.crate` tarball.
         run: |
           set -euo pipefail
-          package_dir="$(find target/package -mindepth 1 -maxdepth 1 -type d -name 'pitlane-mcp-*')"
-          echo "Building tests for $package_dir"
-          cd "$package_dir"
+          package_dirs=($(find target/package -mindepth 1 -maxdepth 1 -type d -name 'pitlane-mcp-*'))
+          if [ "${#package_dirs[@]}" -ne 1 ]; then
+            echo "expected exactly one packaged crate directory, found ${#package_dirs[@]}:" >&2
+            printf '  %s\n' "${package_dirs[@]}" >&2
+            exit 1
+          fi
+          echo "Building tests for ${package_dirs[0]}"
+          cd "${package_dirs[0]}"
           cargo test --no-run --verbose
