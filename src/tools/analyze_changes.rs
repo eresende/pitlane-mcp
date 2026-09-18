@@ -10,7 +10,9 @@ use serde_json::{json, Value};
 use crate::index::SymbolIndex;
 use crate::indexer::{self, language::Symbol, registry::build_default_registry, Indexer};
 use crate::path_policy::{open_regular_file, regular_file_metadata, resolve_project_path};
-use crate::tools::orchestrator::{impact_from_seeds, AnalyzeImpactParams, ImpactSeed};
+use crate::tools::orchestrator::{
+    empty_edge_provenance_summary, impact_from_seeds, AnalyzeImpactParams, ImpactSeed,
+};
 
 #[cfg(test)]
 mod tests;
@@ -352,9 +354,7 @@ fn revision_impact(
             "omitted_impact_symbols": 0, "omitted_impact_files": 0,
             "total_evidence_count": 0, "omitted_evidence_count": 0,
             "evidence_truncated": false,
-            "edge_provenance_summary": {
-                "direct_calls": 0, "direct_references": 0, "dominant_signal": "calls",
-            },
+            "edge_provenance_summary": empty_edge_provenance_summary(),
         }));
     }
     let profile = crate::index::repo_profile::build_repo_profile(root, index);

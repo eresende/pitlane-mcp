@@ -31,6 +31,11 @@ const READ_CODE_UNIT_FILE_OUTLINE_LIMIT: usize = 12;
 /// response includes a `body_truncated` flag plus guidance to narrow the read.
 const READ_CODE_UNIT_SYMBOL_BODY_LINE_LIMIT: usize = 120;
 
+/// Maximum number of deduplicated support edges serialized per impacted symbol by
+/// `analyze_impact`.  Everything above this bound is reported through
+/// `evidence_count` / `omitted_evidence_count` rather than serialized.
+const MAX_SUPPORT_EDGES: usize = 2;
+
 pub struct LocateCodeParams {
     pub project: String,
     pub query: String,
@@ -959,15 +964,19 @@ pub(crate) fn impact_from_seeds(
             .then(a.name.cmp(&b.name))
     });
     let total_impact_symbols = symbol_values.len();
-    symbol_values.truncate(limit);
+    // Evidence counters span every impacted symbol, before `limit` truncation, so
+    // they stay comparable with `omitted_impact_symbols` and `evidence_truncated`
+    // still reports symbols dropped by the limit.
     let total_evidence_count = symbol_values
         .iter()
         .map(ImpactSymbol::evidence_count)
         .sum::<usize>();
-    let omitted_evidence_count = symbol_values
+    symbol_values.truncate(limit);
+    let serialized_evidence_count = symbol_values
         .iter()
-        .map(ImpactSymbol::omitted_evidence_count)
+        .map(|symbol| symbol.serialized_evidence_count())
         .sum::<usize>();
+    let omitted_evidence_count = total_evidence_count.saturating_sub(serialized_evidence_count);
 
     let mut file_values: Vec<ImpactFile> = impacted_files.into_values().collect();
     file_values.sort_by(|a, b| b.score.cmp(&a.score).then(a.file.cmp(&b.file)));
@@ -2602,14 +2611,19 @@ impl ImpactSymbol {
         self.evidence.len()
     }
 
+    /// Number of support edges actually serialized for this symbol.
+    fn serialized_evidence_count(&self) -> usize {
+        self.evidence_count().min(MAX_SUPPORT_EDGES)
+    }
+
     fn omitted_evidence_count(&self) -> usize {
-        self.evidence_count().saturating_sub(2)
+        self.evidence_count().saturating_sub(MAX_SUPPORT_EDGES)
     }
 
     fn best_support_edges(&self) -> Vec<&ImpactSupportEdge> {
         let mut edges = self.evidence.values().collect::<Vec<_>>();
         edges.sort_by(|left, right| compare_support_edges(left, right));
-        edges.truncate(2);
+        edges.truncate(MAX_SUPPORT_EDGES);
         edges
     }
 
@@ -2802,15 +2816,7 @@ fn better_impact_path(candidate: (i32, usize, i32), existing: (i32, usize, i32))
                 || (candidate.1 == existing.1 && candidate.2 > existing.2)))
 }
 
-fn build_edge_provenance_summary(symbols: &[ImpactSymbol]) -> Value {
-    let (direct_calls, direct_references) =
-        symbols
-            .iter()
-            .fold((0, 0), |(total_calls, total_references), symbol| {
-                let (calls, references) = symbol.provenance_counts();
-                (total_calls + calls, total_references + references)
-            });
-
+fn edge_provenance_summary_json(direct_calls: usize, direct_references: usize) -> Value {
     json!({
         "direct_calls": direct_calls,
         "direct_references": direct_references,
@@ -2820,6 +2826,25 @@ fn build_edge_provenance_summary(symbols: &[ImpactSymbol]) -> Value {
             "references"
         },
     })
+}
+
+/// Zeroed provenance summary for responses that carry no graph evidence, such as a
+/// revision with no changed symbols.  Keeps `analyze_changes` shape-identical to
+/// `analyze_impact` without re-declaring the summary shape.
+pub(crate) fn empty_edge_provenance_summary() -> Value {
+    edge_provenance_summary_json(0, 0)
+}
+
+fn build_edge_provenance_summary(symbols: &[ImpactSymbol]) -> Value {
+    let (direct_calls, direct_references) =
+        symbols
+            .iter()
+            .fold((0, 0), |(total_calls, total_references), symbol| {
+                let (calls, references) = symbol.provenance_counts();
+                (total_calls + calls, total_references + references)
+            });
+
+    edge_provenance_summary_json(direct_calls, direct_references)
 }
 
 #[allow(dead_code)]
@@ -4081,6 +4106,59 @@ mod tests {
             result["edge_provenance_summary"]["direct_references"],
             references
         );
+
+        // Evidence counters span every impacted symbol, before `limit` truncation,
+        // and stay consistent with the serialized support edges.
+        let serialized_evidence = symbols
+            .iter()
+            .map(|symbol| symbol["evidence_count"].as_u64().unwrap().min(2))
+            .sum::<u64>();
+        let total_evidence = result["total_evidence_count"].as_u64().unwrap();
+        let omitted_evidence = result["omitted_evidence_count"].as_u64().unwrap();
+        assert!(total_evidence >= symbols.len() as u64);
+        assert_eq!(total_evidence, serialized_evidence + omitted_evidence);
+        assert_eq!(result["evidence_truncated"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_evidence_counters_span_symbols_omitted_by_limit() {
+        let dir = TempDir::new().unwrap();
+        let mut source = "pub fn target() {}\n".to_string();
+        for index in 0..120 {
+            source.push_str(&format!("pub fn caller_{index:03}() {{ target(); }}\n"));
+        }
+        std::fs::write(dir.path().join("lib.rs"), source).unwrap();
+        let project = setup_project(&dir).await;
+        let target_id = symbol_id_by_name(&project, "target");
+        let result = analyze_impact(AnalyzeImpactParams {
+            project,
+            query: None,
+            symbol_id: Some(target_id),
+            file_path: None,
+            scope: None,
+            depth: Some(1),
+            limit: Some(1),
+        })
+        .await
+        .unwrap();
+
+        let symbols = result["impact_symbols"].as_array().unwrap();
+        assert_eq!(symbols.len(), 1);
+        let omitted_symbols = result["omitted_impact_symbols"].as_u64().unwrap();
+        let total_evidence = result["total_evidence_count"].as_u64().unwrap();
+        let omitted_evidence = result["omitted_evidence_count"].as_u64().unwrap();
+        // `total_evidence_count` covers every impacted symbol, not just the returned
+        // one, so evidence dropped along with the omitted symbols is still reported.
+        assert!(omitted_symbols >= 100);
+        assert!(total_evidence > symbols[0]["evidence_count"].as_u64().unwrap());
+        assert!(omitted_evidence > 0);
+        assert_eq!(result["evidence_truncated"], serde_json::json!(true));
+
+        let serialized_evidence = symbols
+            .iter()
+            .map(|symbol| symbol["evidence_count"].as_u64().unwrap().min(2))
+            .sum::<u64>();
+        assert_eq!(total_evidence, serialized_evidence + omitted_evidence);
     }
 
     #[tokio::test]
