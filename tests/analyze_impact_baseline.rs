@@ -9,7 +9,11 @@ use serde_json::Value;
 
 const RIPGREP_REVISION: &str = "4649aa9700619f94cf9c66876e9549d83420e16c";
 const SEED_SYMBOL: &str = "crates/core/flags/hiargs.rs::HiArgs::matcher#method";
-const BASELINE: &str = include_str!("../bench/baselines/analyze-impact-ripgrep.json");
+// Fixtures must live under `tests/`: `Cargo.toml` excludes `bench/`, `docs/`, and
+// `.kiro/` from the published crate, so a fixture outside `tests/` would make
+// `cargo test` fail to compile on the packaged crate even though `cargo publish`
+// succeeds.
+const BASELINE: &str = include_str!("baselines/analyze-impact-ripgrep.json");
 
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
 struct BaselineMetrics {
@@ -31,6 +35,9 @@ struct BaselineMetrics {
     file_direct_references: u64,
     summary_direct_calls: u64,
     summary_direct_references: u64,
+    total_impact_evidence_count: u64,
+    omitted_impact_evidence_count: u64,
+    evidence_truncated: bool,
 }
 
 #[tokio::test]
@@ -49,7 +56,11 @@ async fn ripgrep_analyze_impact_response_baseline() {
         "ripgrep fixture moved"
     );
 
-    let project = repo.to_string_lossy().into_owned();
+    let project = repo
+        .canonicalize()
+        .unwrap_or_else(|_| repo.to_path_buf())
+        .to_string_lossy()
+        .into_owned();
     index_project(IndexProjectParams {
         path: project.clone(),
         exclude: None,
@@ -186,6 +197,9 @@ fn measure(response: &Value) -> BaselineMetrics {
         file_direct_references,
         summary_direct_calls: number(summary, "direct_calls"),
         summary_direct_references: number(summary, "direct_references"),
+        total_impact_evidence_count: number(response, "total_evidence_count"),
+        omitted_impact_evidence_count: number(response, "omitted_evidence_count"),
+        evidence_truncated: response["evidence_truncated"].as_bool().unwrap_or(false),
     }
 }
 

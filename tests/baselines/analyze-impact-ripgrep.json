@@ -1,5 +1,5 @@
 {
-  "serialized_bytes": 13120,
+  "serialized_bytes": 13123,
   "returned_impact_symbols": 12,
   "returned_impact_files": 12,
   "total_impact_symbols": 685,
@@ -16,5 +16,8 @@
   "file_direct_calls": 0,
   "file_direct_references": 0,
   "summary_direct_calls": 15,
-  "summary_direct_references": 11
+  "summary_direct_references": 11,
+  "total_impact_evidence_count": 880,
+  "omitted_impact_evidence_count": 860,
+  "evidence_truncated": true
 }
