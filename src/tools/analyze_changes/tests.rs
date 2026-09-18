@@ -107,6 +107,11 @@ fn committed_change_ignores_worktree_and_reuses_impact_evidence() {
     let caller = impact.iter().find(|s| s["name"] == "caller").unwrap();
     assert_eq!(caller["certainty"], "heuristic");
     assert!(!caller["support_edges"].as_array().unwrap().is_empty());
+    assert!(result["target_impact"]["impact_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|file| file.get("support_edges").is_none()));
     assert!(result["target_impact"]["test_candidates"]
         .as_array()
         .unwrap()
@@ -114,6 +119,26 @@ fn committed_change_ignores_worktree_and_reuses_impact_evidence() {
         .any(|s| s["name"] == "test_compute"));
     assert!(!result.to_string().contains("unrelated"));
     assert!(result["changed_files"][0]["hunks"][0]["old"]["start"] == 2);
+
+    // The evidence counters and summary must match the `analyze_impact` contract
+    // that `analyze_changes` reuses through `impact_from_seeds`.
+    let target_impact = &result["target_impact"];
+    let total_evidence = target_impact["total_evidence_count"].as_u64().unwrap();
+    let omitted_evidence = target_impact["omitted_evidence_count"].as_u64().unwrap();
+    let serialized_evidence = target_impact["impact_symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|symbol| symbol["evidence_count"].as_u64().unwrap().min(2))
+        .sum::<u64>();
+    assert!(total_evidence > 0);
+    assert_eq!(total_evidence, serialized_evidence + omitted_evidence);
+    assert_eq!(
+        target_impact["evidence_truncated"],
+        serde_json::json!(omitted_evidence > 0)
+    );
+    assert!(target_impact["edge_provenance_summary"]["dominant_signal"].is_string());
+    assert!(target_impact["edge_provenance_summary"]["direct_calls"].is_u64());
 }
 
 #[test]
@@ -255,6 +280,41 @@ fn exclusions_and_parse_errors_are_reported_without_hiding_changes() {
         .as_array()
         .unwrap()
         .contains(&json!("generated.rs")));
+}
+
+#[test]
+fn empty_revision_impact_matches_analyze_impact_evidence_shape() {
+    let dir = fixture();
+    write(&dir, "NOTES.md", "# Notes\n");
+    commit(&dir);
+    // A revision whose only change is unmapped yields no seeds, so both revision
+    // impacts take the empty branch.
+    let result = run(&dir, "HEAD~1", false);
+    for key in ["base_impact", "target_impact"] {
+        let impact = &result[key];
+        assert!(
+            impact["impact_symbols"].as_array().unwrap().is_empty(),
+            "{key} should have no impacted symbols"
+        );
+        assert_eq!(impact["total_evidence_count"], json!(0), "{key}");
+        assert_eq!(impact["omitted_evidence_count"], json!(0), "{key}");
+        assert_eq!(impact["evidence_truncated"], json!(false), "{key}");
+        assert_eq!(
+            impact["edge_provenance_summary"]["direct_calls"],
+            json!(0),
+            "{key}"
+        );
+        assert_eq!(
+            impact["edge_provenance_summary"]["direct_references"],
+            json!(0),
+            "{key}"
+        );
+        assert_eq!(
+            impact["edge_provenance_summary"]["dominant_signal"],
+            json!("calls"),
+            "{key}"
+        );
+    }
 }
 
 #[test]

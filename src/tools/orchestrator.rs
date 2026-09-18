@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -30,6 +30,11 @@ const READ_CODE_UNIT_FILE_OUTLINE_LIMIT: usize = 12;
 /// `read_code_unit(symbol_id=...)`.  Larger bodies are truncated and the
 /// response includes a `body_truncated` flag plus guidance to narrow the read.
 const READ_CODE_UNIT_SYMBOL_BODY_LINE_LIMIT: usize = 120;
+
+/// Maximum number of deduplicated support edges serialized per impacted symbol by
+/// `analyze_impact`.  Everything above this bound is reported through
+/// `evidence_count` / `omitted_evidence_count` rather than serialized.
+const MAX_SUPPORT_EDGES: usize = 2;
 
 pub struct LocateCodeParams {
     pub project: String,
@@ -875,7 +880,7 @@ pub(crate) fn impact_from_seeds(
         impacted_files
             .entry(seed.file.clone())
             .or_insert_with(|| ImpactFile::new(seed.file.clone()))
-            .observe(100, 1.0, "seed symbol", None);
+            .observe(100, 1.0, &seed.id);
     }
 
     while !frontier.is_empty() {
@@ -908,12 +913,6 @@ pub(crate) fn impact_from_seeds(
             let next_path_score = path_score + score - (distance as i32 * 8);
             let next_path_priority = path_priority + neighbor.priority;
             let candidate_state = (next_path_score, distance, next_path_priority);
-            let reason = format!(
-                "{} {}: {}",
-                neighbor.direction_label(),
-                neighbor.relation.as_str(),
-                neighbor.evidence
-            );
             let support_edge =
                 ImpactSupportEdge::from_neighbor(&neighbor, score, &symbol_id, provenance.clone());
             let entry = impacted_symbols
@@ -931,9 +930,7 @@ pub(crate) fn impact_from_seeds(
                 score,
                 distance,
                 neighbor.confidence.max(neighbor.evidence_quality),
-                reason.clone(),
-                provenance.clone(),
-                support_edge.clone(),
+                support_edge,
             );
             impacted_files
                 .entry(neighbor.file.clone())
@@ -941,8 +938,7 @@ pub(crate) fn impact_from_seeds(
                 .observe(
                     score,
                     neighbor.confidence.max(neighbor.evidence_quality),
-                    reason.clone(),
-                    Some(support_edge),
+                    &neighbor.id,
                 );
             let should_expand = best_paths
                 .get(&neighbor.id)
@@ -968,7 +964,19 @@ pub(crate) fn impact_from_seeds(
             .then(a.name.cmp(&b.name))
     });
     let total_impact_symbols = symbol_values.len();
+    // Evidence counters span every impacted symbol, before `limit` truncation, so
+    // they stay comparable with `omitted_impact_symbols` and `evidence_truncated`
+    // still reports symbols dropped by the limit.
+    let total_evidence_count = symbol_values
+        .iter()
+        .map(ImpactSymbol::evidence_count)
+        .sum::<usize>();
     symbol_values.truncate(limit);
+    let serialized_evidence_count = symbol_values
+        .iter()
+        .map(|symbol| symbol.serialized_evidence_count())
+        .sum::<usize>();
+    let omitted_evidence_count = total_evidence_count.saturating_sub(serialized_evidence_count);
 
     let mut file_values: Vec<ImpactFile> = impacted_files.into_values().collect();
     file_values.sort_by(|a, b| b.score.cmp(&a.score).then(a.file.cmp(&b.file)));
@@ -1017,9 +1025,12 @@ pub(crate) fn impact_from_seeds(
         "total_impact_files": total_impact_files,
         "omitted_impact_symbols": total_impact_symbols.saturating_sub(symbol_values.len()),
         "omitted_impact_files": total_impact_files.saturating_sub(file_values.len()),
+        "total_evidence_count": total_evidence_count,
+        "omitted_evidence_count": omitted_evidence_count,
+        "evidence_truncated": omitted_evidence_count > 0,
         "impact_symbols": symbol_values.iter().map(|s| s.to_json()).collect::<Vec<_>>(),
         "impact_files": file_values.iter().map(|f| f.to_json()).collect::<Vec<_>>(),
-        "edge_provenance_summary": build_edge_provenance_summary(&symbol_values, &file_values),
+        "edge_provenance_summary": build_edge_provenance_summary(&symbol_values),
         "summary": if symbol_values.is_empty() {
             "No significant weighted graph neighbors were found."
         } else {
@@ -2492,6 +2503,45 @@ impl ImpactSupportEdge {
     }
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ImpactEdgeIdentity {
+    impacted_symbol_id: String,
+    via_symbol_id: String,
+    direction: &'static str,
+    relation: EdgeRelation,
+}
+
+impl ImpactEdgeIdentity {
+    fn new(impacted_symbol_id: &str, edge: &ImpactSupportEdge) -> Self {
+        Self {
+            impacted_symbol_id: impacted_symbol_id.to_string(),
+            via_symbol_id: edge.via_symbol_id.clone(),
+            direction: edge.direction,
+            relation: edge.relation,
+        }
+    }
+}
+
+fn compare_support_edges(
+    left: &ImpactSupportEdge,
+    right: &ImpactSupportEdge,
+) -> std::cmp::Ordering {
+    right
+        .score
+        .cmp(&left.score)
+        .then_with(|| right.priority.cmp(&left.priority))
+        .then_with(|| {
+            right
+                .evidence_quality
+                .partial_cmp(&left.evidence_quality)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .then_with(|| left.direction.cmp(right.direction))
+        .then_with(|| left.relation.as_str().cmp(right.relation.as_str()))
+        .then_with(|| left.via_symbol_id.cmp(&right.via_symbol_id))
+        .then_with(|| left.evidence.cmp(&right.evidence))
+}
+
 #[derive(Clone)]
 struct ImpactSymbol {
     id: String,
@@ -2501,8 +2551,7 @@ struct ImpactSymbol {
     distance: usize,
     score: i32,
     confidence: f32,
-    reasons: Vec<String>,
-    support_edges: Vec<ImpactSupportEdge>,
+    evidence: HashMap<ImpactEdgeIdentity, ImpactSupportEdge>,
 }
 
 impl ImpactSymbol {
@@ -2515,8 +2564,7 @@ impl ImpactSymbol {
             distance,
             score: 0,
             confidence: 0.0,
-            reasons: Vec::new(),
-            support_edges: Vec::new(),
+            evidence: HashMap::new(),
         }
     }
 
@@ -2525,8 +2573,6 @@ impl ImpactSymbol {
         score: i32,
         distance: usize,
         confidence: f32,
-        reason: impl Into<String>,
-        provenance: String,
         support_edge: ImpactSupportEdge,
     ) {
         if score > self.score {
@@ -2538,33 +2584,51 @@ impl ImpactSymbol {
         if confidence > self.confidence {
             self.confidence = confidence;
         }
-        self.reasons
-            .push(format!("{} ({})", reason.into(), provenance));
-        self.support_edges.push(support_edge);
-        self.support_edges.sort_by(|a, b| {
-            b.score
-                .cmp(&a.score)
-                .then_with(|| b.priority.cmp(&a.priority))
-                .then_with(|| {
-                    b.evidence_quality
-                        .partial_cmp(&a.evidence_quality)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                })
-        });
-        self.support_edges.truncate(3);
+        let identity = ImpactEdgeIdentity::new(&self.id, &support_edge);
+        self.evidence
+            .entry(identity)
+            .and_modify(|existing| {
+                if compare_support_edges(&support_edge, existing).is_lt() {
+                    *existing = support_edge.clone();
+                }
+            })
+            .or_insert(support_edge);
+    }
+
+    fn provenance_counts(&self) -> (usize, usize) {
+        self.evidence
+            .keys()
+            .fold((0, 0), |(calls, references), evidence| {
+                if evidence.relation == EdgeRelation::Calls {
+                    (calls + 1, references)
+                } else {
+                    (calls, references + 1)
+                }
+            })
+    }
+
+    fn evidence_count(&self) -> usize {
+        self.evidence.len()
+    }
+
+    /// Number of support edges actually serialized for this symbol.
+    fn serialized_evidence_count(&self) -> usize {
+        self.evidence_count().min(MAX_SUPPORT_EDGES)
+    }
+
+    fn omitted_evidence_count(&self) -> usize {
+        self.evidence_count().saturating_sub(MAX_SUPPORT_EDGES)
+    }
+
+    fn best_support_edges(&self) -> Vec<&ImpactSupportEdge> {
+        let mut edges = self.evidence.values().collect::<Vec<_>>();
+        edges.sort_by(|left, right| compare_support_edges(left, right));
+        edges.truncate(MAX_SUPPORT_EDGES);
+        edges
     }
 
     fn to_json(&self) -> Value {
-        let direct_calls = self
-            .reasons
-            .iter()
-            .filter(|reason| reason.contains(" calls: "))
-            .count();
-        let direct_references = self
-            .reasons
-            .iter()
-            .filter(|reason| reason.contains(" references: "))
-            .count();
+        let (direct_calls, direct_references) = self.provenance_counts();
         json!({
             "id": self.id,
             "name": self.name,
@@ -2573,8 +2637,9 @@ impl ImpactSymbol {
             "distance": self.distance,
             "score": self.score,
             "confidence": self.confidence,
-            "reasons": self.reasons,
-            "support_edges": self.support_edges.iter().map(|edge| edge.to_json()).collect::<Vec<_>>(),
+            "evidence_count": self.evidence_count(),
+            "omitted_evidence_count": self.omitted_evidence_count(),
+            "support_edges": self.best_support_edges().iter().map(|edge| edge.to_json()).collect::<Vec<_>>(),
             "provenance": {
                 "direct_calls": direct_calls,
                 "direct_references": direct_references,
@@ -2594,8 +2659,7 @@ struct ImpactFile {
     score: i32,
     usage_count: usize,
     confidence: f32,
-    reasons: Vec<String>,
-    support_edges: Vec<ImpactSupportEdge>,
+    impacted_symbol_ids: HashSet<String>,
 }
 
 impl ImpactFile {
@@ -2605,65 +2669,25 @@ impl ImpactFile {
             score: 0,
             usage_count: 0,
             confidence: 0.0,
-            reasons: Vec::new(),
-            support_edges: Vec::new(),
+            impacted_symbol_ids: HashSet::new(),
         }
     }
 
-    fn observe(
-        &mut self,
-        score: i32,
-        confidence: f32,
-        reason: impl Into<String>,
-        support_edge: Option<ImpactSupportEdge>,
-    ) {
+    fn observe(&mut self, score: i32, confidence: f32, impacted_symbol_id: &str) {
         self.usage_count += 1;
         self.score = self.score.max(score);
         self.confidence = self.confidence.max(confidence);
-        self.reasons.push(reason.into());
-        if let Some(edge) = support_edge {
-            self.support_edges.push(edge);
-            self.support_edges.sort_by(|a, b| {
-                b.score
-                    .cmp(&a.score)
-                    .then_with(|| b.priority.cmp(&a.priority))
-                    .then_with(|| {
-                        b.evidence_quality
-                            .partial_cmp(&a.evidence_quality)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-            });
-            self.support_edges.truncate(3);
-        }
+        self.impacted_symbol_ids
+            .insert(impacted_symbol_id.to_string());
     }
 
     fn to_json(&self) -> Value {
-        let direct_calls = self
-            .reasons
-            .iter()
-            .filter(|reason| reason.contains(" calls: "))
-            .count();
-        let direct_references = self
-            .reasons
-            .iter()
-            .filter(|reason| reason.contains(" references: "))
-            .count();
         json!({
             "file": self.file,
             "score": self.score,
             "usage_count": self.usage_count,
             "confidence": self.confidence,
-            "reasons": self.reasons,
-            "support_edges": self.support_edges.iter().map(|edge| edge.to_json()).collect::<Vec<_>>(),
-            "provenance": {
-                "direct_calls": direct_calls,
-                "direct_references": direct_references,
-                "dominant_signal": if direct_calls >= direct_references {
-                    "calls"
-                } else {
-                    "references"
-                },
-            },
+            "impacted_symbol_count": self.impacted_symbol_ids.len(),
         })
     }
 }
@@ -2792,21 +2816,7 @@ fn better_impact_path(candidate: (i32, usize, i32), existing: (i32, usize, i32))
                 || (candidate.1 == existing.1 && candidate.2 > existing.2)))
 }
 
-fn build_edge_provenance_summary(symbols: &[ImpactSymbol], files: &[ImpactFile]) -> Value {
-    let mut direct_calls = 0;
-    let mut direct_references = 0;
-    for reason in symbols
-        .iter()
-        .flat_map(|symbol| symbol.reasons.iter())
-        .chain(files.iter().flat_map(|file| file.reasons.iter()))
-    {
-        if reason.contains(" calls: ") {
-            direct_calls += 1;
-        } else if reason.contains(" references: ") {
-            direct_references += 1;
-        }
-    }
-
+fn edge_provenance_summary_json(direct_calls: usize, direct_references: usize) -> Value {
     json!({
         "direct_calls": direct_calls,
         "direct_references": direct_references,
@@ -2816,6 +2826,25 @@ fn build_edge_provenance_summary(symbols: &[ImpactSymbol], files: &[ImpactFile])
             "references"
         },
     })
+}
+
+/// Zeroed provenance summary for responses that carry no graph evidence, such as a
+/// revision with no changed symbols.  Keeps `analyze_changes` shape-identical to
+/// `analyze_impact` without re-declaring the summary shape.
+pub(crate) fn empty_edge_provenance_summary() -> Value {
+    edge_provenance_summary_json(0, 0)
+}
+
+fn build_edge_provenance_summary(symbols: &[ImpactSymbol]) -> Value {
+    let (direct_calls, direct_references) =
+        symbols
+            .iter()
+            .fold((0, 0), |(total_calls, total_references), symbol| {
+                let (calls, references) = symbol.provenance_counts();
+                (total_calls + calls, total_references + references)
+            });
+
+    edge_provenance_summary_json(direct_calls, direct_references)
 }
 
 #[allow(dead_code)]
@@ -3893,6 +3922,243 @@ mod tests {
                 .unwrap(),
             "calls"
         );
+    }
+
+    #[test]
+    fn test_impact_symbol_uses_structured_deduplicated_provenance() {
+        let edge = |direction, relation, via: &str, evidence: &str, score| ImpactSupportEdge {
+            direction,
+            relation,
+            resolution: EdgeResolution::Resolved,
+            evidence: evidence.to_string(),
+            confidence: 0.99,
+            evidence_quality: 0.9,
+            priority: 130,
+            score,
+            via_symbol_id: via.to_string(),
+            provenance: "test".to_string(),
+        };
+        let mut symbol = ImpactSymbol::new(
+            "impacted",
+            "impacted",
+            "function".to_string(),
+            "lib.rs".to_string(),
+            1,
+        );
+
+        // The same graph edge observed twice is one piece of evidence. The better
+        // presentation edge is retained without changing provenance counts.
+        symbol.observe(
+            100,
+            1,
+            0.9,
+            edge("direct caller", EdgeRelation::Calls, "source-a", "old", 100),
+        );
+        symbol.observe(
+            110,
+            1,
+            0.99,
+            edge(
+                "direct caller",
+                EdgeRelation::Calls,
+                "source-a",
+                "best",
+                110,
+            ),
+        );
+        symbol.observe(
+            90,
+            1,
+            0.9,
+            edge("direct callee", EdgeRelation::Calls, "source-b", "call", 90),
+        );
+        symbol.observe(
+            80,
+            1,
+            0.8,
+            edge(
+                "direct caller",
+                EdgeRelation::References,
+                "source-c",
+                "reference",
+                80,
+            ),
+        );
+        symbol.observe(
+            70,
+            1,
+            0.7,
+            edge(
+                "direct callee",
+                EdgeRelation::References,
+                "source-d",
+                "reference",
+                70,
+            ),
+        );
+
+        let value = symbol.to_json();
+        assert_eq!(value["evidence_count"], 4);
+        assert_eq!(value["omitted_evidence_count"], 2);
+        assert_eq!(value["support_edges"].as_array().unwrap().len(), 2);
+        assert_eq!(value["support_edges"][0]["evidence"], "best");
+        assert_eq!(value["provenance"]["direct_calls"], 2);
+        assert_eq!(value["provenance"]["direct_references"], 2);
+        assert_eq!(value["provenance"]["dominant_signal"], "calls");
+        assert!(value.get("reasons").is_none());
+    }
+
+    #[test]
+    fn test_impact_file_is_summary_only_and_counts_symbols() {
+        let mut file = ImpactFile::new("lib.rs".to_string());
+        file.observe(100, 0.8, "symbol-a");
+        file.observe(120, 0.9, "symbol-a");
+        file.observe(110, 0.85, "symbol-b");
+
+        let value = file.to_json();
+        assert_eq!(value["score"], 120);
+        assert_eq!(value["usage_count"], 3);
+        assert_eq!(value["impacted_symbol_count"], 2);
+        assert!(value.get("reasons").is_none());
+        assert!(value.get("support_edges").is_none());
+        assert!(value.get("provenance").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_deduplicates_repeated_and_diamond_edges() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "pub fn target() {}\n\
+             pub fn left() { target(); target(); }\n\
+             pub fn right() { target(); }\n\
+             pub fn root() { left(); right(); }\n",
+        )
+        .unwrap();
+        let project = setup_project(&dir).await;
+        let target_id = symbol_id_by_name(&project, "target");
+        let result = analyze_impact(AnalyzeImpactParams {
+            project,
+            query: None,
+            symbol_id: Some(target_id),
+            file_path: None,
+            scope: None,
+            depth: Some(2),
+            limit: Some(12),
+        })
+        .await
+        .unwrap();
+
+        let symbols = result["impact_symbols"].as_array().unwrap();
+        let left = symbols.iter().find(|item| item["name"] == "left").unwrap();
+        let root = symbols.iter().find(|item| item["name"] == "root").unwrap();
+        assert_eq!(left["evidence_count"], 1);
+        assert_eq!(left["provenance"]["direct_calls"], 1);
+        assert_eq!(root["evidence_count"], 2);
+        assert_eq!(root["provenance"]["direct_calls"], 2);
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_high_fan_in_response_is_bounded() {
+        let dir = TempDir::new().unwrap();
+        let mut source = "pub fn target() {}\n".to_string();
+        for index in 0..120 {
+            source.push_str(&format!("pub fn caller_{index:03}() {{ target(); }}\n"));
+        }
+        std::fs::write(dir.path().join("lib.rs"), source).unwrap();
+        let project = setup_project(&dir).await;
+        let target_id = symbol_id_by_name(&project, "target");
+        let result = analyze_impact(AnalyzeImpactParams {
+            project,
+            query: None,
+            symbol_id: Some(target_id),
+            file_path: None,
+            scope: None,
+            depth: Some(1),
+            limit: Some(12),
+        })
+        .await
+        .unwrap();
+
+        let symbols = result["impact_symbols"].as_array().unwrap();
+        let files = result["impact_files"].as_array().unwrap();
+        assert_eq!(symbols.len(), 12);
+        assert!(result["total_impact_symbols"].as_u64().unwrap() >= 100);
+        assert!(serde_json::to_vec(&result).unwrap().len() < 16 * 1024);
+        assert!(symbols.iter().all(|symbol| {
+            symbol.get("reasons").is_none()
+                && symbol["support_edges"].as_array().unwrap().len() <= 2
+        }));
+        assert!(files.iter().all(|file| {
+            file.get("reasons").is_none()
+                && file.get("support_edges").is_none()
+                && file.get("provenance").is_none()
+        }));
+
+        let (calls, references) = symbols.iter().fold((0, 0), |(calls, references), symbol| {
+            (
+                calls + symbol["provenance"]["direct_calls"].as_u64().unwrap(),
+                references + symbol["provenance"]["direct_references"].as_u64().unwrap(),
+            )
+        });
+        assert_eq!(result["edge_provenance_summary"]["direct_calls"], calls);
+        assert_eq!(
+            result["edge_provenance_summary"]["direct_references"],
+            references
+        );
+
+        // Evidence counters span every impacted symbol, before `limit` truncation,
+        // and stay consistent with the serialized support edges.
+        let serialized_evidence = symbols
+            .iter()
+            .map(|symbol| symbol["evidence_count"].as_u64().unwrap().min(2))
+            .sum::<u64>();
+        let total_evidence = result["total_evidence_count"].as_u64().unwrap();
+        let omitted_evidence = result["omitted_evidence_count"].as_u64().unwrap();
+        assert!(total_evidence >= symbols.len() as u64);
+        assert_eq!(total_evidence, serialized_evidence + omitted_evidence);
+        assert_eq!(result["evidence_truncated"], serde_json::json!(true));
+    }
+
+    #[tokio::test]
+    async fn test_analyze_impact_evidence_counters_span_symbols_omitted_by_limit() {
+        let dir = TempDir::new().unwrap();
+        let mut source = "pub fn target() {}\n".to_string();
+        for index in 0..120 {
+            source.push_str(&format!("pub fn caller_{index:03}() {{ target(); }}\n"));
+        }
+        std::fs::write(dir.path().join("lib.rs"), source).unwrap();
+        let project = setup_project(&dir).await;
+        let target_id = symbol_id_by_name(&project, "target");
+        let result = analyze_impact(AnalyzeImpactParams {
+            project,
+            query: None,
+            symbol_id: Some(target_id),
+            file_path: None,
+            scope: None,
+            depth: Some(1),
+            limit: Some(1),
+        })
+        .await
+        .unwrap();
+
+        let symbols = result["impact_symbols"].as_array().unwrap();
+        assert_eq!(symbols.len(), 1);
+        let omitted_symbols = result["omitted_impact_symbols"].as_u64().unwrap();
+        let total_evidence = result["total_evidence_count"].as_u64().unwrap();
+        let omitted_evidence = result["omitted_evidence_count"].as_u64().unwrap();
+        // `total_evidence_count` covers every impacted symbol, not just the returned
+        // one, so evidence dropped along with the omitted symbols is still reported.
+        assert!(omitted_symbols >= 100);
+        assert!(total_evidence > symbols[0]["evidence_count"].as_u64().unwrap());
+        assert!(omitted_evidence > 0);
+        assert_eq!(result["evidence_truncated"], serde_json::json!(true));
+
+        let serialized_evidence = symbols
+            .iter()
+            .map(|symbol| symbol["evidence_count"].as_u64().unwrap().min(2))
+            .sum::<u64>();
+        assert_eq!(total_evidence, serialized_evidence + omitted_evidence);
     }
 
     #[tokio::test]

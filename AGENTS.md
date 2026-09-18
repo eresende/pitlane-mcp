@@ -81,6 +81,14 @@ For architecture, pipeline, and execution-path questions:
 11. If the path hinges on a log string, import path, macro, or other text fragment rather than a symbol name, use `search_content` first, then pivot back to `locate_code`, `trace_path`, or `read_code_unit` once you know the relevant file or symbol.
 12. If you have explicitly exposed advanced tools, treat `find_callers` and `find_callees` as filtered graph views for quick checks. Otherwise prefer `trace_path` and `analyze_impact`.
 
+# Git and pull requests
+
+Follow the branch, commit, and pull request naming rules in `docs/development.md`. In particular:
+
+1. Use a Conventional Commit type as the branch prefix, such as `feat/`, `fix/`, or `docs/`. Never use a tool- or vendor-specific prefix such as `codex/`.
+2. Format commit subjects as Conventional Commits and append `(#<pr-number>)` once a pull request exists.
+3. Use the same Conventional Commit subject for the pull request title, without the pull request number.
+
 # Destructive actions
 
 Ask the user for confirmation before any destructive or hard-to-reverse action, even when it was part of an approved plan. Examples include deleting branches (local or remote), deleting files or issues, force-pushes, and closing issues or PRs. Read-only checks and ordinary commits/pushes of approved work do not need confirmation.

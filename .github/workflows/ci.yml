@@ -79,3 +79,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+
+  package-verify:
+    name: Packaged crate tests build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Package the crate
+        run: cargo package
+      - name: Build the packaged crate's tests
+        # `cargo package` verification only builds the library and binaries, so a
+        # test fixture living outside `tests/` (for example under the excluded
+        # `bench/`) would break `cargo test` for anyone consuming the crate.
+        # `find -type d` skips the sibling `.crate` tarball.
+        run: |
+          set -euo pipefail
+          package_dir="$(find target/package -mindepth 1 -maxdepth 1 -type d -name 'pitlane-mcp-*')"
+          echo "Building tests for $package_dir"
+          cd "$package_dir"
+          cargo test --no-run --verbose

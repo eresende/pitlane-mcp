@@ -28,6 +28,12 @@ Verify the rebuilt binary actually contains your change before drawing
 conclusions from end-to-end runs (`pitlane --version`, or check a behaviour
 that only exists in your working tree).
 
+## Branches, commits, and pull requests
+
+- Name branches `<type>/<short-kebab-description>`, using a Conventional Commit type such as `feat`, `fix`, `docs`, `chore`, `perf`, `refactor`, or `test`. For example: `fix/compact-analyze-impact-evidence` or `feat/add-json-output`. Do not use tool- or vendor-specific prefixes such as `codex/`.
+- Write commit subjects using Conventional Commits: `<type>(<optional-scope>): <concise imperative description>`. Keep the type and scope lowercase. Once a pull request exists, append its number as `(#<pr-number>)`, matching the repository's existing history.
+- Use the same Conventional Commit subject for the pull request title, but omit `(#<pr-number>)`; GitHub adds the pull request number when squash-merging.
+
 ## Releasing
 
 1. Make sure `main` is synced with `origin` and CI is green on it, then bump
@@ -103,3 +109,13 @@ are restarted; only new launches pick up the fresh binary.
   included and run by default.
 - Clippy (`--all-targets`) and `cargo fmt --check` must be clean; CI enforces
   both alongside test runs on five platforms.
+- Test fixtures must live under `tests/`. `Cargo.toml` excludes `bench/`, `docs/`,
+  and `.kiro/` from the crate, so `include_str!`/`include_bytes!` into those paths
+  produces a crate whose tests cannot compile even though `cargo publish`
+  succeeds — verification only builds the library and binaries. The
+  `package-verify` CI job builds the packaged crate's tests to catch this.
+- The `ripgrep_analyze_impact_response_baseline` test is `#[ignore]`d because it
+  needs the cloned `bench/repos/ripgrep` fixture, so CI only compiles it. Run it
+  by hand with `cargo test --test analyze_impact_baseline -- --ignored --nocapture`
+  after setting up fixtures with `bash bench/setup.sh`; see
+  [`tests/baselines/README.md`](../tests/baselines/README.md).
