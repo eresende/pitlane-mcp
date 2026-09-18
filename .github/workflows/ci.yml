@@ -93,4 +93,10 @@ jobs:
         # `cargo package` verification only builds the library and binaries, so a
         # test fixture living outside `tests/` (for example under the excluded
         # `bench/`) would break `cargo test` for anyone consuming the crate.
-        run: cd target/package/pitlane-mcp-* && cargo test --no-run --verbose
+        # `find -type d` skips the sibling `.crate` tarball.
+        run: |
+          set -euo pipefail
+          package_dir="$(find target/package -mindepth 1 -maxdepth 1 -type d -name 'pitlane-mcp-*')"
+          echo "Building tests for $package_dir"
+          cd "$package_dir"
+          cargo test --no-run --verbose
