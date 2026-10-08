@@ -13,6 +13,7 @@ Default public tier:
 - `get_index_changes`
 - `get_index_stats`
 - `doctor`
+- `server_info`
 - `search_content`
 - `search_knowledge`
 - `read_knowledge_document`

@@ -253,11 +253,25 @@ pub async fn doctor(params: DoctorParams) -> anyhow::Result<Value> {
     }
 
     // 6. Embeddings: configured? store loads? format compatible? complete?
-    let embed_config: Option<EmbedConfig> = EmbedConfig::try_from_env()?;
+    let embed_config: Option<EmbedConfig> = match EmbedConfig::try_from_env() {
+        Ok(config) => config,
+        Err(_) => {
+            checks.push(Check::error(
+                "embedding_config",
+                json!({
+                    "status": "invalid",
+                    "hint": "Call server_info for the running server's startup configuration diagnostics.",
+                }),
+                "Correct PITLANE_EMBED_HEADERS / PITLANE_EMBED_API_KEY and restart the server."
+                    .to_string(),
+            ));
+            None
+        }
+    };
     match embed_config {
         None => checks.push(Check::info(
             "embeddings",
-            json!({ "status": "disabled", "note": "non-semantic tools work without embeddings" }),
+            json!({ "status": "disabled", "note": "non-semantic tools work without embeddings; call server_info for startup configuration diagnostics" }),
         )),
         Some(ref cfg) => {
             let store_path = idx_dir.join("embeddings.bin");
