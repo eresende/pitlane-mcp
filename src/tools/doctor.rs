@@ -4,7 +4,7 @@ use walkdir::WalkDir;
 
 use crate::embed::document::document_fingerprint;
 use crate::embed::store::EmbedStore;
-use crate::embed::{endpoint_fingerprint, EmbedConfig};
+use crate::embed::{config_error_message, endpoint_fingerprint, EmbedConfig};
 use crate::index::format::{index_dir, load_meta};
 use crate::indexer::{is_supported_extension, Indexer};
 use crate::path_policy::resolve_project_path;
@@ -145,6 +145,37 @@ fn embeddings_incompatible_detail(
     })
 }
 
+/// Report one configuration check: invalid and disabled are distinct states.
+fn embedding_config_check(
+    result: anyhow::Result<Option<EmbedConfig>>,
+) -> (Option<EmbedConfig>, Option<Check>) {
+    match result {
+        Ok(Some(config)) => (Some(config), None),
+        Ok(None) => (
+            None,
+            Some(Check::info(
+                "embeddings",
+                json!({
+                    "status": "disabled",
+                    "note": "non-semantic tools work without embeddings; call server_info for startup configuration diagnostics",
+                }),
+            )),
+        ),
+        Err(error) => (
+            None,
+            Some(Check::error(
+                "embedding_config",
+                json!({
+                    "status": "invalid",
+                    "message": config_error_message(&error),
+                    "hint": "Call server_info for the running server's startup configuration diagnostics.",
+                }),
+                "Correct the embedding configuration and restart the server.".to_string(),
+            )),
+        ),
+    }
+}
+
 pub async fn doctor(params: DoctorParams) -> anyhow::Result<Value> {
     let canonical = resolve_project_path(&params.project)?;
     let idx_dir = index_dir(&canonical)?;
@@ -253,26 +284,12 @@ pub async fn doctor(params: DoctorParams) -> anyhow::Result<Value> {
     }
 
     // 6. Embeddings: configured? store loads? format compatible? complete?
-    let embed_config: Option<EmbedConfig> = match EmbedConfig::try_from_env() {
-        Ok(config) => config,
-        Err(_) => {
-            checks.push(Check::error(
-                "embedding_config",
-                json!({
-                    "status": "invalid",
-                    "hint": "Call server_info for the running server's startup configuration diagnostics.",
-                }),
-                "Correct PITLANE_EMBED_HEADERS / PITLANE_EMBED_API_KEY and restart the server."
-                    .to_string(),
-            ));
-            None
-        }
-    };
+    let (embed_config, config_check) = embedding_config_check(EmbedConfig::try_from_env());
+    if let Some(check) = config_check {
+        checks.push(check);
+    }
     match embed_config {
-        None => checks.push(Check::info(
-            "embeddings",
-            json!({ "status": "disabled", "note": "non-semantic tools work without embeddings; call server_info for startup configuration diagnostics" }),
-        )),
+        None => {}
         Some(ref cfg) => {
             let store_path = idx_dir.join("embeddings.bin");
             let store = EmbedStore::load(&store_path);
@@ -441,6 +458,38 @@ pub async fn doctor(params: DoctorParams) -> anyhow::Result<Value> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn invalid_embedding_config_has_one_redacted_error_check() {
+        let error: anyhow::Error = crate::embed::EmbedConfigError::InvalidHeadersJson.into();
+        let (config, check) = embedding_config_check(Err(error));
+        assert!(config.is_none());
+        let check = check.unwrap().to_json();
+        assert_eq!(check["check"], "embedding_config");
+        assert_eq!(check["status"], "error");
+        assert_eq!(check["detail"]["status"], "invalid");
+        assert!(check["detail"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("PITLANE_EMBED_HEADERS"));
+        assert!(check["detail"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("server_info"));
+
+        let (_, check) = embedding_config_check(Err(anyhow::anyhow!("secret-marker")));
+        assert!(!check.unwrap().to_json().to_string().contains("secret-marker"));
+    }
+
+    #[test]
+    fn absent_embedding_config_has_one_disabled_info_check() {
+        let (config, check) = embedding_config_check(Ok(None));
+        assert!(config.is_none());
+        let check = check.unwrap().to_json();
+        assert_eq!(check["check"], "embeddings");
+        assert_eq!(check["status"], "info");
+        assert_eq!(check["detail"]["status"], "disabled");
+    }
 
     async fn index(dir: &TempDir) -> String {
         index_project(IndexProjectParams {

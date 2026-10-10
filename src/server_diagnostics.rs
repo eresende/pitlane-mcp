@@ -5,18 +5,6 @@ use pitlane_mcp::embed::{endpoint_fingerprint, EmbedConfig};
 use pitlane_mcp::index::format::{index_cache_root, INDEX_SCHEMA_VERSION};
 use serde_json::{json, Value};
 
-/// Never return parser errors verbatim: they may contain supplied header data.
-pub fn safe_config_error(error: &anyhow::Error) -> &'static str {
-    let message = error.to_string();
-    if message.contains("cannot be combined") {
-        "PITLANE_EMBED_API_KEY conflicts with Authorization in PITLANE_EMBED_HEADERS; embeddings disabled"
-    } else if message.contains("API key") {
-        "PITLANE_EMBED_API_KEY is invalid; embeddings disabled"
-    } else {
-        "PITLANE_EMBED_HEADERS must be a valid JSON object of valid string headers; embeddings disabled"
-    }
-}
-
 pub fn snapshot(
     config: Option<&EmbedConfig>,
     error: Option<&str>,
@@ -101,9 +89,14 @@ mod tests {
 
     #[test]
     fn invalid_config_errors_do_not_echo_supplied_data() {
-        let error =
-            anyhow::anyhow!("PITLANE_EMBED_HEADERS value for 'secret-value' must be a string");
-        let result = snapshot(None, Some(safe_config_error(&error)), false, "default");
+        let error: anyhow::Error =
+            pitlane_mcp::embed::EmbedConfigError::HeaderValueNotString.into();
+        let result = snapshot(
+            None,
+            Some(pitlane_mcp::embed::config_error_message(&error)),
+            false,
+            "default",
+        );
         assert_eq!(result["embeddings"]["enabled"], false);
         assert!(!result.to_string().contains("secret-value"));
         assert!(result["embeddings"]["validation"]

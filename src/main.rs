@@ -2,7 +2,7 @@ mod server_diagnostics;
 
 use std::{future::Future, sync::Arc};
 
-use pitlane_mcp::embed::EmbedConfig;
+use pitlane_mcp::embed::{config_error_message, EmbedConfig};
 use pitlane_mcp::tools;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -710,8 +710,9 @@ impl PitlaneMcp {
         let (embed_config, embed_error) = match EmbedConfig::try_from_env() {
             Ok(config) => (config.map(Arc::new), None),
             Err(err) => {
-                tracing::error!("invalid embedding configuration: {err}");
-                (None, Some(server_diagnostics::safe_config_error(&err)))
+                let message = config_error_message(&err);
+                tracing::error!("invalid embedding configuration: {message}");
+                (None, Some(message))
             }
         };
         let tool_exposure_tier = ToolExposureTier::from_env();
