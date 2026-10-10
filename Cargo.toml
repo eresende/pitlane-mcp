@@ -95,7 +95,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 tree-sitter-swift = "0.7.3"
 tree-sitter-objc = "3.0.2"
-tree-sitter-php = "0.24"
+tree-sitter-php = "0.25"
 tree-sitter-zig = "1.1.2"
 tree-sitter-kotlin-ng = "1.1.0"
 tree-sitter-luau = "1.2.0"
