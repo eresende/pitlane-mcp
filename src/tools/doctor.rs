@@ -478,7 +478,11 @@ mod tests {
             .contains("server_info"));
 
         let (_, check) = embedding_config_check(Err(anyhow::anyhow!("secret-marker")));
-        assert!(!check.unwrap().to_json().to_string().contains("secret-marker"));
+        assert!(!check
+            .unwrap()
+            .to_json()
+            .to_string()
+            .contains("secret-marker"));
     }
 
     #[test]

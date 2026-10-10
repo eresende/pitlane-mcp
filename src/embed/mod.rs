@@ -536,7 +536,11 @@ mod tests {
     #[test]
     fn config_errors_preserve_categories_without_supplied_data() {
         let cases = [
-            (Some("{secret-marker"), None, EmbedConfigError::InvalidHeadersJson),
+            (
+                Some("{secret-marker"),
+                None,
+                EmbedConfigError::InvalidHeadersJson,
+            ),
             (
                 Some(r#"{"secret-marker":123}"#),
                 None,
@@ -557,7 +561,11 @@ mod tests {
                 Some("secret-marker"),
                 EmbedConfigError::ConflictingAuthorization,
             ),
-            (None, Some("secret-marker\n"), EmbedConfigError::InvalidApiKey),
+            (
+                None,
+                Some("secret-marker\n"),
+                EmbedConfigError::InvalidApiKey,
+            ),
         ];
         for (raw_headers, api_key, expected) in cases {
             let error = parse_embed_headers(raw_headers, api_key).unwrap_err();
@@ -573,11 +581,13 @@ mod tests {
 
     #[test]
     fn header_parsing_preserves_valid_and_empty_configuration() {
-        let headers = parse_embed_headers(Some(r#"{"x-tenant":"engineering"}"#), Some("token"))
-            .unwrap();
+        let headers =
+            parse_embed_headers(Some(r#"{"x-tenant":"engineering"}"#), Some("token")).unwrap();
         assert_eq!(headers["x-tenant"], "engineering");
         assert_eq!(headers[AUTHORIZATION], "Bearer token");
-        assert!(parse_embed_headers(Some("  "), Some("")).unwrap().is_empty());
+        assert!(parse_embed_headers(Some("  "), Some(""))
+            .unwrap()
+            .is_empty());
     }
 
     // ── Task 11.1: End-to-end integration test: index → embed → semantic search ──
