@@ -60,6 +60,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -77,6 +79,9 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --release ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
+
+      - name: Run release tests
+        run: cargo test --release --verbose ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
 
       - name: Package binaries (Unix)
         if: runner.os != 'Windows'

@@ -39,7 +39,8 @@ that only exists in your working tree).
 1. Make sure `main` is synced with `origin` and CI is green on it, then bump
    `version` in `Cargo.toml` (and `Cargo.lock` via a build) and commit to `main`.
 2. Push a tag `vX.Y.Z` — `.github/workflows/release.yml` builds five platform
-   binaries, creates the GitHub release, and updates the Homebrew tap.
+   binaries, runs tests in the release profile before uploading each platform's
+   artifacts, creates the GitHub release, and updates the Homebrew tap.
    Watch the run to completion (`gh run list`, then `gh run view <id>`);
    all five build jobs plus the Homebrew update must succeed.
 3. Replace the generated release notes with hand-written notes matching the
@@ -108,7 +109,10 @@ are restarted; only new launches pick up the fresh binary.
 - `cargo test --lib` runs the unit and integration suite; property tests are
   included and run by default.
 - Clippy (`--all-targets`) and `cargo fmt --check` must be clean; CI enforces
-  both alongside test runs on five platforms.
+  both alongside test runs on Linux x86_64, Linux ARM64, and macOS Apple Silicon
+  for pull requests and pushes to `main`. Windows x86_64 and macOS x86_64 are
+  built and tested only by the release workflow; release artifacts remain
+  available for all five platforms.
 - Test fixtures must live under `tests/`. `Cargo.toml` excludes `bench/`, `docs/`,
   and `.kiro/` from the crate, so `include_str!`/`include_bytes!` into those paths
   produces a crate whose tests cannot compile even though `cargo publish`

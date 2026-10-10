@@ -42,6 +42,82 @@ pub struct EmbedConfig {
     pub headers: HeaderMap,
 }
 
+/// Configuration failures contain only a category, never supplied header data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbedConfigError {
+    InvalidHeadersJson,
+    HeaderValueNotString,
+    InvalidHeaderName,
+    InvalidHeaderValue,
+    ConflictingAuthorization,
+    InvalidApiKey,
+}
+
+impl EmbedConfigError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::InvalidHeadersJson => {
+                "PITLANE_EMBED_HEADERS must be a JSON object of string values"
+            }
+            Self::HeaderValueNotString => "PITLANE_EMBED_HEADERS values must be strings",
+            Self::InvalidHeaderName => "PITLANE_EMBED_HEADERS contains an invalid header name",
+            Self::InvalidHeaderValue => "PITLANE_EMBED_HEADERS contains an invalid header value",
+            Self::ConflictingAuthorization => {
+                "PITLANE_EMBED_API_KEY cannot be combined with Authorization in PITLANE_EMBED_HEADERS"
+            }
+            Self::InvalidApiKey => "PITLANE_EMBED_API_KEY is not a valid header value",
+        }
+    }
+}
+
+impl std::fmt::Display for EmbedConfigError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.message())
+    }
+}
+
+impl std::error::Error for EmbedConfigError {}
+
+/// Shared by logs and diagnostics. Unknown errors are redacted too.
+pub fn config_error_message(error: &anyhow::Error) -> &'static str {
+    error
+        .downcast_ref::<EmbedConfigError>()
+        .map(|error| error.message())
+        .unwrap_or(
+            "Invalid embedding configuration; check PITLANE_EMBED_HEADERS and PITLANE_EMBED_API_KEY",
+        )
+}
+
+fn parse_embed_headers(
+    raw_headers: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<HeaderMap, EmbedConfigError> {
+    let mut headers = HeaderMap::new();
+    if let Some(raw_headers) = raw_headers.filter(|value| !value.trim().is_empty()) {
+        let values: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(raw_headers).map_err(|_| EmbedConfigError::InvalidHeadersJson)?;
+        for (name, value) in values {
+            let value = value
+                .as_str()
+                .ok_or(EmbedConfigError::HeaderValueNotString)?;
+            let name = HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| EmbedConfigError::InvalidHeaderName)?;
+            let value =
+                HeaderValue::from_str(value).map_err(|_| EmbedConfigError::InvalidHeaderValue)?;
+            headers.insert(name, value);
+        }
+    }
+    if let Some(api_key) = api_key.filter(|value| !value.is_empty()) {
+        if headers.contains_key(AUTHORIZATION) {
+            return Err(EmbedConfigError::ConflictingAuthorization);
+        }
+        let value = HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|_| EmbedConfigError::InvalidApiKey)?;
+        headers.insert(AUTHORIZATION, value);
+    }
+    Ok(headers)
+}
+
 impl EmbedConfig {
     /// Parse embedding configuration and return an error for invalid headers.
     pub fn try_from_env() -> anyhow::Result<Option<Self>> {
@@ -54,42 +130,9 @@ impl EmbedConfig {
             _ => return Ok(None),
         };
 
-        let mut headers = HeaderMap::new();
-        if let Ok(raw_headers) = std::env::var("PITLANE_EMBED_HEADERS") {
-            if !raw_headers.trim().is_empty() {
-                let values: serde_json::Map<String, serde_json::Value> =
-                    serde_json::from_str(&raw_headers).map_err(|err| {
-                        anyhow::anyhow!(
-                            "PITLANE_EMBED_HEADERS must be a JSON object of string values: {err}"
-                        )
-                    })?;
-
-                for (name, value) in values {
-                    let value = value.as_str().ok_or_else(|| {
-                        anyhow::anyhow!("PITLANE_EMBED_HEADERS value for '{name}' must be a string")
-                    })?;
-                    let name = HeaderName::from_bytes(name.as_bytes())
-                        .map_err(|err| anyhow::anyhow!("invalid embedding header name: {err}"))?;
-                    let value = HeaderValue::from_str(value).map_err(|err| {
-                        anyhow::anyhow!("invalid value for embedding header: {err}")
-                    })?;
-                    headers.insert(name, value);
-                }
-            }
-        }
-
-        if let Ok(api_key) = std::env::var("PITLANE_EMBED_API_KEY") {
-            if !api_key.is_empty() {
-                if headers.contains_key(AUTHORIZATION) {
-                    anyhow::bail!(
-                        "PITLANE_EMBED_API_KEY cannot be combined with an Authorization header in PITLANE_EMBED_HEADERS"
-                    );
-                }
-                let value = HeaderValue::from_str(&format!("Bearer {api_key}"))
-                    .map_err(|err| anyhow::anyhow!("invalid embedding API key: {err}"))?;
-                headers.insert(AUTHORIZATION, value);
-            }
-        }
+        let raw_headers = std::env::var("PITLANE_EMBED_HEADERS").ok();
+        let api_key = std::env::var("PITLANE_EMBED_API_KEY").ok();
+        let headers = parse_embed_headers(raw_headers.as_deref(), api_key.as_deref())?;
 
         Ok(Some(Self {
             url,
@@ -105,7 +148,8 @@ impl EmbedConfig {
         match Self::try_from_env() {
             Ok(config) => config,
             Err(err) => {
-                tracing::error!("invalid embedding configuration: {err}");
+                let message = config_error_message(&err);
+                tracing::error!("invalid embedding configuration: {message}");
                 None
             }
         }
@@ -488,6 +532,63 @@ mod tests {
     use proptest::prelude::*;
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn config_errors_preserve_categories_without_supplied_data() {
+        let cases = [
+            (
+                Some("{secret-marker"),
+                None,
+                EmbedConfigError::InvalidHeadersJson,
+            ),
+            (
+                Some(r#"{"secret-marker":123}"#),
+                None,
+                EmbedConfigError::HeaderValueNotString,
+            ),
+            (
+                Some(r#"{"secret-marker ":"value"}"#),
+                None,
+                EmbedConfigError::InvalidHeaderName,
+            ),
+            (
+                Some(r#"{"x-key":"secret-marker\n"}"#),
+                None,
+                EmbedConfigError::InvalidHeaderValue,
+            ),
+            (
+                Some(r#"{"Authorization":"Bearer secret-marker"}"#),
+                Some("secret-marker"),
+                EmbedConfigError::ConflictingAuthorization,
+            ),
+            (
+                None,
+                Some("secret-marker\n"),
+                EmbedConfigError::InvalidApiKey,
+            ),
+        ];
+        for (raw_headers, api_key, expected) in cases {
+            let error = parse_embed_headers(raw_headers, api_key).unwrap_err();
+            assert_eq!(error, expected);
+            let error: anyhow::Error = error.into();
+            assert_eq!(error.downcast_ref::<EmbedConfigError>(), Some(&expected));
+            assert!(!error.to_string().contains("secret-marker"));
+            assert_eq!(config_error_message(&error), expected.message());
+        }
+        let unknown = anyhow::anyhow!("unexpected secret-marker");
+        assert!(!config_error_message(&unknown).contains("secret-marker"));
+    }
+
+    #[test]
+    fn header_parsing_preserves_valid_and_empty_configuration() {
+        let headers =
+            parse_embed_headers(Some(r#"{"x-tenant":"engineering"}"#), Some("token")).unwrap();
+        assert_eq!(headers["x-tenant"], "engineering");
+        assert_eq!(headers[AUTHORIZATION], "Bearer token");
+        assert!(parse_embed_headers(Some("  "), Some(""))
+            .unwrap()
+            .is_empty());
+    }
 
     // ── Task 11.1: End-to-end integration test: index → embed → semantic search ──
     // Requirements: 2.1, 2.3, 5.1, 5.2
