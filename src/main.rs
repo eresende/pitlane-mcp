@@ -1,6 +1,8 @@
+mod server_diagnostics;
+
 use std::{future::Future, sync::Arc};
 
-use pitlane_mcp::embed::EmbedConfig;
+use pitlane_mcp::embed::{config_error_message, EmbedConfig};
 use pitlane_mcp::tools;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -647,6 +649,7 @@ const DEFAULT_PUBLIC_TOOL_NAMES: &[&str] = &[
     "get_index_changes",
     "get_index_stats",
     "doctor",
+    "server_info",
     "search_content",
     "search_knowledge",
     "read_knowledge_document",
@@ -689,6 +692,7 @@ impl ToolExposureTier {
 pub struct PitlaneMcp {
     watcher_registry: Arc<WatcherRegistry>,
     embed_config: Option<Arc<EmbedConfig>>,
+    runtime_info: Arc<serde_json::Value>,
     tool_router: ToolRouter<Self>,
     public_tool_router: ToolRouter<Self>,
     tool_exposure_tier: ToolExposureTier,
@@ -703,21 +707,35 @@ impl Default for PitlaneMcp {
 impl PitlaneMcp {
     pub fn new() -> Self {
         let watcher_registry = Arc::new(WatcherRegistry::new());
-        let embed_config = match EmbedConfig::try_from_env() {
-            Ok(config) => config.map(Arc::new),
+        let (embed_config, embed_error) = match EmbedConfig::try_from_env() {
+            Ok(config) => (config.map(Arc::new), None),
             Err(err) => {
-                tracing::error!("invalid embedding configuration: {err}");
-                None
+                let message = config_error_message(&err);
+                tracing::error!("invalid embedding configuration: {message}");
+                (None, Some(message))
             }
         };
+        let tool_exposure_tier = ToolExposureTier::from_env();
+        let api_key_set =
+            std::env::var("PITLANE_EMBED_API_KEY").is_ok_and(|value| !value.is_empty());
+        let runtime_info = Arc::new(server_diagnostics::snapshot(
+            embed_config.as_deref(),
+            embed_error,
+            api_key_set,
+            match tool_exposure_tier {
+                ToolExposureTier::Default => "default",
+                ToolExposureTier::All => "all",
+            },
+        ));
         let tool_router = Self::tool_router();
         let public_tool_router = build_public_tool_router(tool_router.clone());
         Self {
             watcher_registry,
             embed_config,
+            runtime_info,
             tool_router,
             public_tool_router,
-            tool_exposure_tier: ToolExposureTier::from_env(),
+            tool_exposure_tier,
         }
     }
 }
@@ -767,6 +785,20 @@ fn err_to_text(e: anyhow::Error) -> String {
 
 #[tool_router]
 impl PitlaneMcp {
+    #[tool(
+        description = "Report the running server version, startup embedding configuration, tool tier, and cache identity. Use when embeddings are disabled or an installed binary may be stale. No project path required.",
+        meta = tool_meta("server version runtime config diagnostics embeddings"),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn server_info(&self) -> String {
+        value_to_text((*self.runtime_info).clone())
+    }
+
     #[tool(
         description = "Advanced startup tool that parses and indexes a project. Prefer ensure_project_ready for normal use.",
         meta = tool_meta("index parse cache project"),
@@ -1593,13 +1625,17 @@ impl ServerHandler for PitlaneMcp {
     }
 
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
             .with_instructions(
                 "pitlane-mcp: token-efficient code navigation. \
                 Default tool tier: ensure_project_ready, investigate, locate_code, read_code_unit, trace_path, analyze_impact, analyze_changes, get_index_stats, and search_content. \
                 Suggested flow: start with ensure_project_ready; use investigate for broad code questions; use locate_code for ambiguous discovery; use read_code_unit to inspect a chosen target; use trace_path for flow questions; use analyze_impact before edits and analyze_changes for Git-diff impact; use get_index_stats for lightweight orientation; use search_content only when you know a text fragment. \
+                Use server_info for the running version and startup configuration diagnostics. \
                 Advanced primitive tools are hidden from tools/list by default to reduce agent branching. Set PITLANE_MCP_TOOL_TIER=all to expose the full primitive surface.",
-            )
+            );
+        info.server_info.name = env!("CARGO_PKG_NAME").to_string();
+        info.server_info.version = env!("CARGO_PKG_VERSION").to_string();
+        info
     }
 }
 
@@ -1623,6 +1659,24 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn initialize_reports_crate_identity() {
+        let info = PitlaneMcp::new().get_info();
+        let response = serde_json::to_value(info).unwrap();
+        assert_eq!(response["serverInfo"]["name"], env!("CARGO_PKG_NAME"));
+        assert_eq!(response["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn server_info_is_available_without_a_project() {
+        let server = PitlaneMcp::new();
+        assert!(server.public_tool_router.get("server_info").is_some());
+        assert!(server.tool_router.get("server_info").is_some());
+        let result: serde_json::Value = serde_json::from_str(&server.server_info().await).unwrap();
+        assert_eq!(result["name"], env!("CARGO_PKG_NAME"));
+        assert_eq!(result["version"], env!("CARGO_PKG_VERSION"));
+    }
 
     fn tool_names(router: &ToolRouter<PitlaneMcp>) -> Vec<String> {
         router

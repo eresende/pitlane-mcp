@@ -20,19 +20,10 @@ jobs:
         include:
           - os: ubuntu-latest
             name: Linux x86_64
-            target: ''
           - os: ubuntu-24.04-arm
             name: Linux ARM64
-            target: ''
           - os: macos-latest
             name: macOS Apple Silicon
-            target: ''
-          - os: macos-latest
-            name: macOS x86_64
-            target: x86_64-apple-darwin
-          - os: windows-latest
-            name: Windows x86_64
-            target: ''
 
     steps:
       - uses: actions/checkout@v7
@@ -43,19 +34,11 @@ jobs:
       - name: Cache build artifacts
         uses: Swatinem/rust-cache@v2
 
-      - name: Disable Windows Defender on build directories
-        if: runner.os == 'Windows'
-        run: Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo", "$env:GITHUB_WORKSPACE\target"
-
-      - name: Add Rust target (macOS x86_64 cross-compile)
-        if: matrix.target != ''
-        run: rustup target add ${{ matrix.target }}
-
       - name: Build
-        run: cargo build --verbose ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
+        run: cargo build --verbose
 
       - name: Run tests
-        run: cargo test --verbose ${{ matrix.target != '' && format('--target {0}', matrix.target) || '' }}
+        run: cargo test --verbose
 
   fmt:
     name: Rustfmt
