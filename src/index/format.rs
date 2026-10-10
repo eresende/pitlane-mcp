@@ -9,6 +9,9 @@ use crate::index::repo_profile::{build_repo_profile, RepoProfile};
 use crate::index::SymbolIndex;
 use crate::indexer::language::{Symbol, SymbolId};
 
+/// Current persisted index metadata schema version.
+pub const INDEX_SCHEMA_VERSION: u32 = 6;
+
 /// Serializable form of index.
 #[derive(Serialize, Deserialize)]
 struct IndexOnDisk {
@@ -117,7 +120,7 @@ impl IndexMeta {
     pub fn new(project_path: &Path) -> Self {
         Self {
             project_path: project_path.display().to_string(),
-            version: 6,
+            version: INDEX_SCHEMA_VERSION,
             indexed_at: chrono_now(),
             file_mtimes: HashMap::new(),
             dir_mtimes: HashMap::new(),
@@ -222,8 +225,12 @@ pub fn index_dir(project_path: &Path) -> anyhow::Result<std::path::PathBuf> {
         .canonicalize()
         .unwrap_or_else(|_| project_path.to_path_buf());
     let hash = project_hash(&canonical);
-    let home = dirs_home()?;
-    Ok(home.join(".pitlane").join("indexes").join(hash))
+    Ok(index_cache_root()?.join(hash))
+}
+
+/// Root directory containing per-project index caches.
+pub fn index_cache_root() -> anyhow::Result<std::path::PathBuf> {
+    Ok(dirs_home()?.join(".pitlane").join("indexes"))
 }
 
 /// Per-project knowledge index directory: `<index_dir>/knowledge`.
