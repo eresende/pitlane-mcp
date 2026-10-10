@@ -37,15 +37,19 @@ that only exists in your working tree).
 ## Releasing
 
 1. Make sure `main` is synced with `origin` and CI is green on it, then bump
-   `version` in `Cargo.toml` (and `Cargo.lock` via a build) and commit to `main`.
+   `version` in `Cargo.toml` (and `Cargo.lock` via a build). Write the release
+   notes in `docs/releases/vX.Y.Z.md`, add the version to
+   [`docs/releases/README.md`](releases/README.md), and commit to `main`.
 2. Push a tag `vX.Y.Z` — `.github/workflows/release.yml` builds five platform
    binaries, runs tests in the release profile before uploading each platform's
    artifacts, creates the GitHub release, and updates the Homebrew tap.
    Watch the run to completion (`gh run list`, then `gh run view <id>`);
    all five build jobs plus the Homebrew update must succeed.
-3. Replace the generated release notes with hand-written notes matching the
-   format of previous releases (title with hook, intro paragraph, themed
-   sections, validation, compare link).
+3. Replace the generated GitHub release notes with the contents of
+   `docs/releases/vX.Y.Z.md`, matching the format of previous releases (title
+   with hook, intro paragraph, themed sections, validation, compare link).
+   Update the archive index with the publication date and keep the repository
+   copy aligned with any later edits to the GitHub release description.
 4. `cargo publish` to crates.io. `--dry-run` verifies the package but needs
    no token, so it cannot validate registry auth — confirm `cargo` can read
    your credentials (e.g. `head -c 20 ~/.cargo/credentials.toml`) before
