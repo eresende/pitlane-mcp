@@ -16,12 +16,15 @@ Verify the `pitlane-mcp` executable is on the PATH seen by your agent (or use it
 - **OpenCode:** merge [configs/opencode.json](configs/opencode.json) into `opencode.json` or `opencode.jsonc`.
 - **Cursor:** merge [configs/cursor-mcp.json](configs/cursor-mcp.json) into `.cursor/mcp.json`.
 - **VS Code / Copilot:** merge [configs/vscode-mcp.json](configs/vscode-mcp.json) into `.vscode/mcp.json`.
+- **Pi.dev (built-in MCP):** merge [configs/pi-mcp.json](configs/pi-mcp.json) into `~/.pi/agent/mcp.json` for user scope, or `.pi/mcp.json` for a trusted project. If `PI_CODING_AGENT_DIR` is set, use its `mcp.json` for user scope instead. Alternatively, run `pi mcp add pitlane-mcp -- pitlane-mcp` (add `--local` for project scope). Check the connection with `pi mcp list`; run `/reload` in an existing session after configuration changes. See [Pi's MCP guide](https://pi.dev/docs/latest/mcp).
 
 These JSON examples are fragments of an agent's overall configuration: **merge the appropriate entries; do not overwrite existing settings**. For additional clients and semantic-search options, refer to the [upstream configuration documentation](https://github.com/eresende/pitlane-mcp/blob/main/docs/configuration.md).
 
 ## Install the skill
 
 Keep the folder containing `SKILL.md` together as a skill package. Use your agent's documented skill installation procedure to install it at user or project scope. MCP registration and skill installation are separate steps. You may also use the [SKILL.md](SKILL.md) guidance directly in an agent's instructions if it does not support skill packages.
+
+For Pi, place this folder at `~/.agents/skills/pitlane-navigation/` or `.agents/skills/pitlane-navigation/` in the project. Invoke `/skill:pitlane-navigation` to load it explicitly. See [Pi's skills guide](https://pi.dev/docs/latest/skills).
 
 ## Verify
 
