@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "experiment_id": "ripgrep-navigation-skill-v1",
+  "configurations": {
+    "A": {"name": "native", "mcp": false, "skill": false},
+    "B": {"name": "mcp-only", "mcp": true, "skill": false},
+    "C": {"name": "mcp-skill", "mcp": true, "skill": true}
+  },
+  "model": "qwen3.8-flash-next-coder-iq1_m",
+  "quantization": "iq1_m",
+  "context_window": 131072,
+  "temperature": 0.0,
+  "max_output_tokens": 4096,
+  "request_options": {},
+  "reasoning_configuration": "server default xhigh (verified on 2026-10-18); no request override; identical in all arms",
+  "completion_guidance": "concise-causal-v1 (provisional)",
+  "max_iterations": 25,
+  "reserve_final_turn": true,
+  "timeout_seconds": 300,
+  "setup_timeout_seconds": 600,
+  "seed": 20261018,
+  "smoke_prompt_id": "symbol_cli_config_flow",
+  "pilot_tasks": [
+    "symbol_ignore_logic",
+    "symbol_cli_config_flow",
+    "graph_nav_call_chain",
+    "arch_package_map",
+    "semantic_search_probe"
+  ],
+  "tasks": {
+    "symbol_ignore_logic": "symbol discovery",
+    "graph_nav_call_chain": "execution-path tracing",
+    "arch_package_map": "architecture understanding",
+    "usage_cli_to_search": "dependency tracing (no explicit change-impact prompt exists)",
+    "semantic_search_probe": "code search / semantic discovery"
+  },
+  "declared_environment": {
+    "engine": "Strata v0.1.44.1",
+    "gpu": "AMD Radeon RX 7900 XTX 24 GB",
+    "cpu": "Ryzen 9 9950X",
+    "system_ram_gb": 32,
+    "kv_cache_bits": 8,
+    "provenance": "user supplied; API model/context checked during preflight"
+  }
+}

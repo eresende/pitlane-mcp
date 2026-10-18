@@ -1,0 +1,24 @@
+name: Benchmark harness
+
+on:
+  pull_request:
+    paths: ['bench/harness/**', '.github/workflows/benchmark-harness.yml', 'pytest.ini']
+  push:
+    branches: [main]
+    paths: ['bench/harness/**', '.github/workflows/benchmark-harness.yml', 'pytest.ini']
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install test dependencies
+        run: python -m pip install -r bench/harness/tests/requirements.txt
+      - name: Run offline harness tests
+        run: python -m pytest bench/harness/tests -m 'not integration' -q

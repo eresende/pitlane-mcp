@@ -24,6 +24,13 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("bench")
 
+FINAL_TURN_PROMPT = (
+    "This is the final response turn within the existing request budget. "
+    "Do not request more tools. Answer the original question using the evidence "
+    "already collected. State missing evidence and incomplete parts explicitly. "
+    "Do not invent facts or claim completeness that the evidence does not support."
+)
+
 _SYSTEM_PROMPT = (
     "You are a code analysis assistant running inside a benchmark harness. "
     "Your goal is to answer the user's question with the fewest useful tool calls, "
@@ -185,6 +192,9 @@ class AgenticLoop:
         mode: str = "baseline",
         run_index: int = 0,
         repo_path: str = "",
+        system_prompt: str | None = None,
+        reserve_final_turn: bool = False,
+        final_turn_prompt: str = FINAL_TURN_PROMPT,
     ) -> RunResult:
         """Run the agentic loop and return a RunResult.
 
@@ -201,6 +211,11 @@ class AgenticLoop:
             run_index: Run index within a benchmark set (for RunResult).
             repo_path: Path to the repository being analyzed (injected into
                 system prompt for MCP mode so model knows the project value).
+            reserve_final_turn: Reserve the last model request, within the same
+                iteration budget, for synthesis without offering tools. Opt-in;
+                legacy runs keep their existing behavior.
+            final_turn_prompt: Optional common synthesis instruction for that
+                reserved request. The legacy default remains unchanged.
 
         Returns:
             RunResult with full conversation, tool call log, final answer,
@@ -209,7 +224,8 @@ class AgenticLoop:
         wall_start = time.perf_counter()
         _bytes_before = executor.total_response_bytes()
 
-        system_prompt = _build_system_prompt(mode, repo_path, prompt_id)
+        if system_prompt is None:
+            system_prompt = _build_system_prompt(mode, repo_path, prompt_id)
 
         conversation: list[Message] = [
             Message(role="system", content=system_prompt),
@@ -236,7 +252,10 @@ class AgenticLoop:
 
                 log.debug("    [iter %d] calling LLM...", iteration)
                 t_llm = time.perf_counter()
-                response = backend.chat(conversation, tools)
+                final_turn = reserve_final_turn and iteration == max_iterations
+                if final_turn:
+                    conversation.append(Message(role="user", content=final_turn_prompt))
+                response = backend.chat(conversation, [] if final_turn else tools)
                 log.debug("    [iter %d] LLM responded in %.1fs  tokens=%d",
                           iteration, time.perf_counter() - t_llm, response.usage.total_tokens)
 
@@ -252,6 +271,11 @@ class AgenticLoop:
 
                 assistant_msg = response.message
                 conversation.append(assistant_msg)
+
+                if final_turn and assistant_msg.tool_calls:
+                    status = "error"
+                    error = "tool_call_during_final_synthesis"
+                    break
 
                 # No tool calls → final answer
                 if not assistant_msg.tool_calls:
