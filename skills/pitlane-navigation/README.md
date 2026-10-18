@@ -30,10 +30,6 @@ Keep the folder containing `SKILL.md` together as a skill package. Use your agen
 3. Confirm the agent selects `ensure_project_ready` if needed and retrieves concrete symbol/file evidence.
 4. Try a simple literal lookup and verify the agent can use native search where appropriate.
 
-## Packaging for Agensi
-
-Create a ZIP with this **directory's contents at the ZIP root** (`SKILL.md`, `README.md` and `configs/`). Before upload, check the marketplace's current validator; some skill distributors instead require one enclosing directory. Publish it free and link to the canonical upstream repository. No binaries, credentials, model endpoints or private configuration are included.
-
 ## Maintenance
 
 The upstream repository is canonical. This skill deliberately excludes project-contributor rules from the repository's `AGENTS.md`. Update guidance when the MCP tool surface changes, and validate claims about efficiency with task-level benchmarks rather than assuming every MCP call is an improvement.
