@@ -1,12 +1,10 @@
 {
-  "mcp": {
-    "servers": {
-      "pitlane-mcp": {
-        "type": "stdio",
-        "command": "pitlane-mcp",
-        "args": [],
-        "env": {}
-      }
+  "servers": {
+    "pitlane-mcp": {
+      "type": "stdio",
+      "command": "pitlane-mcp",
+      "args": [],
+      "env": {}
     }
   }
 }

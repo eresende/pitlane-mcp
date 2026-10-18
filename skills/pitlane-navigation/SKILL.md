@@ -29,10 +29,10 @@ Use this skill when exploring a codebase and the `pitlane-mcp` MCP server is ava
 ## Search deliberately
 
 1. Use `locate_code` rather than guessing whether a query is a symbol, file or text fragment.
-2. For behaviour/responsibility descriptions without a named symbol, use `mode="semantic"` when supported and embeddings are available.
-3. For named symbols or distinctive substrings, prefer `mode="exact"` or `mode="bm25"`.
+2. `locate_code` selects its search strategy automatically; it has no `mode` parameter. Describe behaviour or responsibility in the query for semantic discovery, which falls back to lexical search when embeddings are unavailable.
+3. For a known symbol, give `locate_code` its concrete name; for a distinctive text fragment, use `search_content`.
 4. Write semantic queries as an action plus subject (for example, "build regex matcher from CLI flags"), not a bag of generic keywords.
-5. If semantic matches are weak, rephrase once; then try one focused lexical search rather than many broad queries.
+5. If semantic matches are weak, rephrase once; then use a concrete symbol name with `locate_code` or a known text fragment with `search_content` rather than many broad queries.
 6. Use `read_code_unit` after finding a target, and expand only as necessary. Honor `read_state.status`: `unchanged` means expand rather than repeat an identical read; `changed` means use refreshed content.
 7. Pay attention to `session_state` from `locate_code`, `trace_path`, and `analyze_impact` when present, especially whether an unseen relevant alternative was promoted.
 
@@ -55,6 +55,7 @@ Use this skill when exploring a codebase and the `pitlane-mcp` MCP server is ava
 - After direct `index_project`, if it reports `embeddings="running"`, use `wait_for_embeddings` rather than polling stats.
 - Use `watch_project` when repository changes need monitoring during the session.
 - Use `search_files` for known file fragments, `search_symbols`/`get_symbol` for known symbols, and `find_callers`/`find_callees` for small graph checks.
+- With `search_symbols`, use `mode="semantic"` for behaviour/responsibility descriptions when embeddings are available, or `mode="exact"` / `mode="bm25"` for concrete symbol names or distinctive substrings.
 - Avoid expensive broad outlines unless repository structure is the question.
 
 ## Scope and safety
