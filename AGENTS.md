@@ -48,10 +48,10 @@ Advanced primitive tools are hidden from `tools/list` unless the server is start
 # Search Strategy
 
 1. Prefer `locate_code` over manually choosing between `search_symbols`, `search_files`, and `search_content` when the query is ambiguous.
-2. Use `mode="semantic"` when the user describes behavior, responsibility, or an execution path without naming an exact symbol.
-3. Use `mode="exact"` or `mode="bm25"` when the user gives a concrete symbol name or a distinctive substring.
+2. `locate_code` selects its search strategy automatically and has no `mode` parameter. Describe behavior or responsibility in the query for semantic discovery, which falls back to lexical search when embeddings are unavailable.
+3. If you have explicitly exposed advanced tools, use `mode="semantic"` in `search_symbols` when the user describes behavior, responsibility, or an execution path without naming an exact symbol, and `mode="exact"` or `mode="bm25"` when the user gives a concrete symbol name or a distinctive substring.
 4. Write semantic queries as intent descriptions, not keyword bags. Use action + subject, for example `build regex matcher from CLI flags`.
-5. If semantic results are weak, rephrase once with more context. Then fall back to one focused `bm25` or `exact` search.
+5. If semantic results are weak, rephrase once with more context. Then give `locate_code` a concrete symbol name, or use one focused `bm25` or `exact` search in `search_symbols` when you have exposed advanced tools.
 6. Do not replace one semantic search with several broad guessed-keyword searches like `search`, `regex`, `walk`, or `printer`.
 7. If you know text in the code but not the symbol, use `search_content` instead of shell `grep` or repeated guessed symbol searches.
 8. If you have explicitly exposed advanced tools and know a file name or path fragment, use `search_files` instead of shell globbing or broad symbol searches.
