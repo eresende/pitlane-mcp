@@ -1,0 +1,10 @@
+{
+  "servers": {
+    "pitlane-mcp": {
+      "type": "stdio",
+      "command": "pitlane-mcp",
+      "args": [],
+      "env": {}
+    }
+  }
+}

@@ -13,6 +13,9 @@ This directory contains the focused documentation for `pitlane-mcp`.
 - [Agent Guidance](agent-guidance.md)
   Reusable `CLAUDE.md` / `AGENTS.md` style instructions for projects that use `pitlane-mcp`.
 
+- [Agent Navigation Skill](../skills/pitlane-navigation/README.md)
+  Optional companion skill package for skill-aware coding agents, with MCP configuration examples.
+
 - [Languages and Symbol Kinds](languages.md)
   Supported file extensions and symbol-kind coverage by language.
 

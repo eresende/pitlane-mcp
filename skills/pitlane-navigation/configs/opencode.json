@@ -1,0 +1,8 @@
+{
+  "mcp": {
+    "pitlane-mcp": {
+      "type": "local",
+      "command": ["pitlane-mcp"]
+    }
+  }
+}
