@@ -171,6 +171,7 @@ Advanced primitives are hidden from `tools/list` by default. Set `PITLANE_MCP_TO
 - [Configuration](docs/configuration.md)
 - [Tool Reference](docs/tools.md)
 - [Agent Guidance](docs/agent-guidance.md)
+- [Agent Navigation Skill](skills/pitlane-navigation/README.md) — optional companion skill for skill-aware coding agents
 - [Languages and Symbol Kinds](docs/languages.md)
 - [Benchmarks](docs/benchmarks.md)
 - [Security](docs/security.md)
