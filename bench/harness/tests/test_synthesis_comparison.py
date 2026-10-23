@@ -5,7 +5,7 @@ import hashlib
 import pytest
 
 from bench.harness.experiments.compare_synthesis import (
-    experiment_payload, verification_passes, CAUSAL_GUIDANCE,
+    docker_proof, experiment_payload, verification_passes, CAUSAL_GUIDANCE,
 )
 from bench.harness.framework.agentic_loop import FINAL_TURN_PROMPT
 
@@ -26,6 +26,18 @@ def test_factorial_changes_only_final_instruction_and_explicit_medium():
         assert {k: v for k, v in payload.items() if k not in {"messages", "reasoning_effort"}} == {
             k: v for k, v in recorded.items() if k not in {"messages", "tools"}}
     assert all(term not in CAUSAL_GUIDANCE for term in ("ripgrep", "gitignore", "prun", "add_child", "Walk"))
+
+
+def test_docker_proof_degrades_to_not_verified_instead_of_raising():
+    from types import SimpleNamespace
+    assert docker_proof(SimpleNamespace(returncode=0, stdout=b'{"payloads": {}}')) == {"payloads": {}}
+    assert docker_proof(SimpleNamespace(returncode=0, stdout=b"warning: banner\n")) == {
+        "verification_error": "docker_cpu_verification_unparseable"}
+    assert docker_proof(SimpleNamespace(returncode=1, stdout=b"")) == {
+        "verification_error": "docker_cpu_verification_failed"}
+    # An unverified proof can never satisfy the reasoning-control requirement.
+    assert not verification_passes({"verification_error": "docker_cpu_verification_unparseable"},
+                                   {"chat_template": "actual template"}, {})
 
 
 @pytest.mark.parametrize("field,value", [("reasoning_effort", "xhigh"), ("reasoning", {"effort": "high"}), ("chat_template_kwargs", {})])

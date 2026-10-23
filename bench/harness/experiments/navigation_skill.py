@@ -16,7 +16,7 @@ import shutil
 import subprocess
 import time
 
-from bench.harness.framework.agentic_loop import AgenticLoop, FINAL_TURN_PROMPT
+from bench.harness.framework.agentic_loop import AgenticLoop
 from bench.harness.framework.benchmark_runner import _detect_cpu, _detect_ram_gb
 from bench.harness.framework.prompt_loader import load_prompts
 from bench.harness.framework.quality_scorer import QualityScorer
@@ -106,6 +106,20 @@ def load_reviews(out, rows):
             row[metric] = review.get(metric)
 
 
+def context_verified(manifest):
+    """Compare the server-reported context with the declaration.
+
+    Returns None when the configured endpoint cannot report its context, so the
+    check is recorded as not evaluated instead of silently passing or failing.
+    """
+    config = manifest["config"]
+    # Fail closed: only an explicit boolean false disables the comparison.
+    if config.get("verify_reported_context", True) is False:
+        return None
+    reported = ((manifest.get("preflight") or {}).get("model") or {}).get("meta", {}).get("n_ctx")
+    return reported == config["context_window"]
+
+
 def validate_smoke(rows, manifest):
     tests = {
         "three_arms_one_task": len(rows) == 3 and {r["configuration"] for r in rows} == set("ABC") and len({r["task_id"] for r in rows}) == 1,
@@ -125,9 +139,11 @@ def validate_smoke(rows, manifest):
         "sessions_valid": bool(rows) and all(session_valid(r, manifest["config"]) for r in rows),
         "repository_unchanged": bool(rows) and all(r["repository_unchanged"] for r in rows),
         "execution_inputs_unchanged": bool(rows) and all(r.get("inputs_unchanged") is True for r in rows),
-        "context_verified": manifest.get("preflight", {}).get("model", {}).get("meta", {}).get("n_ctx") == manifest["config"]["context_window"],
+        "context_verified": context_verified(manifest),
     }
-    return {"checks": tests, "technical_passed": all(tests.values()),
+    evaluated = {name: value for name, value in tests.items() if value is not None}
+    return {"checks": tests, "not_evaluated": sorted(name for name, value in tests.items() if value is None),
+            "technical_passed": all(evaluated.values()),
             "correctness_review_passed": len(rows) == 3 and all(r["task_success"] is True for r in rows),
             "full_benchmark_executed": manifest["phase"] == "full"}
 
@@ -381,7 +397,8 @@ def main(argv=None):
                                   **({"trace_dir": out / "preflight-wire"} if args.capture_traces else {}))
     try:
         preflight = provider.preflight()
-        if preflight["model"].get("meta", {}).get("n_ctx") != config["context_window"]:
+        if config.get("verify_reported_context", True) is not False and \
+                preflight["model"].get("meta", {}).get("n_ctx") != config["context_window"]:
             raise ProviderError("context_window_not_verified")
     except ProviderError as exc:
         dump(out / "preflight.json", {"passed": False, "error": str(exc)})
@@ -404,6 +421,9 @@ def main(argv=None):
     manifest = {"schema_version": 1, "phase": args.phase, "identity": identity,
                 "created_at": datetime.now(timezone.utc).isoformat(), "repo": before,
                 "config": config, "schedule": order, "snapshot": snapshot_info,
+                "prompt_templates": {"neutral_sha256": digest(NEUTRAL.encode()),
+                                     "answer_guidance_sha256": digest(ANSWER_GUIDANCE.encode()),
+                                     "causal_guidance_sha256": digest(CAUSAL_GUIDANCE.encode())},
                 "capture_traces": args.capture_traces,
                 "prompt_set_sha256": digest(Path(args.prompts).read_bytes()),
                 "skill_sha256": digest(skill.encode()), "harness_sources": sources,

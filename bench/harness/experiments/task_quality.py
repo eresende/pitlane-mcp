@@ -27,6 +27,8 @@ TASKS = {
 
 
 def review_template(task_id):
+    if task_id not in TASKS:
+        raise ValueError("Unknown task quality rubric task: " + str(task_id))
     return {"rubric_version": VERSION,
             **{dimension: [{"id": item, "score": None, "evidence": ""} for item in items]
                for dimension, items in TASKS[task_id].items()},
@@ -41,6 +43,8 @@ def assess(task_id, review):
                                   "task_error_count", "incidental_error_count", "unsupported_symbol_count")}
     if review.get("rubric_version") != VERSION:
         raise ValueError("Unknown task quality rubric version")
+    if task_id not in TASKS:
+        raise ValueError("Unknown task quality rubric task: " + str(task_id))
     means = {}
     for dimension, ids in TASKS[task_id].items():
         checks = review.get(dimension, [])

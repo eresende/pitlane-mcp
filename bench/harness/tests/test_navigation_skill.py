@@ -39,9 +39,12 @@ def test_skill_isolation_and_legacy_prompt_override(tmp_path):
 def test_cumulative_provider_usage_missing_and_reasoning_subset():
     backend = CompatibleProvider("unused", "model", "secret")
     backend.parse(response(usage={"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18,
-                                  "completion_tokens_details": {"reasoning_tokens": 5}}))
-    backend.parse(response(usage={"prompt_tokens": 30, "completion_tokens": 4, "total_tokens": 34}))
-    assert usage_summary(backend.usages) == {"prompt_tokens": 40, "completion_tokens": 12, "total_tokens": 52, "reasoning_tokens": None}
+                                  "completion_tokens_details": {"reasoning_tokens": 5},
+                                  "prompt_tokens_details": {"cached_tokens": 4}}))
+    backend.parse(response(usage={"prompt_tokens": 30, "completion_tokens": 4, "total_tokens": 34,
+                                  "prompt_tokens_details": {"cached_tokens": 6}}))
+    assert usage_summary(backend.usages) == {"prompt_tokens": 40, "completion_tokens": 12, "total_tokens": 52,
+                                             "reasoning_tokens": None, "cached_tokens": 10}
     backend.parse(response())
     assert all(v is None for v in usage_summary(backend.usages).values())
     assert usage_summary([{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "reasoning_tokens": 0}])["total_tokens"] == 0

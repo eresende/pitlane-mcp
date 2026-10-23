@@ -71,8 +71,19 @@ The model, temperature, output limit, 131072 context declaration, reasoning poli
 iterations, timeout and environment declarations live in the JSON config. The
 API's reported model context must match for smoke validation to pass. Extra sampling
 or reasoning request fields belong in `request_options`; reserved request fields
-cannot be overridden. No reasoning override is sent by default: the same existing
-server default applies to all arms. Engine version, quantization and KV settings
+cannot be overridden.
+
+`verify_reported_context` (default `true`) requires the endpoint to report the
+loaded model's context as `meta.n_ctx` on `/models` and to match `context_window`.
+Set it to `false` only for an OpenAI-compatible endpoint that cannot report its
+context: smoke then lists `context_verified` under `not_evaluated` instead of
+silently passing, and the declared context stays an unverified assumption. The
+model-stability check compares the selected `/models` entry before and after each
+run, so a server that also lists other models or extra response keys is supported;
+a changed, missing or newly re-contexted entry still stops the run.
+
+No reasoning override is sent by default: the same existing server default applies
+to all arms. Engine version, quantization and KV settings
 are user declarations unless independently observed; this harness does not change
 them. Loaded-model metadata and available host GPU VRAM are sampled before/after
 runs. Configuration-change monitoring and server model-load events are unavailable.
@@ -86,7 +97,9 @@ runs. Configuration-change monitoring and server model-load events are unavailab
 ```
 
 Smoke executes **exactly three task runs**, one per arm, using the configured `smoke_prompt_id` (currently `symbol_cli_config_flow`).
-It stops after its report. Check `summary.json.smoke_validation`: valid tool calls,
+It stops after its report. `summary.json.smoke_validation.technical_passed` is the
+execution gate; `correctness_review_passed` stays false until reviews exist, and
+`not_evaluated` names checks the endpoint could not support. Check valid tool calls,
 MCP use in B/C, no MCP in A, identical A/B base prompts, identical B/C schemas,
 correct skill placement, usage availability, context and repository integrity.
 A hard per-run deadline includes provider and tool calls. Model output truncation,
@@ -120,9 +133,10 @@ not to manufacture a prerequisite of perfect agent performance.
 
 The pilot uses exactly five `pilot_tasks`, once each under A/B/C, with fresh
 sessions and seeded rotating arm order. It never reuses historical observations.
-Admission reads a prior smoke's technical checks and pinned execution controls;
-controller/report/rubric changes are explicitly recorded without forcing another
-smoke. Model, repository, prompts, skill, endpoint, embeddings, MCP binary, execution sources
+Admission reads a prior smoke's technical checks and pinned execution controls.
+The prompt-building controller, loop, provider, tools and completion guidance must
+be byte-identical; report and rubric changes are explicitly recorded without forcing
+another smoke. Model, repository, prompts, skill, endpoint, embeddings, MCP binary, execution sources
 and schemas must still match. `--capture-traces` is required for actual wire checks.
 
 The evaluator-only [task-quality-v1 rubric](TASK_QUALITY_RUBRIC_V1.md) is frozen and

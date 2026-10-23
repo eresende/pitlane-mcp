@@ -5,8 +5,12 @@ from pathlib import Path
 import pytest
 
 from bench.harness.experiments.task_quality import assess, review_template, TASKS
-from bench.harness.experiments.pilot import accounting_valid, audit_wire, validate_pilot, require_technical_smoke
-from bench.harness.experiments.navigation_skill import digest, schedule, load_reviews
+from bench.harness.experiments.pilot import (
+    EXECUTION_SOURCES, accounting_valid, audit_wire, validate_pilot, require_technical_smoke,
+)
+from bench.harness.experiments.navigation_skill import (
+    context_verified, digest, schedule, load_reviews, validate_smoke,
+)
 from bench.harness.experiments.report import summaries
 
 
@@ -156,3 +160,88 @@ def test_pilot_admission_allows_partial_smoke_and_reporting_changes(tmp_path):
     current['harness_sources']['bench/harness/framework/executors.py']='changed'
     with pytest.raises(ValueError,match='execution source'):
         require_technical_smoke(tmp_path,current)
+
+
+def test_prompt_controller_is_part_of_pilot_admission():
+    # The neutral system prompt and schedule are treatment, not reporting.
+    assert 'experiments/navigation_skill.py' in EXECUTION_SOURCES
+    assert 'experiments/report.py' not in EXECUTION_SOURCES
+    assert 'experiments/task_quality.py' not in EXECUTION_SOURCES
+
+
+def _pilot_case():
+    model = {'id': 'm'}
+    manifest = {'schedule': [['t', 'A', 1]],
+                'config': {'max_iterations': 25, 'max_output_tokens': 4096, 'context_window': 131072},
+                'technical_readiness': {'baseline_rows': [{'configuration': 'A', 'tool_schema_sha256': 'native'}]},
+                'skill_sha256': 'skill', 'task_prompt_sha256': {'t': 'task'},
+                'system_prompt_sha256': {'A': 'neutral'}, 'preflight': {'model': model}}
+    row = {'task_id': 't', 'configuration': 'A', 'run_number': 1, 'status': 'completed',
+           'correctness_score': None, 'response_metadata': [{'finish_reason': 'stop'}],
+           'provider_protocol_errors': 0, 'tool_events': [], 'repository_unchanged': True,
+           'inputs_unchanged': True, 'skill_loaded': False, 'loaded_skill_sha256': None,
+           'mcp_available': False, 'mcp_tool_calls': 0, 'tool_schema_sha256': 'native',
+           'task_prompt_sha256': 'task', 'system_prompt_sha256': 'neutral',
+           'model_metadata_before': {'object': 'list', 'data': [model]},
+           'model_metadata_after': {'object': 'list', 'data': [model]},
+           'usage_per_request': [{'prompt_tokens': 10, 'completion_tokens': 3, 'total_tokens': 13}],
+           'prompt_tokens': 10, 'completion_tokens': 3, 'total_tokens': 13,
+           'wire_controls_verified': True, 'environment_unchanged': True}
+    return manifest, row
+
+
+def test_model_stability_tolerates_sibling_models_and_extra_keys():
+    # Endpoints commonly list more than one model and add top-level keys.
+    manifest, row = _pilot_case()
+    row['model_metadata_before'] = {'object': 'list', 'has_more': False,
+                                    'data': [{'id': 'other-model'}, {'id': 'm'}]}
+    row['model_metadata_after'] = {'object': 'list', 'data': [{'id': 'm'}, {'id': 'other-model'}]}
+    validation = validate_pilot([row], manifest)
+    assert validation['checks']['model_unchanged'] and validation['technical_passed']
+    # The selected entry must still be present and stable on both samples.
+    changed = copy.deepcopy(row)
+    changed['model_metadata_after'] = {'object': 'list', 'data': [{'id': 'other-model'}]}
+    assert not validate_pilot([changed], manifest)['checks']['model_unchanged']
+    changed = copy.deepcopy(row)
+    changed['model_metadata_before'] = {'unavailable': 'provider_http_500'}
+    assert not validate_pilot([changed], manifest)['checks']['model_unchanged']
+    changed = copy.deepcopy(row)
+    changed['model_metadata_after'] = {'object': 'list', 'data': [{'id': 'm', 'meta': {'n_ctx': 8192}}]}
+    assert not validate_pilot([changed], manifest)['checks']['model_unchanged']
+
+
+def _smoke_case():
+    rows = [{'task_id': 't', 'configuration': arm, 'run_number': 1, 'status': 'completed',
+             'correctness_score': None, 'task_success': None, 'tool_calls': 1, 'failed_tool_calls': 0,
+             'provider_protocol_errors': 0, 'mcp_tool_calls': int(arm != 'A'), 'mcp_available': arm != 'A',
+             'skill_loaded': arm == 'C', 'loaded_skill_sha256': 'skill' if arm == 'C' else None,
+             'task_prompt_sha256': 'task', 'system_prompt_sha256': 'skill' if arm == 'C' else 'neutral',
+             'tool_schema_sha256': 'native' if arm == 'A' else 'mcp',
+             'repository_unchanged': True, 'inputs_unchanged': True,
+             'response_metadata': [{'finish_reason': 'stop'}],
+             'usage_per_request': [{'prompt_tokens': 10, 'completion_tokens': 3, 'total_tokens': 13}],
+             'prompt_tokens': 10, 'completion_tokens': 3, 'total_tokens': 13} for arm in 'ABC']
+    manifest = {'phase': 'smoke', 'skill_sha256': 'skill',
+                'config': {'max_iterations': 25, 'context_window': 131072, 'max_output_tokens': 4096},
+                'preflight': {'model': {'id': 'm', 'meta': {'n_ctx': 131072}}}}
+    return rows, manifest
+
+
+def test_context_gate_is_evaluated_only_when_the_endpoint_reports_it():
+    rows, manifest = _smoke_case()
+    assert context_verified(manifest) is True
+    assert validate_smoke(rows, manifest)['technical_passed']
+    # Endpoints without reported context are recorded as not evaluated, not as a pass.
+    manifest['config']['verify_reported_context'] = False
+    manifest['preflight']['model'].pop('meta')
+    assert context_verified(manifest) is None
+    validation = validate_smoke(rows, manifest)
+    assert validation['not_evaluated'] == ['context_verified']
+    assert validation['technical_passed']
+    # With verification requested, a missing or wrong report still fails closed.
+    manifest['config']['verify_reported_context'] = True
+    assert context_verified(manifest) is False
+    assert not validate_smoke(rows, manifest)['technical_passed']
+    manifest['preflight']['model']['meta'] = {'n_ctx': 8192}
+    assert context_verified(manifest) is False
+    assert not validate_smoke(rows, manifest)['technical_passed']

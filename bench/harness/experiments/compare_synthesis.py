@@ -99,6 +99,17 @@ def verification_passes(proof, props, local_hashes):
     return all(rows[a]["encoded_ids_sha256"] != rows[b]["encoded_ids_sha256"] for a, b in (("A", "C"), ("B", "D")))
 
 
+def docker_proof(result):
+    """Parse the deployed-renderer verification; degrade to a marker instead of raising."""
+    if result.returncode != 0:
+        return {"verification_error": "docker_cpu_verification_failed"}
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        # A non-JSON banner on stdout must degrade to "not verified", not crash.
+        return {"verification_error": "docker_cpu_verification_unparseable"}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default=os.environ.get("STRATA_BASE_URL"))
@@ -132,8 +143,9 @@ def main(argv=None):
     check = subprocess.run(["docker", "exec", "-i", args.container, "/opt/strata/.venv/bin/python", "-B", "-c", DOCKER_VERIFY],
                            input=json.dumps({"shared_defaults": settings.get("defaults", {}), "payloads": payloads}).encode(),
                            capture_output=True, timeout=60)
-    proof = json.loads(check.stdout) if check.returncode == 0 else {"verification_error": "docker_cpu_verification_failed"}
-    verified = not settings.get("defaults") and verification_passes(proof, props, local_hashes) if check.returncode == 0 else False
+    proof = docker_proof(check)
+    verified = (not settings.get("defaults") and verification_passes(proof, props, local_hashes)
+                if check.returncode == 0 else False)
     dump(out / "reasoning_verification.json", {"medium_template_control_verified": verified, "proof": proof,
         "local_source_hashes": local_hashes, "settings": settings, "props": props, "models": models, "status": status,
         "per_request_effective_effort_echo": None,

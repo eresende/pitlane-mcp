@@ -46,6 +46,7 @@ def test_summary_distinguishes_truncation_and_never_estimates_reasoning(finish, 
     row = response_summary(raw, backend, 1.2)
     assert row["accepted_terminal_response"] is accepted
     assert row["final_answer"] == (content if accepted else "")
-    assert row["usage"] == {"prompt_tokens": 100, "completion_tokens": 4096, "total_tokens": 4196, "reasoning_tokens": None}
+    assert row["usage"] == {"prompt_tokens": 100, "completion_tokens": 4096, "total_tokens": 4196,
+                            "reasoning_tokens": None, "cached_tokens": None}
     assert row["correctness_score"] is None and row["complete_enough_for_task"] is None
     assert row["tool_calls_executed"] == 0

@@ -4,10 +4,19 @@ from pathlib import Path
 
 CONTROL_FIELDS = ("configurations", "model", "quantization", "context_window", "temperature",
                   "max_output_tokens", "request_options", "reasoning_configuration", "completion_guidance",
-                  "max_iterations", "reserve_final_turn", "timeout_seconds", "setup_timeout_seconds")
+                  "max_iterations", "reserve_final_turn", "timeout_seconds", "setup_timeout_seconds",
+                  "verify_reported_context")
 EXECUTION_SOURCES = ("framework/agentic_loop.py", "framework/executors.py", "framework/backends.py",
                      "framework/mcp_executor.py", "experiments/tools.py", "experiments/provider.py",
-                     "experiments/completion_guidance.py")
+                     "experiments/navigation_skill.py", "experiments/completion_guidance.py")
+
+
+def listed_model(payload, model_id):
+    """Select one model from a /models payload; tolerate sibling models and extra keys."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        return None
+    return next((entry for entry in payload["data"]
+                 if isinstance(entry, dict) and entry.get("id") == model_id), None)
 
 
 def require_technical_smoke(path, current):
@@ -31,8 +40,9 @@ def require_technical_smoke(path, current):
         key = "bench/harness/" + source
         if not old["harness_sources"].get(key) or old["harness_sources"][key] != current["harness_sources"].get(key):
             raise ValueError("Smoke execution source mismatch: " + key)
-    # Controller/report/rubric changes are explicit in the new manifest, rather
-    # than requiring an identical all-files hash that would force another smoke.
+    # The prompt-building controller is execution-relevant and is covered above;
+    # report/rubric changes stay explicit in the new manifest rather than forcing
+    # another smoke.
     schemas = {}
     for row in rows:
         first = path / "instances" / row["task_id"] / row["configuration"] / f"run_{row['run_number']}" / "wire/request_01.json"
@@ -57,7 +67,9 @@ def validate_pilot(rows, manifest):
         "schemas_unchanged": all(r.get("tool_schema_sha256") == baseline[r["configuration"]]["tool_schema_sha256"] for r in rows),
         "exact_task_prompt": all(r["task_prompt_sha256"] == manifest["task_prompt_sha256"][r["task_id"]] for r in rows),
         "exact_system_prompt": all(r["system_prompt_sha256"] == manifest["system_prompt_sha256"][r["configuration"]] for r in rows),
-        "model_unchanged": all(r.get("model_metadata_before") == r.get("model_metadata_after") == {"object":"list", "data":[manifest["preflight"]["model"]]} for r in rows),
+        "model_unchanged": all(listed_model(r.get("model_metadata_before"), manifest["preflight"]["model"].get("id"))
+                               == listed_model(r.get("model_metadata_after"), manifest["preflight"]["model"].get("id"))
+                               == manifest["preflight"]["model"] for r in rows),
         "context_and_budget": all(0 < len(r.get("usage_per_request", [])) <= manifest["config"]["max_iterations"] and all(isinstance(u.get("prompt_tokens"), int) and u["prompt_tokens"] + manifest["config"]["max_output_tokens"] <= manifest["config"]["context_window"] for u in r.get("usage_per_request", [])) for r in rows),
         "provider_accounting": all(accounting_valid(r) for r in rows),
         "wire_isolation": all(r.get("wire_controls_verified") is True for r in rows),

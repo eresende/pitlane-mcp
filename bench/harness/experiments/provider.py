@@ -40,7 +40,7 @@ def number(value):
 
 def usage_summary(usages: list[dict]) -> dict:
     """Sum over ALL requests; one missing field makes its cumulative sum unknown."""
-    fields = ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens")
+    fields = ("prompt_tokens", "completion_tokens", "total_tokens", "reasoning_tokens", "cached_tokens")
     return {key: sum(row[key] for row in usages)
             if usages and all(row.get(key) is not None for row in usages) else None
             for key in fields}

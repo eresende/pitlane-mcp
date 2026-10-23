@@ -95,6 +95,7 @@ def main(argv=None):
         parser.error("Use a new output directory separate from the preserved source run")
     if out.is_relative_to(ROOT) and subprocess.run(["git", "-C", str(ROOT), "check-ignore", "--quiet", str(out)]).returncode:
         parser.error("Diagnostic artifacts must be ignored or outside the repository")
+    out.mkdir(parents=True, mode=0o700)
     source_hash = tree_digest(source)
     path, recorded = checkpoint_payload(source, args.arm, args.checkpoint)
     config = json.loads((source / "run_manifest.json").read_text())["config"]
@@ -108,7 +109,7 @@ def main(argv=None):
     model = next((m for m in models.get("data", []) if m.get("id") == payload["model"]), None)
     if model is None:
         raise ProviderError("requested_model_not_available")
-    if model.get("meta", {}).get("n_ctx") != config["context_window"]:
+    if config.get("verify_reported_context", True) is not False and model.get("meta", {}).get("n_ctx") != config["context_window"]:
         raise ProviderError("context_window_not_verified")
     dump(out / "manifest.json", {
         "source_run": str(source), "source_tree_sha256_before": source_hash,

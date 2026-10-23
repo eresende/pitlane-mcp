@@ -8,7 +8,7 @@ import statistics
 
 
 METRICS = ("quality_score", "correctness_score", "prompt_tokens", "completion_tokens",
-           "reasoning_tokens", "total_tokens", "execution_seconds", "tool_output_bytes",
+           "reasoning_tokens", "cached_tokens", "total_tokens", "execution_seconds", "tool_output_bytes",
            "native_tool_calls", "mcp_tool_calls", "failed_tool_calls", "invalid_tool_arguments",
            "tool_retries", "task_component_score", "task_relationship_score", "task_quality_score",
            "task_error_count", "incidental_error_count", "unsupported_symbol_count",
@@ -116,7 +116,7 @@ def write_report(out, manifest, rows, validation):
         lines.append(f"| {r['task_id']} | {r['configuration']} | " + " | ".join(fmt(r.get(k)) for k in
                      ("task_component_score", "task_relationship_score", "task_quality_score", "task_error_count", "incidental_error_count", "unsupported_symbol_count")) + f" | {r.get('termination_kind', 'unavailable')} |")
     lines += ["", "## Validation and limitations", "", "```json", json.dumps(validation, indent=2), "```", "",
-              "Usage is cumulative provider-reported input/output across every model request, including repeated history. Reasoning tokens, if reported, are an output subset and are never added again to total. Missing fields propagate to null. Tool responses are measured as UTF-8 bytes, not estimated tokens. Provider cached-token fields are retained per request.", "",
+              "Usage is cumulative provider-reported input/output across every model request, including repeated history. Reasoning tokens, if reported, are an output subset and are never added again to total. Missing fields propagate to null. Tool responses are measured as UTF-8 bytes, not estimated tokens. Provider cached-token fields are retained per request and summarised cumulatively when every request reports them; arms run back-to-back on identical prompts can otherwise differ through provider prompt caching rather than navigation behavior.", "",
               "Exact repeated successful calls and exact retries after failure are mechanical proxies. Semantic redundancy, appropriate selection, unnecessary MCP calls and quality require manual review; unavailable values are null. Native fallbacks count native calls after the first MCP call; initial native use is recorded separately by total native count.", "",
               "The pilot tasks are fixed in pilot_tasks; legacy full tasks remain separately configured. Neither suite establishes hypothetical change-impact accuracy. The native baseline is the existing harness's three read/search/list tools, not a full coding CLI. Skill loading is explicit system-prompt injection, not CLI auto-discovery. Snapshots omit agent configuration and Git history, and reject escaping/broken symlinks; diff analysis is not evaluated.", "",
               "GPU VRAM samples are host sysfs observations when available, not proof of server VRAM use. Engine version, quantization, KV bits and hardware are user declarations unless separately observed. Model reloading and server configuration changes cannot be inferred from API compatibility. The server's loaded model metadata is sampled before/after each run. No model is downloaded and no inference settings are changed.", "",
