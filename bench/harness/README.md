@@ -248,8 +248,8 @@ If you need that flow, keep both targets pinned to the same provider/model setti
 
 ## Navigation skill A/B/C experiment
 
-For isolated native / MCP-only / MCP-plus-skill comparisons on a configurable
-Strata/OpenAI-compatible endpoint, see [the experiment instructions](experiments/README.md).
+For isolated native / MCP-only / MCP-plus-skill comparisons against a hosted
+OpenAI-compatible endpoint, see [the experiment instructions](experiments/README.md).
 This opt-in path separates technical readiness from correctness evaluation. It
 supports three smoke runs, a fresh 15-run pilot and a separately authorized 45-run
 experiment; pilot/full admission requires matching technical smoke artifacts. Existing benchmark modes retain

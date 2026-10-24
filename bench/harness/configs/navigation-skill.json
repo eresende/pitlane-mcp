@@ -1,20 +1,19 @@
 {
   "schema_version": 1,
   "experiment_id": "ripgrep-navigation-skill-v1",
+  "base_url": "https://api.cline.bot/api/v1",
+  "api_key_env": "CLINEPASS_API_KEY",
   "configurations": {
     "A": {"name": "native", "mcp": false, "skill": false},
     "B": {"name": "mcp-only", "mcp": true, "skill": false},
     "C": {"name": "mcp-skill", "mcp": true, "skill": true}
   },
-  "model": "glm-4.7",
-  "quantization": "provider-managed (not reported)",
+  "model": "z-ai/glm-4.7-flash",
   "context_window": 131072,
-  "verify_reported_context": false,
-  "min_free_vram_gib": null,
   "temperature": 0.0,
   "max_output_tokens": 8192,
   "request_options": {},
-  "reasoning_configuration": "Z.ai model default reasoning; no request override; identical in all arms; effective effort is not echoed by the API",
+  "reasoning_configuration": "provider default reasoning; no request override; identical in all arms",
   "completion_guidance": "concise-causal-v1 (provisional)",
   "max_iterations": 25,
   "reserve_final_turn": true,
@@ -37,11 +36,8 @@
     "semantic_search_probe": "code search / semantic discovery"
   },
   "declared_environment": {
-    "engine": "Z.ai API (GLM Coding plan), https://api.z.ai/api/coding/paas/v4",
-    "gpu": "n/a (hosted inference)",
-    "cpu": "n/a (hosted inference)",
-    "system_ram_gb": null,
-    "kv_cache_bits": null,
-    "provenance": "hosted OpenAI-compatible endpoint; model id, tool calling and usage accounting verified with direct requests and with the harness preflight on 2026-10-25; the endpoint lists glm-4.7 but reports no meta.n_ctx, so verify_reported_context is false and context_verified is recorded as not evaluated; 131072 is the declared budget and the largest prompt this suite produced is 116857 tokens, which leaves 8192 tokens of output allowance inside the declaration; no local accelerator is used, hence min_free_vram_gib is null. Local serving was rejected first: a 24 GB card cannot hold a 27B model at 131072 context without giving about 20% of layers to CPU, full offload crashed the host session at 23.3 of 23.98 GiB, and IQ3_XXS degenerated into 103 parallel read_file calls in one turn"
+    "engine": "ClinePass gateway (https://api.cline.bot/api/v1)",
+    "provenance": "hosted OpenAI-compatible gateway with provider-managed quantization; model id, tool calling and usage accounting are verified by the harness preflight on every run; the endpoint reports no meta.n_ctx, so context_window is a declared budget rather than an observed one - the largest prompt this suite produced is 116857 tokens, and 116857 + 8192 output allowance stays inside the declaration"
   }
 }
+

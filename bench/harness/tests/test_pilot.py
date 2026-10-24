@@ -9,7 +9,7 @@ from bench.harness.experiments.pilot import (
     EXECUTION_SOURCES, accounting_valid, audit_wire, validate_pilot, require_technical_smoke,
 )
 from bench.harness.experiments.navigation_skill import (
-    context_verified, digest, schedule, load_reviews, validate_smoke,
+    digest, schedule, load_reviews, validate_smoke,
 )
 from bench.harness.experiments.report import summaries
 
@@ -229,26 +229,6 @@ def _smoke_case():
     return rows, manifest
 
 
-def test_context_gate_is_evaluated_only_when_the_endpoint_reports_it():
-    rows, manifest = _smoke_case()
-    assert context_verified(manifest) is True
-    assert validate_smoke(rows, manifest)['technical_passed']
-    # Endpoints without reported context are recorded as not evaluated, not as a pass.
-    manifest['config']['verify_reported_context'] = False
-    manifest['preflight']['model'].pop('meta')
-    assert context_verified(manifest) is None
-    validation = validate_smoke(rows, manifest)
-    assert validation['not_evaluated'] == ['context_verified', 'declared_engine_matches_observed']
-    assert validation['technical_passed']
-    # With verification requested, a missing or wrong report still fails closed.
-    manifest['config']['verify_reported_context'] = True
-    assert context_verified(manifest) is False
-    assert not validate_smoke(rows, manifest)['technical_passed']
-    manifest['preflight']['model']['meta'] = {'n_ctx': 8192}
-    assert context_verified(manifest) is False
-    assert not validate_smoke(rows, manifest)['technical_passed']
-
-
 def test_smoke_gate_allows_recovered_tool_errors_but_not_infrastructure_ones():
     rows, manifest = _smoke_case()
     # A correctly rejected argument that the agent recovered from is an observation.
@@ -266,98 +246,3 @@ def test_smoke_gate_allows_recovered_tool_errors_but_not_infrastructure_ones():
         if fault == 'none_succeeded':
             changed[0]['tool_events'] = [{'error': 'invalid_arguments'}]
         assert not validate_smoke(changed, manifest)['checks']['tools_exercised_and_valid']
-
-
-def test_declared_engine_is_checked_only_when_observable():
-    rows, manifest = _smoke_case()
-    assert validate_smoke(rows, manifest)['checks']['declared_engine_matches_observed'] is None
-    manifest['environment'] = {'server': {'control': {'engine': '0.1.48'}}}
-    manifest['config']['declared_environment'] = {'engine': 'Strata 0.1.48'}
-    assert validate_smoke(rows, manifest)['checks']['declared_engine_matches_observed'] is True
-    # A silent engine change is the failure this check exists to surface.
-    manifest['config']['declared_environment'] = {'engine': 'Strata v0.1.44.1'}
-    assert validate_smoke(rows, manifest)['checks']['declared_engine_matches_observed'] is False
-    assert not validate_smoke(rows, manifest)['technical_passed']
-    # An endpoint without the observation endpoints stays "not evaluated".
-    manifest['environment'] = {'server': {'unavailable': 'provider_http_404'}}
-    assert validate_smoke(rows, manifest)['checks']['declared_engine_matches_observed'] is None
-    assert validate_smoke(rows, manifest)['technical_passed']
-
-
-def test_environment_stability_is_not_evaluated_without_a_control_surface():
-    manifest, row = _pilot_case()
-    row['environment_unchanged'] = None
-    validation = validate_pilot([row], manifest)
-    assert validation['checks']['environment_stable'] is None
-    assert 'environment_stable' in validation['not_evaluated']
-    assert validation['technical_passed']
-    changed = copy.deepcopy(row)
-    changed['environment_unchanged'] = False
-    validation = validate_pilot([changed], manifest)
-    assert not validation['checks']['environment_stable']
-    assert 'environment_stable' not in validation['not_evaluated']
-    assert not validation['technical_passed']
-
-
-def test_observed_server_falls_back_to_native_model_listing(monkeypatch):
-    from bench.harness.experiments import navigation_skill
-    from bench.harness.experiments.provider import ProviderError
-
-    def no_strata(*_args, **_kwargs):
-        raise ProviderError("provider_http_404")
-
-    native = {'control_sha256': 'abc', 'control': {'id': 'm', 'state': 'loaded'},
-              'source': '/api/v0/models', 'observations': {'source': '/api/v0/models'}}
-    monkeypatch.setattr(navigation_skill, "observe_strata", no_strata)
-    monkeypatch.setattr(navigation_skill, "observe_openai_server", lambda *a, **k: native)
-    assert navigation_skill.observed_server("http://127.0.0.1:1234/v1", "m", "") == native
-
-    def no_native(*_args, **_kwargs):
-        raise ValueError("requested_model_not_available")
-
-    monkeypatch.setattr(navigation_skill, "observe_openai_server", no_native)
-    assert navigation_skill.observed_server("http://127.0.0.1:1234/v1", "m", "") == {
-        "unavailable": "requested_model_not_available"}
-
-
-def test_native_observer_requires_a_loaded_requested_model(monkeypatch):
-    from bench.harness.experiments import pilot as pilot_module
-    from bench.harness.experiments import provider as provider_module
-
-    class FakeProvider:
-        payload = {'data': [{'id': 'm', 'state': 'not-loaded'}]}
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def request(self, route):
-            assert route == '/api/v0/models'
-            return FakeProvider.payload
-
-    monkeypatch.setattr(provider_module, "CompatibleProvider", FakeProvider)
-    with pytest.raises(ValueError, match="loaded"):
-        pilot_module.observe_openai_server("http://127.0.0.1:1234/v1", "m", "")
-    FakeProvider.payload = {'data': []}
-    with pytest.raises(ValueError, match="not_available"):
-        pilot_module.observe_openai_server("http://127.0.0.1:1234/v1", "m", "")
-    FakeProvider.payload = {'data': [{'id': 'm', 'state': 'loaded', 'quantization': 'Q4_K_M',
-                                      'loaded_context_length': 131072}]}
-    observed = pilot_module.observe_openai_server("http://127.0.0.1:1234/v1", "m", "")
-    assert observed['control']['loaded_context_length'] == 131072
-    assert observed['source'] == '/api/v0/models'
-
-
-def test_server_observation_is_optional_for_non_strata_endpoints(monkeypatch):
-
-    from bench.harness.experiments import navigation_skill
-    from bench.harness.experiments.provider import ProviderError
-
-    def unavailable(*_args, **_kwargs):
-        raise ProviderError("provider_http_404")
-
-    monkeypatch.setattr(navigation_skill, "observe_strata", unavailable)
-    monkeypatch.setattr(navigation_skill, "observe_openai_server", unavailable)
-    assert navigation_skill.observed_server("http://example.invalid/v1", "m", "k") == {
-        "unavailable": "provider_http_404"}
-    assert navigation_skill.version_of("Strata v0.1.48") == "0.1.48"
-    assert navigation_skill.version_of(None) is None

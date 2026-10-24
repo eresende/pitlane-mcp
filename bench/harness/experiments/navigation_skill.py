@@ -12,13 +12,11 @@ import json
 import os
 from pathlib import Path
 import random
-import re
 import shutil
 import subprocess
 import time
 
 from bench.harness.framework.agentic_loop import AgenticLoop
-from bench.harness.framework.benchmark_runner import _detect_cpu, _detect_ram_gb
 from bench.harness.framework.prompt_loader import load_prompts
 from bench.harness.framework.quality_scorer import QualityScorer
 from bench.harness.experiments.provider import CompatibleProvider, TracedProvider, read_key, usage_summary, ProviderError
@@ -29,7 +27,7 @@ from bench.harness.experiments.tools import (
 from bench.harness.experiments.report import write_report
 from bench.harness.experiments.completion_guidance import ANSWER_GUIDANCE, CAUSAL_GUIDANCE
 from bench.harness.experiments.task_quality import assess, review_template, VERSION, TASKS
-from bench.harness.experiments.pilot import require_technical_smoke, validate_pilot, audit_wire, observe_strata, observe_openai_server, accounting_valid, session_valid
+from bench.harness.experiments.pilot import require_technical_smoke, validate_pilot, audit_wire, accounting_valid, session_valid
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = ROOT / "bench/harness/configs/navigation-skill.json"
@@ -71,31 +69,6 @@ def schedule(tasks, repetitions, seed):
             for i, task in enumerate(tasks) for position in range(3)]
 
 
-def vram_samples():
-    samples = {}
-    for device in Path("/sys/class/drm").glob("card[0-9]*/device"):
-        fields = {}
-        for name in ("mem_info_vram_used", "mem_info_vram_total"):
-            try:
-                fields[name] = int((device / name).read_text())
-            except (OSError, ValueError):
-                fields[name] = None
-        if any(v is not None for v in fields.values()):
-            samples[str(device.parent.name)] = fields
-    return samples or None
-
-
-def free_vram_gib(samples):
-    """Smallest free VRAM across observed devices, in GiB; None when unknown."""
-    free = []
-    for fields in (samples or {}).values():
-        used = (fields or {}).get("mem_info_vram_used")
-        total = (fields or {}).get("mem_info_vram_total")
-        if isinstance(used, int) and isinstance(total, int) and total > used >= 0:
-            free.append((total - used) / 2 ** 30)
-    return min(free) if free else None
-
-
 def load_reviews(out, rows):
     path = Path(out) / "reviews.json"
     if not path.exists():
@@ -116,48 +89,6 @@ def load_reviews(out, rows):
                                        if row["task_quality_score"] is not None else None)
         for metric in ("appropriate_mcp_selection", "unnecessary_mcp_calls", "redundant_repository_searches"):
             row[metric] = review.get(metric)
-
-
-def context_verified(manifest):
-    """Compare the server-reported context with the declaration.
-
-    Returns None when the configured endpoint cannot report its context, so the
-    check is recorded as not evaluated instead of silently passing or failing.
-    """
-    config = manifest["config"]
-    # Fail closed: only an explicit boolean false disables the comparison.
-    if config.get("verify_reported_context", True) is False:
-        return None
-    reported = ((manifest.get("preflight") or {}).get("model") or {}).get("meta", {}).get("n_ctx")
-    return reported == config["context_window"]
-
-
-def observed_server(base_url, model, key):
-    """Sample the serving identity: Strata controls, then a native model listing."""
-    try:
-        return observe_strata(base_url, model, key)
-    except (ProviderError, ValueError, OSError):
-        pass
-    try:
-        return observe_openai_server(base_url, model, key)
-    except (ProviderError, ValueError, OSError) as exc:
-        return {"unavailable": str(exc) or type(exc).__name__}
-
-
-def version_of(value):
-    """Extract a dotted numeric version from a declared or observed engine string."""
-    match = re.search(r"\d+(?:\.\d+)+", str(value or ""))
-    return match.group(0) if match else None
-
-
-def engine_matches(manifest):
-    """Compare the declared engine with the observed build; None when unobservable."""
-    observation = (manifest.get("environment") or {}).get("server") or {}
-    observed = version_of((observation.get("control") or {}).get("engine"))
-    declared = version_of(((manifest.get("config") or {}).get("declared_environment") or {}).get("engine"))
-    if not observed or not declared:
-        return None
-    return observed == declared
 
 
 def validate_smoke(rows, manifest):
@@ -187,8 +118,6 @@ def validate_smoke(rows, manifest):
         "sessions_valid": bool(rows) and all(session_valid(r, manifest["config"]) for r in rows),
         "repository_unchanged": bool(rows) and all(r["repository_unchanged"] for r in rows),
         "execution_inputs_unchanged": bool(rows) and all(r.get("inputs_unchanged") is True for r in rows),
-        "context_verified": context_verified(manifest),
-        "declared_engine_matches_observed": engine_matches(manifest),
     }
     evaluated = {name: value for name, value in tests.items() if value is not None}
     return {"checks": tests, "not_evaluated": sorted(name for name, value in tests.items() if value is None),
@@ -257,7 +186,7 @@ def run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill,
             "redundant_repository_searches": None, "exact_redundant_successful_calls": None,
             "native_fallback_calls": None, "task_prompt_sha256": None, "system_prompt_sha256": None,
             "tool_schema_sha256": None, "tool_names": [], "usage_per_request": [],
-            "tool_events": [], "final_answer": "", "gpu_before": None, "gpu_after": None,
+            "tool_events": [], "final_answer": "",
             "model_metadata_before": None, "model_metadata_after": None,
             "repository_unchanged": repo_identity(repo) == before,
         }
@@ -284,7 +213,6 @@ def _run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill
             except ProviderError as exc:
                 return {"unavailable": str(exc)}
         model_before = model_sample()
-        gpu_before = vram_samples()
         text = task.prompt + ("\n\n" + task.prompt_suffix if task.prompt_suffix else "")
         system = system_prompt(arm, snapshot, skill)
         start = time.perf_counter()
@@ -304,7 +232,6 @@ def _run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill
             dump(Path(trace_dir).parent / "observations.json", backend.observations)
             if result:
                 dump(Path(trace_dir).parent / "parsed_result.json", asdict(result))
-        gpu_after = vram_samples()
         model_after = model_sample()
         status = "timeout" if timeout else result.status
         answer = "" if result is None else result.final_answer
@@ -342,7 +269,6 @@ def _run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill
             "usage_per_request": backend.usages, "tool_events": events, "final_answer": answer,
             "response_metadata": backend.response_metadata,
             "trace_capture": bool(trace_dir),
-            "gpu_before": gpu_before, "gpu_after": gpu_after,
             "model_metadata_before": model_before, "model_metadata_after": model_after,
             "repository_unchanged": repo_identity(repo) == before,
         }
@@ -359,14 +285,17 @@ def main(argv=None):
     parser.add_argument("--repo", default=str(ROOT / "bench/repos/ripgrep"))
     parser.add_argument("--prompts", default=str(ROOT / "bench/harness/prompts/ripgrep.jsonl"))
     parser.add_argument("--skill", default=str(ROOT / "skills/pitlane-navigation/SKILL.md"))
-    parser.add_argument("--base-url", default=os.environ.get("STRATA_BASE_URL"))
-    parser.add_argument("--api-key-env", default="STRATA_API_KEY")
+    parser.add_argument("--base-url", help="OpenAI-compatible base URL; defaults to config base_url")
+    parser.add_argument("--api-key-env", help="Environment variable holding the API key; defaults to config api_key_env")
     parser.add_argument("--env-file")
     parser.add_argument("--out", required=True)
     parser.add_argument("--capture-traces", action="store_true", help="Save private wire bodies/responses and parsed conversations under the ignored artifact directory")
     parser.add_argument("--validated-smoke", help="Technically validated smoke artifact directory; required for pilot/full")
     args = parser.parse_args(argv)
     out = Path(args.out).resolve()
+    config = json.loads(Path(args.config).read_text())
+    args.base_url = args.base_url or config.get("base_url")
+    args.api_key_env = args.api_key_env or config.get("api_key_env", "CLINEPASS_API_KEY")
     if args.phase == "report":
         manifest = json.loads((out / "run_manifest.json").read_text())
         rows = [json.loads(line) for line in (out / "results.jsonl").read_text().splitlines()]
@@ -376,7 +305,7 @@ def main(argv=None):
         write_report(out, manifest, rows, validation)
         return
     if not args.base_url:
-        parser.error("Set STRATA_BASE_URL or --base-url; no endpoint is hardcoded")
+        parser.error("No endpoint configured: set base_url in the config or pass --base-url")
     if out.exists() and any(out.iterdir()):
         parser.error("Use a new artifact directory; runs never overwrite or mix inputs")
     repo = Path(args.repo).resolve()
@@ -387,7 +316,6 @@ def main(argv=None):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     ).returncode != 0:
         parser.error("Artifacts inside the harness repository must use an ignored directory such as results/")
-    config = json.loads(Path(args.config).read_text())
     if args.phase == "pilot" and (not args.capture_traces or not args.validated_smoke or
                                   len(config.get("pilot_tasks", [])) != 5 or set(config["pilot_tasks"]) != set(TASKS)):
         parser.error("Pilot requires --capture-traces, --validated-smoke and the five preregistered pilot_tasks")
@@ -446,23 +374,13 @@ def main(argv=None):
                                   **({"trace_dir": out / "preflight-wire"} if args.capture_traces else {}))
     try:
         preflight = provider.preflight()
-        if config.get("verify_reported_context", True) is not False and \
-                preflight["model"].get("meta", {}).get("n_ctx") != config["context_window"]:
-            raise ProviderError("context_window_not_verified")
     except ProviderError as exc:
         dump(out / "preflight.json", {"passed": False, "error": str(exc)})
         raise
     dump(out / "preflight.json", preflight)
-    initial_environment = observed_server(args.base_url, config["model"], key) if args.phase == "pilot" else None
     if args.phase == "preflight":
         print("Provider tool round trip passed; no benchmark executed.")
         return
-    vram = vram_samples()
-    vram_headroom = free_vram_gib(vram)
-    minimum_free = config.get("min_free_vram_gib")
-    if minimum_free is not None and vram_headroom is not None and vram_headroom < minimum_free:
-        raise SystemExit(f"Free VRAM {vram_headroom:.2f} GiB is below min_free_vram_gib={minimum_free}; "
-                         "unload or shrink the served model before running this experiment")
     all_tasks = {task.id: task for task in load_prompts(args.prompts)}
     selected = ([config["smoke_prompt_id"]] if args.phase == "smoke" else
                 config["pilot_tasks"] if args.phase == "pilot" else list(config["tasks"]))
@@ -489,10 +407,7 @@ def main(argv=None):
                 "provider_endpoint_sha256": digest(args.base_url.encode()),
                 "embedding_configuration": embedding, "preflight": preflight,
                 "environment": {"declared": config["declared_environment"],
-                                "observed_client_cpu": _detect_cpu(), "observed_client_ram_gb": _detect_ram_gb(),
-                                "initial_gpu_vram": vram, "vram_headroom_gib": vram_headroom,
                                 "model": preflight["model"],
-                                "server": observed_server(args.base_url, config["model"], key),
                                 "server_config_change_monitoring": "unavailable"}}
     if args.phase == "pilot":
         rubric_path = ROOT / "bench/harness/experiments/TASK_QUALITY_RUBRIC_V1.md"
@@ -500,14 +415,6 @@ def main(argv=None):
                         quality_rubric={"version": VERSION, "checks": TASKS, "document_sha256": digest(rubric_path.read_bytes())},
                         task_prompt_sha256={t: digest((all_tasks[t].prompt + ("\n\n" + all_tasks[t].prompt_suffix if all_tasks[t].prompt_suffix else "")).encode()) for t in selected},
                         system_prompt_sha256={a: digest(system_prompt(a, snapshot, skill).encode()) for a in "ABC"})
-        initial_control = initial_environment.get("control_sha256")
-        manifest["server_control_sha256"] = initial_control
-        if initial_environment.get("source") is None:
-            # Legacy key retained for artifacts and tooling that predate the
-            # engine-aware observer; only written when Strata controls were read.
-            manifest["strata_control_sha256"] = initial_control
-        manifest["environment_verification"] = "evaluated" if initial_control else "not_evaluated"
-        dump(out / "environment_initial.json", initial_environment)
         (out / rubric_path.name).write_bytes(rubric_path.read_bytes())
     dump(out / "run_manifest.json", manifest)
     try:
@@ -524,15 +431,6 @@ def main(argv=None):
             raise RuntimeError("Experiment inputs changed; stopping before the next attempt")
         print(f"Running {task_id} {arm} repetition {repetition}", flush=True)
         instance = out / "instances" / task_id / arm / f"run_{repetition}"
-        if args.phase == "pilot":
-            env_before = observed_server(args.base_url, config["model"], key)
-            expected_control = manifest.get("server_control_sha256")
-            if expected_control is not None and env_before.get("control_sha256") != expected_control:
-                manifest["execution_stop"] = "environment_verification_before_run"
-                dump(out / "run_manifest.json", manifest)
-                write_report(out, manifest, rows, validate_pilot(rows, manifest))
-                print("Serving controls changed; no next task attempt started.", flush=True)
-                break
         row = run_one(all_tasks[task_id], arm, repetition, config, snapshot, home, key,
                       args.base_url, skill, before, repo, instance / "wire" if args.capture_traces else None)
         row["repository_unchanged"] &= tree_digest(snapshot) == snapshot_info["sha256"]
@@ -541,12 +439,6 @@ def main(argv=None):
             task = all_tasks[task_id]
             row["wire_controls_verified"] = audit_wire(instance / "wire", task.prompt + ("\n\n" + task.prompt_suffix if task.prompt_suffix else ""),
                                                         system_prompt(arm, snapshot, skill), config, admission["wire_schema_sha256"][arm])
-            env_after = observed_server(args.base_url, config["model"], key)
-            expected_control = manifest.get("server_control_sha256")
-            row["environment_unchanged"] = (None if expected_control is None else
-                                            env_after.get("control_sha256") == expected_control)
-            instance.mkdir(parents=True, exist_ok=True)
-            dump(instance / "environment.json", {"before": env_before, "after": env_after})
         rows.append(row)
         instance.mkdir(parents=True, exist_ok=True)
         dump(instance / "result.json", row)
