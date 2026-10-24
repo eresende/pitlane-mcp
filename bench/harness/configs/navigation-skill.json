@@ -6,8 +6,8 @@
     "B": {"name": "mcp-only", "mcp": true, "skill": false},
     "C": {"name": "mcp-skill", "mcp": true, "skill": true}
   },
-  "model": "qwen38-27b-iq3xxs",
-  "quantization": "IQ3_XXS",
+  "model": "qwen38-27b-q4km-offload",
+  "quantization": "Q4_K_M",
   "context_window": 131072,
   "verify_reported_context": false,
   "min_free_vram_gib": 2.5,
@@ -38,10 +38,10 @@
   },
   "declared_environment": {
     "engine": "LM Studio 0.4.4",
-    "gpu": "AMD Radeon RX 7900 XTX 24 GB (LM Studio reports AMD Radeon; 19.84 GiB in use and 4.15 GiB free at 131072 context)",
+    "gpu": "AMD Radeon RX 7900 XTX 24 GB (LM Studio reports AMD Radeon; 20.53 GiB in use and 3.46 GiB free at 131072 context, gpu offload 0.85)",
     "cpu": "Ryzen 9 9950X",
     "system_ram_gb": 32,
     "kv_cache_bits": 4,
-    "provenance": "engine version from the local LM Studio install; model identifier, IQ3_XXS quantization, 131072 loaded context, single parallel slot and tool capability observed from /api/v0/models and lms ps after load; k=q8_0 and v=q4_0 cache quantization come from the saved per-model LM Studio load config and are not echoed by the API; VRAM headroom is measured from sysfs and re-checked at startup against min_free_vram_gib; cpu is a user declaration"
+    "provenance": "engine version from the local LM Studio install; model identifier, Q4_K_M quantization, 131072 loaded context, single parallel slot, tool capability and load state observed from /api/v0/models and lms ps after load; k=v=q4_0 cache quantization comes from the saved per-model LM Studio load config and is not echoed by the API; 15% of layers run on CPU so VRAM keeps real headroom - full offload used 23.3 of 23.98 GiB and crashed the host session, and IQ3_XXS was rejected because it emitted 103 parallel read_file calls in one turn and then failed with provider_http_400; VRAM headroom is re-checked at startup against min_free_vram_gib; cpu is a user declaration"
   }
 }
