@@ -86,14 +86,30 @@ No reasoning override is sent by default: the same existing server default appli
 to all arms. Engine version, quantization and KV settings
 are user declarations unless independently observed; this harness does not change
 them. Loaded-model metadata and available host GPU VRAM are sampled before/after
-runs. Every phase also records the serving identity once (`/v1/status`, `/settings`,
-`/props` template hash) as `environment.server`; when the endpoint exposes it,
-`declared_engine_matches_observed` compares that build with
-`declared_environment.engine` and is listed under `not_evaluated` when it cannot be
-observed. Configuration-change monitoring and server model-load events are unavailable.
+runs. Every phase also records the serving identity once as `environment.server`:
+Strata's `/v1/status`, `/settings` and `/props` template hash when those routes
+exist, otherwise a llama.cpp-family native listing (`/api/v0/models`: load state,
+quantization, loaded context). When the endpoint exposes an engine build,
+`declared_engine_matches_observed` compares it with `declared_environment.engine`;
+otherwise it is listed under `not_evaluated`. The pilot's per-run stability check
+uses the same control surface and is recorded as `not_evaluated` when no control
+route exists. Configuration-change monitoring and server model-load events are unavailable.
+
+The API exposes no `meta.n_ctx`, so `verify_reported_context` is false and
+`context_verified` is recorded as not evaluated; the loaded context is still
+observed from `/api/v0/models`. Reload with the pinned identifier, context and a
+single parallel slot:
+
+```sh
+lms load -y --gpu max --parallel 1 -c 131072 \
+  --identifier qwen38-27b-q4km 'unsloth/qwen3.8-27b@q4_k_m'
+```
+
+`-c` is shared across parallel slots, so a higher `--parallel` would split the
+context and break long native-arm sessions. KV cache quantization comes from the
+model's saved LM Studio load config and is not exposed by the CLI.
 
 ## Smoke first, then review
-
 ```sh
 .venv/bin/python -m bench.harness.experiments.navigation_skill \
   --phase smoke --env-file /path/to/strata/.env --out results/skill-smoke
@@ -170,11 +186,13 @@ The pilot stops after any failed final termination, provider/protocol or tool
 transport failure, changed source/model/controls/schema, isolation or accounting
 failure. Correctly rejected model arguments and returned semantic/native errors
 are recorded agent observations if the agent recovers and completes. The pilot
-does not stop because a completed answer is partial or wrong. Strata settings,
-template/process/model/context controls are observed read-only before/after each
-run, outside navigation timing. No server mutation is performed. The default
-xhigh template should also be verified before the pilot, using the existing
-Docker verifier, rather than inferred from configuration labels.
+does not stop because a completed answer is partial or wrong. Engine controls are
+observed read-only before/after each run, outside navigation timing: Strata
+settings/template/process/model/context where those routes exist, otherwise the
+llama.cpp-family load state, quantization and loaded context. No server mutation is
+performed, and none of this can prove that no operator changed the server. For
+Strata, the default xhigh template should also be verified before the pilot with the
+existing Docker verifier rather than inferred from configuration labels.
 
 `summary.json` retains legacy keys and adds execution/quality separation,
 task-quality metrics and task-success-only summaries. `reviews.json` contains

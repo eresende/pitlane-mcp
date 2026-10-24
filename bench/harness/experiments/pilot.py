@@ -52,11 +52,25 @@ def require_technical_smoke(path, current):
             "baseline_rows": [{"configuration": r["configuration"], "tool_schema_sha256": r["tool_schema_sha256"]} for r in rows]}
 
 
+def environment_stable(rows, manifest):
+    """True when evaluated and unchanged, None when unobservable, False on drift."""
+    if manifest.get("execution_stop"):
+        return False
+    observed = [r.get("environment_unchanged") for r in rows]
+    if any(value is False for value in observed):
+        return False
+    if observed and all(value is None for value in observed):
+        return None
+    return True
+
+
 def validate_pilot(rows, manifest):
     baseline = {r["configuration"]: r for r in manifest["technical_readiness"]["baseline_rows"]}
     expected = manifest["schedule"]
     checks = {
-        "environment_stable": not manifest.get("execution_stop") and all(r.get("environment_unchanged") is True for r in rows),
+        # None means the endpoint exposes no control surface, so stability was
+        # not evaluated; only an explicit False stops the pilot.
+        "environment_stable": environment_stable(rows, manifest),
         "schedule_prefix": [[r["task_id"], r["configuration"], r["run_number"]] for r in rows] == [list(x) for x in expected[:len(rows)]] and len(rows) <= len(expected),
         "valid_termination": all(r["status"] == "completed" and r.get("response_metadata") and r["response_metadata"][-1]["finish_reason"] == "stop" for r in rows),
         "provider_and_transport": all(r["provider_protocol_errors"] == 0 and not any(e["error"] == "tool_transport_error" for e in r.get("tool_events", [])) for r in rows),
@@ -74,9 +88,12 @@ def validate_pilot(rows, manifest):
         "provider_accounting": all(accounting_valid(r) for r in rows),
         "wire_isolation": all(r.get("wire_controls_verified") is True for r in rows),
     }
-    prefix_passed = all(checks.values())
+    evaluated = {name: value for name, value in checks.items() if value is not None}
+    prefix_passed = all(evaluated.values())
     complete = len(rows) == len(expected)
-    return {"phase": "pilot", "checks": checks, "continue_execution": prefix_passed,
+    return {"phase": "pilot", "checks": checks,
+            "not_evaluated": sorted(name for name, value in checks.items() if value is None),
+            "continue_execution": prefix_passed,
             "pilot_complete": complete, "planned_runs": len(expected), "executed_runs": len(rows),
             "technical_passed": prefix_passed and complete,
             "correctness_evaluation": {"strict_reviewed": sum(r.get("correctness_score") is not None for r in rows),
@@ -132,6 +149,28 @@ def audit_wire(wire, task_text, system, config, baseline_schema):
             if digest(payload["tools"]) != baseline_schema:
                 return False
     return True
+
+
+def observe_openai_server(base_url, model, key):
+    """Observe a llama.cpp-family server through its native model listing.
+
+    Returns the same shape as observe_strata so the per-run stability check works
+    without Strata's control routes.
+    """
+    from bench.harness.experiments.provider import CompatibleProvider
+    from bench.harness.experiments.navigation_skill import digest
+    api = CompatibleProvider(base_url.rstrip('/').removesuffix('/v1'), model, key, timeout=15)
+    models = api.request('/api/v0/models')
+    entries = models.get('data') or []
+    entry = next((m for m in entries if m.get('id') == model), None)
+    if entry is None:
+        raise ValueError('requested_model_not_available')
+    if entry.get('state') != 'loaded':
+        raise ValueError('model must remain loaded with the requested id between runs')
+    control = {k: entry.get(k) for k in
+               ('id', 'state', 'quantization', 'loaded_context_length', 'max_context_length', 'arch')}
+    return {'control_sha256': digest(control), 'control': control, 'source': '/api/v0/models',
+            'observations': {'source': '/api/v0/models', 'model': entry}}
 
 
 def observe_strata(base_url, model, key):

@@ -6,14 +6,14 @@
     "B": {"name": "mcp-only", "mcp": true, "skill": false},
     "C": {"name": "mcp-skill", "mcp": true, "skill": true}
   },
-  "model": "qwen3.8-flash-next-coder-iq1_m",
-  "quantization": "iq1_m",
+  "model": "qwen38-27b-q4km",
+  "quantization": "Q4_K_M",
   "context_window": 131072,
-  "verify_reported_context": true,
+  "verify_reported_context": false,
   "temperature": 0.0,
   "max_output_tokens": 4096,
   "request_options": {},
-  "reasoning_configuration": "server default xhigh; chat template and empty shared defaults re-verified against the 2026-10-18 reviewed artifact on 2026-10-24",
+  "reasoning_configuration": "LM Studio server default (model thinking behavior); no request override; identical in all arms; effective effort is not echoed by the API",
   "completion_guidance": "concise-causal-v1 (provisional)",
   "max_iterations": 25,
   "reserve_final_turn": true,
@@ -36,11 +36,11 @@
     "semantic_search_probe": "code search / semantic discovery"
   },
   "declared_environment": {
-    "engine": "Strata 0.1.48",
-    "gpu": "AMD Radeon RX 7900 XTX 24 GB (server reports AMD Radeon, 24560 MiB)",
+    "engine": "LM Studio 0.4.4",
+    "gpu": "AMD Radeon RX 7900 XTX 24 GB (LM Studio reports AMD Radeon; 23.3 GiB in use at 131072 context)",
     "cpu": "Ryzen 9 9950X",
     "system_ram_gb": 32,
-    "kv_cache_bits": 8,
-    "provenance": "engine, model, context and GPU/RAM totals observed from /v1/status during preflight; chat template (sha256 12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce) and empty shared defaults re-verified against the 2026-10-18 reviewed artifact; cpu and kv_cache_bits remain user declarations"
+    "kv_cache_bits": 4,
+    "provenance": "engine version from the local LM Studio install; model identifier, Q4_K_M quantization, 131072 loaded context, single parallel slot and tool capability observed from /api/v0/models and lms ps at load; k/v cache quantization q4_0 comes from the saved per-model LM Studio load config and is not echoed by the API; cpu is a user declaration"
   }
 }

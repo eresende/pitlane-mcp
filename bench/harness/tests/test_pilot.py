@@ -284,7 +284,71 @@ def test_declared_engine_is_checked_only_when_observable():
     assert validate_smoke(rows, manifest)['technical_passed']
 
 
+def test_environment_stability_is_not_evaluated_without_a_control_surface():
+    manifest, row = _pilot_case()
+    row['environment_unchanged'] = None
+    validation = validate_pilot([row], manifest)
+    assert validation['checks']['environment_stable'] is None
+    assert 'environment_stable' in validation['not_evaluated']
+    assert validation['technical_passed']
+    changed = copy.deepcopy(row)
+    changed['environment_unchanged'] = False
+    validation = validate_pilot([changed], manifest)
+    assert not validation['checks']['environment_stable']
+    assert 'environment_stable' not in validation['not_evaluated']
+    assert not validation['technical_passed']
+
+
+def test_observed_server_falls_back_to_native_model_listing(monkeypatch):
+    from bench.harness.experiments import navigation_skill
+    from bench.harness.experiments.provider import ProviderError
+
+    def no_strata(*_args, **_kwargs):
+        raise ProviderError("provider_http_404")
+
+    native = {'control_sha256': 'abc', 'control': {'id': 'm', 'state': 'loaded'},
+              'source': '/api/v0/models', 'observations': {'source': '/api/v0/models'}}
+    monkeypatch.setattr(navigation_skill, "observe_strata", no_strata)
+    monkeypatch.setattr(navigation_skill, "observe_openai_server", lambda *a, **k: native)
+    assert navigation_skill.observed_server("http://127.0.0.1:1234/v1", "m", "") == native
+
+    def no_native(*_args, **_kwargs):
+        raise ValueError("requested_model_not_available")
+
+    monkeypatch.setattr(navigation_skill, "observe_openai_server", no_native)
+    assert navigation_skill.observed_server("http://127.0.0.1:1234/v1", "m", "") == {
+        "unavailable": "requested_model_not_available"}
+
+
+def test_native_observer_requires_a_loaded_requested_model(monkeypatch):
+    from bench.harness.experiments import pilot as pilot_module
+    from bench.harness.experiments import provider as provider_module
+
+    class FakeProvider:
+        payload = {'data': [{'id': 'm', 'state': 'not-loaded'}]}
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def request(self, route):
+            assert route == '/api/v0/models'
+            return FakeProvider.payload
+
+    monkeypatch.setattr(provider_module, "CompatibleProvider", FakeProvider)
+    with pytest.raises(ValueError, match="loaded"):
+        pilot_module.observe_openai_server("http://127.0.0.1:1234/v1", "m", "")
+    FakeProvider.payload = {'data': []}
+    with pytest.raises(ValueError, match="not_available"):
+        pilot_module.observe_openai_server("http://127.0.0.1:1234/v1", "m", "")
+    FakeProvider.payload = {'data': [{'id': 'm', 'state': 'loaded', 'quantization': 'Q4_K_M',
+                                      'loaded_context_length': 131072}]}
+    observed = pilot_module.observe_openai_server("http://127.0.0.1:1234/v1", "m", "")
+    assert observed['control']['loaded_context_length'] == 131072
+    assert observed['source'] == '/api/v0/models'
+
+
 def test_server_observation_is_optional_for_non_strata_endpoints(monkeypatch):
+
     from bench.harness.experiments import navigation_skill
     from bench.harness.experiments.provider import ProviderError
 
@@ -292,6 +356,7 @@ def test_server_observation_is_optional_for_non_strata_endpoints(monkeypatch):
         raise ProviderError("provider_http_404")
 
     monkeypatch.setattr(navigation_skill, "observe_strata", unavailable)
+    monkeypatch.setattr(navigation_skill, "observe_openai_server", unavailable)
     assert navigation_skill.observed_server("http://example.invalid/v1", "m", "k") == {
         "unavailable": "provider_http_404"}
     assert navigation_skill.version_of("Strata v0.1.48") == "0.1.48"

@@ -29,7 +29,7 @@ from bench.harness.experiments.tools import (
 from bench.harness.experiments.report import write_report
 from bench.harness.experiments.completion_guidance import ANSWER_GUIDANCE, CAUSAL_GUIDANCE
 from bench.harness.experiments.task_quality import assess, review_template, VERSION, TASKS
-from bench.harness.experiments.pilot import require_technical_smoke, validate_pilot, audit_wire, observe_strata, accounting_valid, session_valid
+from bench.harness.experiments.pilot import require_technical_smoke, validate_pilot, audit_wire, observe_strata, observe_openai_server, accounting_valid, session_valid
 
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_CONFIG = ROOT / "bench/harness/configs/navigation-skill.json"
@@ -122,9 +122,13 @@ def context_verified(manifest):
 
 
 def observed_server(base_url, model, key):
-    """Sample the server that actually serves this run; never fatal elsewhere."""
+    """Sample the serving identity: Strata controls, then a native model listing."""
     try:
         return observe_strata(base_url, model, key)
+    except (ProviderError, ValueError, OSError):
+        pass
+    try:
+        return observe_openai_server(base_url, model, key)
     except (ProviderError, ValueError, OSError) as exc:
         return {"unavailable": str(exc) or type(exc).__name__}
 
@@ -438,7 +442,7 @@ def main(argv=None):
         dump(out / "preflight.json", {"passed": False, "error": str(exc)})
         raise
     dump(out / "preflight.json", preflight)
-    initial_environment = observe_strata(args.base_url, config["model"], key) if args.phase == "pilot" else None
+    initial_environment = observed_server(args.base_url, config["model"], key) if args.phase == "pilot" else None
     if args.phase == "preflight":
         print("Provider tool round trip passed; no benchmark executed.")
         return
@@ -478,7 +482,13 @@ def main(argv=None):
                         quality_rubric={"version": VERSION, "checks": TASKS, "document_sha256": digest(rubric_path.read_bytes())},
                         task_prompt_sha256={t: digest((all_tasks[t].prompt + ("\n\n" + all_tasks[t].prompt_suffix if all_tasks[t].prompt_suffix else "")).encode()) for t in selected},
                         system_prompt_sha256={a: digest(system_prompt(a, snapshot, skill).encode()) for a in "ABC"})
-        manifest["strata_control_sha256"] = initial_environment["control_sha256"]
+        initial_control = initial_environment.get("control_sha256")
+        manifest["server_control_sha256"] = initial_control
+        if initial_environment.get("source") is None:
+            # Legacy key retained for artifacts and tooling that predate the
+            # engine-aware observer; only written when Strata controls were read.
+            manifest["strata_control_sha256"] = initial_control
+        manifest["environment_verification"] = "evaluated" if initial_control else "not_evaluated"
         dump(out / "environment_initial.json", initial_environment)
         (out / rubric_path.name).write_bytes(rubric_path.read_bytes())
     dump(out / "run_manifest.json", manifest)
@@ -497,15 +507,13 @@ def main(argv=None):
         print(f"Running {task_id} {arm} repetition {repetition}", flush=True)
         instance = out / "instances" / task_id / arm / f"run_{repetition}"
         if args.phase == "pilot":
-            try:
-                env_before = observe_strata(args.base_url, config["model"], key)
-                if env_before["control_sha256"] != manifest["strata_control_sha256"]:
-                    raise ValueError("Strata controls changed before the next attempt")
-            except (ProviderError, ValueError):
+            env_before = observed_server(args.base_url, config["model"], key)
+            expected_control = manifest.get("server_control_sha256")
+            if expected_control is not None and env_before.get("control_sha256") != expected_control:
                 manifest["execution_stop"] = "environment_verification_before_run"
                 dump(out / "run_manifest.json", manifest)
                 write_report(out, manifest, rows, validate_pilot(rows, manifest))
-                print("Environment verification failed; no next task attempt started.", flush=True)
+                print("Serving controls changed; no next task attempt started.", flush=True)
                 break
         row = run_one(all_tasks[task_id], arm, repetition, config, snapshot, home, key,
                       args.base_url, skill, before, repo, instance / "wire" if args.capture_traces else None)
@@ -515,12 +523,10 @@ def main(argv=None):
             task = all_tasks[task_id]
             row["wire_controls_verified"] = audit_wire(instance / "wire", task.prompt + ("\n\n" + task.prompt_suffix if task.prompt_suffix else ""),
                                                         system_prompt(arm, snapshot, skill), config, admission["wire_schema_sha256"][arm])
-            try:
-                env_after = observe_strata(args.base_url, config["model"], key)
-                row["environment_unchanged"] = env_after["control_sha256"] == manifest["strata_control_sha256"]
-            except (ProviderError, ValueError):
-                env_after = {"unavailable": True}
-                row["environment_unchanged"] = False
+            env_after = observed_server(args.base_url, config["model"], key)
+            expected_control = manifest.get("server_control_sha256")
+            row["environment_unchanged"] = (None if expected_control is None else
+                                            env_after.get("control_sha256") == expected_control)
             instance.mkdir(parents=True, exist_ok=True)
             dump(instance / "environment.json", {"before": env_before, "after": env_after})
         rows.append(row)
