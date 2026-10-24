@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import shutil
 import subprocess
 import time
@@ -120,13 +121,45 @@ def context_verified(manifest):
     return reported == config["context_window"]
 
 
+def observed_server(base_url, model, key):
+    """Sample the server that actually serves this run; never fatal elsewhere."""
+    try:
+        return observe_strata(base_url, model, key)
+    except (ProviderError, ValueError, OSError) as exc:
+        return {"unavailable": str(exc) or type(exc).__name__}
+
+
+def version_of(value):
+    """Extract a dotted numeric version from a declared or observed engine string."""
+    match = re.search(r"\d+(?:\.\d+)+", str(value or ""))
+    return match.group(0) if match else None
+
+
+def engine_matches(manifest):
+    """Compare the declared engine with the observed build; None when unobservable."""
+    observation = (manifest.get("environment") or {}).get("server") or {}
+    observed = version_of((observation.get("control") or {}).get("engine"))
+    declared = version_of(((manifest.get("config") or {}).get("declared_environment") or {}).get("engine"))
+    if not observed or not declared:
+        return None
+    return observed == declared
+
+
 def validate_smoke(rows, manifest):
     tests = {
         "three_arms_one_task": len(rows) == 3 and {r["configuration"] for r in rows} == set("ABC") and len({r["task_id"] for r in rows}) == 1,
         "all_completed": bool(rows) and all(r["status"] == "completed" for r in rows),
         "terminal_stop": bool(rows) and all(r.get("response_metadata") and
                                              r["response_metadata"][-1]["finish_reason"] == "stop" for r in rows),
-        "tools_exercised_and_valid": bool(rows) and all(r["tool_calls"] is not None and r["tool_calls"] > 0 and r["failed_tool_calls"] == 0 and r["provider_protocol_errors"] == 0 for r in rows),
+        # A correctly rejected argument, or a semantic/native error the agent
+        # recovered from, is a recorded observation rather than an infrastructure
+        # failure (same policy as validate_pilot). Tools must have succeeded at
+        # least once, and protocol or transport failures still gate.
+        "tools_exercised_and_valid": bool(rows) and all(
+            r["tool_calls"] is not None and r["tool_calls"] > 0 and
+            r["provider_protocol_errors"] == 0 and
+            any(e["error"] is None for e in r["tool_events"]) and
+            not any(e["error"] == "tool_transport_error" for e in r["tool_events"]) for r in rows),
         "mcp_exercised_in_B_C": all(r["mcp_tool_calls"] is not None and r["mcp_tool_calls"] > 0 for r in rows if r["configuration"] in "BC"),
         "A_has_no_mcp": all(r["mcp_tool_calls"] == 0 and not r["mcp_available"] for r in rows if r["configuration"] == "A"),
         "skill_only_in_C": all(r["skill_loaded"] == (r["configuration"] == "C") and
@@ -140,6 +173,7 @@ def validate_smoke(rows, manifest):
         "repository_unchanged": bool(rows) and all(r["repository_unchanged"] for r in rows),
         "execution_inputs_unchanged": bool(rows) and all(r.get("inputs_unchanged") is True for r in rows),
         "context_verified": context_verified(manifest),
+        "declared_engine_matches_observed": engine_matches(manifest),
     }
     evaluated = {name: value for name, value in tests.items() if value is not None}
     return {"checks": tests, "not_evaluated": sorted(name for name, value in tests.items() if value is None),
@@ -436,6 +470,7 @@ def main(argv=None):
                 "environment": {"declared": config["declared_environment"],
                                 "observed_client_cpu": _detect_cpu(), "observed_client_ram_gb": _detect_ram_gb(),
                                 "initial_gpu_vram": vram_samples(), "model": preflight["model"],
+                                "server": observed_server(args.base_url, config["model"], key),
                                 "server_config_change_monitoring": "unavailable"}}
     if args.phase == "pilot":
         rubric_path = ROOT / "bench/harness/experiments/TASK_QUALITY_RUBRIC_V1.md"

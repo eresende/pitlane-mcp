@@ -131,7 +131,8 @@ def test_pilot_admission_allows_partial_smoke_and_reporting_changes(tmp_path):
          'mcp_binary_sha256':'binary','harness_sources':{'bench/harness/'+k:'unchanged' for k in EXECUTION_SOURCES}}
     old['config'].update(context_window=131072,max_iterations=25,max_output_tokens=4096)
     rows=[{'task_id':'task','configuration':a,'run_number':1,'status':'completed','tool_calls':1,
-           'failed_tool_calls':0,'provider_protocol_errors':0,'mcp_tool_calls':int(a!='A'),'mcp_available':a!='A',
+           'failed_tool_calls':0,'provider_protocol_errors':0,'tool_events':[{'error':None}],
+           'mcp_tool_calls':int(a!='A'),'mcp_available':a!='A',
            'skill_loaded':a=='C','loaded_skill_sha256':'skill' if a=='C' else None,
            'task_prompt_sha256':'same','system_prompt_sha256':'skill' if a=='C' else 'base',
            'tool_schema_sha256':'native' if a=='A' else 'mcp','repository_unchanged':True,'inputs_unchanged':True,
@@ -213,7 +214,8 @@ def test_model_stability_tolerates_sibling_models_and_extra_keys():
 def _smoke_case():
     rows = [{'task_id': 't', 'configuration': arm, 'run_number': 1, 'status': 'completed',
              'correctness_score': None, 'task_success': None, 'tool_calls': 1, 'failed_tool_calls': 0,
-             'provider_protocol_errors': 0, 'mcp_tool_calls': int(arm != 'A'), 'mcp_available': arm != 'A',
+             'provider_protocol_errors': 0, 'tool_events': [{'error': None}],
+             'mcp_tool_calls': int(arm != 'A'), 'mcp_available': arm != 'A',
              'skill_loaded': arm == 'C', 'loaded_skill_sha256': 'skill' if arm == 'C' else None,
              'task_prompt_sha256': 'task', 'system_prompt_sha256': 'skill' if arm == 'C' else 'neutral',
              'tool_schema_sha256': 'native' if arm == 'A' else 'mcp',
@@ -236,7 +238,7 @@ def test_context_gate_is_evaluated_only_when_the_endpoint_reports_it():
     manifest['preflight']['model'].pop('meta')
     assert context_verified(manifest) is None
     validation = validate_smoke(rows, manifest)
-    assert validation['not_evaluated'] == ['context_verified']
+    assert validation['not_evaluated'] == ['context_verified', 'declared_engine_matches_observed']
     assert validation['technical_passed']
     # With verification requested, a missing or wrong report still fails closed.
     manifest['config']['verify_reported_context'] = True
@@ -245,3 +247,52 @@ def test_context_gate_is_evaluated_only_when_the_endpoint_reports_it():
     manifest['preflight']['model']['meta'] = {'n_ctx': 8192}
     assert context_verified(manifest) is False
     assert not validate_smoke(rows, manifest)['technical_passed']
+
+
+def test_smoke_gate_allows_recovered_tool_errors_but_not_infrastructure_ones():
+    rows, manifest = _smoke_case()
+    # A correctly rejected argument that the agent recovered from is an observation.
+    rows[1]['tool_events'] = [{'error': 'invalid_arguments'}, {'error': None}]
+    rows[1]['failed_tool_calls'] = 1
+    validation = validate_smoke(rows, manifest)
+    assert validation['checks']['tools_exercised_and_valid']
+    assert validation['technical_passed']
+    for fault in ('transport', 'protocol', 'none_succeeded'):
+        changed = copy.deepcopy(rows)
+        if fault == 'transport':
+            changed[0]['tool_events'] = [{'error': 'tool_transport_error'}]
+        if fault == 'protocol':
+            changed[0]['provider_protocol_errors'] = 1
+        if fault == 'none_succeeded':
+            changed[0]['tool_events'] = [{'error': 'invalid_arguments'}]
+        assert not validate_smoke(changed, manifest)['checks']['tools_exercised_and_valid']
+
+
+def test_declared_engine_is_checked_only_when_observable():
+    rows, manifest = _smoke_case()
+    assert validate_smoke(rows, manifest)['checks']['declared_engine_matches_observed'] is None
+    manifest['environment'] = {'server': {'control': {'engine': '0.1.48'}}}
+    manifest['config']['declared_environment'] = {'engine': 'Strata 0.1.48'}
+    assert validate_smoke(rows, manifest)['checks']['declared_engine_matches_observed'] is True
+    # A silent engine change is the failure this check exists to surface.
+    manifest['config']['declared_environment'] = {'engine': 'Strata v0.1.44.1'}
+    assert validate_smoke(rows, manifest)['checks']['declared_engine_matches_observed'] is False
+    assert not validate_smoke(rows, manifest)['technical_passed']
+    # An endpoint without the observation endpoints stays "not evaluated".
+    manifest['environment'] = {'server': {'unavailable': 'provider_http_404'}}
+    assert validate_smoke(rows, manifest)['checks']['declared_engine_matches_observed'] is None
+    assert validate_smoke(rows, manifest)['technical_passed']
+
+
+def test_server_observation_is_optional_for_non_strata_endpoints(monkeypatch):
+    from bench.harness.experiments import navigation_skill
+    from bench.harness.experiments.provider import ProviderError
+
+    def unavailable(*_args, **_kwargs):
+        raise ProviderError("provider_http_404")
+
+    monkeypatch.setattr(navigation_skill, "observe_strata", unavailable)
+    assert navigation_skill.observed_server("http://example.invalid/v1", "m", "k") == {
+        "unavailable": "provider_http_404"}
+    assert navigation_skill.version_of("Strata v0.1.48") == "0.1.48"
+    assert navigation_skill.version_of(None) is None

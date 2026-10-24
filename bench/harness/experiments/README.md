@@ -86,7 +86,11 @@ No reasoning override is sent by default: the same existing server default appli
 to all arms. Engine version, quantization and KV settings
 are user declarations unless independently observed; this harness does not change
 them. Loaded-model metadata and available host GPU VRAM are sampled before/after
-runs. Configuration-change monitoring and server model-load events are unavailable.
+runs. Every phase also records the serving identity once (`/v1/status`, `/settings`,
+`/props` template hash) as `environment.server`; when the endpoint exposes it,
+`declared_engine_matches_observed` compares that build with
+`declared_environment.engine` and is listed under `not_evaluated` when it cannot be
+observed. Configuration-change monitoring and server model-load events are unavailable.
 
 ## Smoke first, then review
 
@@ -102,6 +106,10 @@ execution gate; `correctness_review_passed` stays false until reviews exist, and
 `not_evaluated` names checks the endpoint could not support. Check valid tool calls,
 MCP use in B/C, no MCP in A, identical A/B base prompts, identical B/C schemas,
 correct skill placement, usage availability, context and repository integrity.
+Correctly rejected tool arguments and semantic/native tool errors that the agent
+recovers from are recorded observations rather than technical failures, provided at
+least one call succeeded and no protocol or transport failure occurred; this is the
+same policy the pilot gate applies.
 A hard per-run deadline includes provider and tool calls. Model output truncation,
 empty or unstructured tool responses and missing protocol identifiers are failures;
 reasoning text never substitutes for an answer. There are no automatic HTTP retries.

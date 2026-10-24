@@ -13,7 +13,7 @@
   "temperature": 0.0,
   "max_output_tokens": 4096,
   "request_options": {},
-  "reasoning_configuration": "server default xhigh (verified on 2026-10-18); no request override; identical in all arms",
+  "reasoning_configuration": "server default xhigh; chat template and empty shared defaults re-verified against the 2026-10-18 reviewed artifact on 2026-10-24",
   "completion_guidance": "concise-causal-v1 (provisional)",
   "max_iterations": 25,
   "reserve_final_turn": true,
@@ -36,11 +36,11 @@
     "semantic_search_probe": "code search / semantic discovery"
   },
   "declared_environment": {
-    "engine": "Strata v0.1.44.1",
-    "gpu": "AMD Radeon RX 7900 XTX 24 GB",
+    "engine": "Strata 0.1.48",
+    "gpu": "AMD Radeon RX 7900 XTX 24 GB (server reports AMD Radeon, 24560 MiB)",
     "cpu": "Ryzen 9 9950X",
     "system_ram_gb": 32,
     "kv_cache_bits": 8,
-    "provenance": "user supplied; API model/context checked during preflight"
+    "provenance": "engine, model, context and GPU/RAM totals observed from /v1/status during preflight; chat template (sha256 12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce) and empty shared defaults re-verified against the 2026-10-18 reviewed artifact; cpu and kv_cache_bits remain user declarations"
   }
 }

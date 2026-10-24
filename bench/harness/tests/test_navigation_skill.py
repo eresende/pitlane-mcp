@@ -168,6 +168,7 @@ def test_admission_requires_technical_readiness_independent_of_correctness(tmp_p
                 "preflight": {"model": {"meta": {"n_ctx": 131072}}}}
     rows = [{"task_id": "task", "configuration": a, "run_number": 1, "status": "completed",
              "tool_calls": 1, "failed_tool_calls": 0, "provider_protocol_errors": 0,
+             "tool_events": [{"error": None}],
              "mcp_tool_calls": int(a != "A"), "mcp_available": a != "A", "skill_loaded": a == "C",
              "loaded_skill_sha256": "skill-hash" if a == "C" else None,
              "task_prompt_sha256": "task", "system_prompt_sha256": "skill" if a == "C" else "base",
