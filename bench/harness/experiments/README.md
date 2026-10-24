@@ -110,7 +110,9 @@ Correctly rejected tool arguments and semantic/native tool errors that the agent
 recovers from are recorded observations rather than technical failures, provided at
 least one call succeeded and no protocol or transport failure occurred; this is the
 same policy the pilot gate applies.
-A hard per-run deadline includes provider and tool calls. Model output truncation,
+A hard per-run deadline includes provider and tool calls. It is sized above the
+iteration budget (25 requests at the observed per-request cost) so it acts as a
+safety net rather than preempting iterations a run is allowed to use. Model output truncation,
 empty or unstructured tool responses and missing protocol identifiers are failures;
 reasoning text never substitutes for an answer. There are no automatic HTTP retries.
 

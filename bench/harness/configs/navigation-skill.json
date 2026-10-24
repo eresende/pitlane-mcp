@@ -17,7 +17,7 @@
   "completion_guidance": "concise-causal-v1 (provisional)",
   "max_iterations": 25,
   "reserve_final_turn": true,
-  "timeout_seconds": 300,
+  "timeout_seconds": 600,
   "setup_timeout_seconds": 600,
   "seed": 20261018,
   "smoke_prompt_id": "symbol_cli_config_flow",
