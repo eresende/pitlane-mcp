@@ -40,10 +40,11 @@ both. There are no automatic HTTP retries: a 429 or 5xx fails that run and stops
 the pilot fail-fast rather than being silently retried. The harness never logs
 credentials, and a gateway that wraps the payload as `{"data": {...}}` is accepted.
 
-The endpoint reports no `meta.n_ctx`, so `context_window` is a declared budget
-rather than an observed one. It still gates every request through
-`prompt_tokens + max_output_tokens <= context_window`; the largest prompt this
-suite produced is 116,857 tokens, and 116,857 + 8,192 fits inside 131,072.
+The endpoint advertises no context length, so `context_window` is the model family's
+documented ceiling rather than an observed one. It still gates every request through
+`prompt_tokens + max_output_tokens <= context_window`, and the requests this suite
+produces stay far below it: the largest prompt observed is 116,857 tokens. The output
+allowance is 16,384 because a synthesis turn was observed to truncate at 8,192.
 
 ## Setup and preflight
 

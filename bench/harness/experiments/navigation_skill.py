@@ -170,7 +170,7 @@ def run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill,
         # Do not serialize exception bodies from subprocesses or remote providers.
         return {
             "task_id": task.id, "category": task.category, "configuration": arm,
-            "model": config["model"], "quantization": config["quantization"],
+            "model": config["model"], "quantization": config.get("quantization"),
             "agent_harness": "pitlane-local-AgenticLoop/skill-experiment-v1", "run_number": repetition,
             "status": "error", "task_success": None, "correctness_score": None,
             "termination_kind": "unavailable", "response_metadata": [],
@@ -240,7 +240,7 @@ def _run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill
         first_mcp = next((i for i, e in enumerate(events) if e["kind"] == "mcp"), len(events))
         row = {
             "task_id": task.id, "category": task.category, "configuration": arm,
-            "model": config["model"], "quantization": config["quantization"],
+            "model": config["model"], "quantization": config.get("quantization"),
             "agent_harness": "pitlane-local-AgenticLoop/skill-experiment-v1", "run_number": repetition,
             "status": status, "task_success": None, "correctness_score": None,
             "termination_kind": "budget_synthesis" if result and any(

@@ -9,9 +9,9 @@
     "C": {"name": "mcp-skill", "mcp": true, "skill": true}
   },
   "model": "z-ai/glm-4.7-flash",
-  "context_window": 131072,
+  "context_window": 200000,
   "temperature": 0.0,
-  "max_output_tokens": 8192,
+  "max_output_tokens": 16384,
   "request_options": {},
   "reasoning_configuration": "provider default reasoning; no request override; identical in all arms",
   "completion_guidance": "concise-causal-v1 (provisional)",
@@ -37,7 +37,7 @@
   },
   "declared_environment": {
     "engine": "ClinePass gateway (https://api.cline.bot/api/v1)",
-    "provenance": "hosted OpenAI-compatible gateway with provider-managed quantization; model id, tool calling and usage accounting are verified by the harness preflight on every run; the endpoint reports no meta.n_ctx, so context_window is a declared budget rather than an observed one - the largest prompt this suite produced is 116857 tokens, and 116857 + 8192 output allowance stays inside the declaration"
+    "provenance": "hosted OpenAI-compatible gateway with provider-managed quantization; model id, tool calling and usage accounting are verified by the harness preflight on every run; the endpoint advertises no context length, so context_window is the model family's documented ceiling and is not verified by the API - the largest prompt this suite produced is 116857 tokens, and the 16384 output allowance covers a synthesis turn that previously truncated at 8192; every request stays far inside the declaration"
   }
 }
 
