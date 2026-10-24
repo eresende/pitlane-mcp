@@ -101,17 +101,18 @@ observed from `/api/v0/models`. Reload with the pinned identifier, context and a
 single parallel slot:
 
 ```sh
-lms load -y --gpu 0.85 --parallel 1 -c 131072 \
+lms load -y --gpu 0.8 --parallel 1 -c 131072 \
   --identifier qwen38-27b-q4km-offload 'unsloth/qwen3.8-27b@q4_k_m'
 ```
 
 `-c` is shared across parallel slots, so a higher `--parallel` would split the
 context and break long native-arm sessions. KV cache quantization comes from the
-model's saved LM Studio load config and is not exposed by the CLI. Keeping 15% of
-layers on CPU costs about 10% of generation speed and buys back real VRAM headroom;
-full offload used 23.3 of 23.98 GiB and crashed the host session. A smaller
-quantization is not a substitute: IQ3_XXS fits easily but emitted 103 parallel
-`read_file` calls in one turn and then failed with `provider_http_400`.
+model's saved LM Studio load config and is not exposed by the CLI. Keeping 20% of
+layers on CPU costs some generation speed and buys back real VRAM headroom; full
+offload used 23.3 of 23.98 GiB and crashed the host session, as did 0.90 with only
+2.6 GiB free. A smaller quantization is not a substitute: IQ3_XXS fits easily but
+emitted 103 parallel `read_file` calls in one turn and then failed with
+`provider_http_400`.
 
 `min_free_vram_gib` refuses to start a run when the measured free VRAM is below the
 threshold; the observed headroom is recorded in `run_manifest.json`. A tighter
