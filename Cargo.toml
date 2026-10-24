@@ -117,4 +117,4 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
 proptest = "1"
-httpmock = "0.8"
+httpmock = "0.9"
