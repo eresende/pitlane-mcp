@@ -93,6 +93,10 @@ class CompatibleProvider:
         return self.parse(data)
 
     def parse(self, data):
+        # Some OpenAI-compatible gateways wrap the payload as {"data": {...}, "success": true}.
+        if (isinstance(data, dict) and "choices" not in data
+                and isinstance(data.get("data"), dict) and "choices" in data["data"]):
+            data = data["data"]
         raw = data.get("usage") if isinstance(data, dict) else None
         raw = raw if isinstance(raw, dict) else {}
         details = raw.get("completion_tokens_details") or {}

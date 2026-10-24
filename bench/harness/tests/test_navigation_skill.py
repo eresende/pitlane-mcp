@@ -36,6 +36,15 @@ def test_skill_isolation_and_legacy_prompt_override(tmp_path):
     assert {t["function"]["name"] for t in captured[0]["tools"]} == {"read_file", "grep_search", "list_directory"}
 
 
+def test_gateway_envelope_is_unwrapped_without_changing_the_payload():
+    backend = CompatibleProvider("unused", "model", "secret")
+    inner = response("answer", usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+    parsed = backend.parse({"data": inner, "success": True,
+                            "gateway": {"cost": "0.0001"}})
+    assert parsed.message.content == "answer"
+    assert usage_summary(backend.usages)["total_tokens"] == 15
+
+
 def test_free_vram_headroom_uses_the_tightest_device():
     from bench.harness.experiments.navigation_skill import DEFAULT_CONFIG, free_vram_gib
     samples = {'card0': {'mem_info_vram_used': 1 * 2**30, 'mem_info_vram_total': 8 * 2**30},
