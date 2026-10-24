@@ -95,24 +95,27 @@ otherwise it is listed under `not_evaluated`. The pilot's per-run stability chec
 uses the same control surface and is recorded as `not_evaluated` when no control
 route exists. Configuration-change monitoring and server model-load events are unavailable.
 
-The API exposes no `meta.n_ctx`, so `verify_reported_context` is false and
-`context_verified` is recorded as not evaluated; the loaded context is still
-observed from `/api/v0/models`. Reload with the pinned identifier, context and a
-single parallel slot:
+The committed profile is a hosted OpenAI-compatible endpoint, because local serving
+could not satisfy the suite's 131,072-token context on a 24 GB card (the largest
+prompt observed is 116,857 tokens):
 
 ```sh
-lms load -y --gpu 0.8 --parallel 1 -c 131072 \
-  --identifier qwen38-27b-q4km-offload 'unsloth/qwen3.8-27b@q4_k_m'
+export ZAI_API_KEY=...            # or point --env-file at a private file
+.venv/bin/python -m bench.harness.experiments.navigation_skill --phase smoke \
+  --base-url https://api.z.ai/api/coding/paas/v4 \
+  --api-key-env ZAI_API_KEY --env-file ~/.secrets --out results/zai-smoke
 ```
 
-`-c` is shared across parallel slots, so a higher `--parallel` would split the
-context and break long native-arm sessions. KV cache quantization comes from the
-model's saved LM Studio load config and is not exposed by the CLI. Keeping 20% of
-layers on CPU costs some generation speed and buys back real VRAM headroom; full
-offload used 23.3 of 23.98 GiB and crashed the host session, as did 0.90 with only
-2.6 GiB free. A smaller quantization is not a substitute: IQ3_XXS fits easily but
-emitted 103 parallel `read_file` calls in one turn and then failed with
-`provider_http_400`.
+The endpoint lists `glm-4.7` but reports no `meta.n_ctx`, so
+`verify_reported_context` is false and `context_verified` is not evaluated; the
+declared 131,072 budget still gates every request. `min_free_vram_gib` is null
+because no local accelerator is involved.
+
+Local profiles were rejected first, and the reasons are worth keeping: a 27B model
+at 131,072 context needs about 20% of layers on CPU to fit, which tripled wall
+clock; full GPU offload used 23.3 of 23.98 GiB and crashed the host desktop session
+during a pilot; and IQ3_XXS, though it fit comfortably, degenerated into 103
+parallel `read_file` calls in one turn and then failed with `provider_http_400`.
 
 `min_free_vram_gib` refuses to start a run when the measured free VRAM is below the
 threshold; the observed headroom is recorded in `run_manifest.json`. A tighter

@@ -6,15 +6,15 @@
     "B": {"name": "mcp-only", "mcp": true, "skill": false},
     "C": {"name": "mcp-skill", "mcp": true, "skill": true}
   },
-  "model": "qwen38-27b-q4km-offload",
-  "quantization": "Q4_K_M",
+  "model": "glm-4.7",
+  "quantization": "provider-managed (not reported)",
   "context_window": 131072,
   "verify_reported_context": false,
-  "min_free_vram_gib": 2.5,
+  "min_free_vram_gib": null,
   "temperature": 0.0,
   "max_output_tokens": 8192,
   "request_options": {},
-  "reasoning_configuration": "LM Studio server default (model thinking behavior); no request override; identical in all arms; effective effort is not echoed by the API",
+  "reasoning_configuration": "Z.ai model default reasoning; no request override; identical in all arms; effective effort is not echoed by the API",
   "completion_guidance": "concise-causal-v1 (provisional)",
   "max_iterations": 25,
   "reserve_final_turn": true,
@@ -37,11 +37,11 @@
     "semantic_search_probe": "code search / semantic discovery"
   },
   "declared_environment": {
-    "engine": "LM Studio 0.4.4",
-    "gpu": "AMD Radeon RX 7900 XTX 24 GB (LM Studio reports AMD Radeon; 19.72 GiB in use and 4.27 GiB free at 131072 context, gpu offload 0.80)",
-    "cpu": "Ryzen 9 9950X",
-    "system_ram_gb": 32,
-    "kv_cache_bits": 4,
-    "provenance": "engine version from the local LM Studio install; model identifier, Q4_K_M quantization, 131072 loaded context, single parallel slot, tool capability and load state observed from /api/v0/models and lms ps after load; k=v=q4_0 cache quantization comes from the saved per-model LM Studio load config and is not echoed by the API; 20% of layers run on CPU so VRAM keeps real headroom - full offload used 23.3 of 23.98 GiB and crashed the host session (as did 0.90, which left only 2.6 GiB), and IQ3_XXS was rejected because it emitted 103 parallel read_file calls in one turn and then failed with provider_http_400; VRAM headroom is re-checked at startup against min_free_vram_gib; cpu is a user declaration"
+    "engine": "Z.ai API (GLM Coding plan), https://api.z.ai/api/coding/paas/v4",
+    "gpu": "n/a (hosted inference)",
+    "cpu": "n/a (hosted inference)",
+    "system_ram_gb": null,
+    "kv_cache_bits": null,
+    "provenance": "hosted OpenAI-compatible endpoint; model id, tool calling and usage accounting verified with direct requests and with the harness preflight on 2026-10-25; the endpoint lists glm-4.7 but reports no meta.n_ctx, so verify_reported_context is false and context_verified is recorded as not evaluated; 131072 is the declared budget and the largest prompt this suite produced is 116857 tokens, which leaves 8192 tokens of output allowance inside the declaration; no local accelerator is used, hence min_free_vram_gib is null. Local serving was rejected first: a 24 GB card cannot hold a 27B model at 131072 context without giving about 20% of layers to CPU, full offload crashed the host session at 23.3 of 23.98 GiB, and IQ3_XXS degenerated into 103 parallel read_file calls in one turn"
   }
 }

@@ -52,8 +52,10 @@ def test_free_vram_headroom_uses_the_tightest_device():
     assert 4.0 < free_vram_gib(samples) < 4.2
     assert free_vram_gib({'card0': {'mem_info_vram_used': None, 'mem_info_vram_total': None}}) is None
     assert free_vram_gib(None) is None
-    # A too-tight profile must be refusable before any task run.
-    assert json.loads(DEFAULT_CONFIG.read_text())['min_free_vram_gib'] >= 2
+    # A too-tight local profile must be refusable before any task run; hosted
+    # endpoints declare null because no local accelerator is involved.
+    guard = json.loads(DEFAULT_CONFIG.read_text()).get('min_free_vram_gib')
+    assert guard is None or guard >= 2
 
 
 def test_cumulative_provider_usage_missing_and_reasoning_subset():
