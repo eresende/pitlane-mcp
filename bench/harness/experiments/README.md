@@ -109,6 +109,11 @@ lms load -y --gpu max --parallel 1 -c 131072 \
 context and break long native-arm sessions. KV cache quantization comes from the
 model's saved LM Studio load config and is not exposed by the CLI.
 
+`min_free_vram_gib` refuses to start a run when the measured free VRAM is below the
+threshold; the observed headroom is recorded in `run_manifest.json`. A tighter
+profile is not merely risky for the benchmark — a 0.7 GiB margin crashed the host
+desktop session during a pilot, so keep real headroom rather than filling the card.
+
 ## Smoke first, then review
 ```sh
 .venv/bin/python -m bench.harness.experiments.navigation_skill \

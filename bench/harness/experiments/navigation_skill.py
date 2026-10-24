@@ -85,6 +85,17 @@ def vram_samples():
     return samples or None
 
 
+def free_vram_gib(samples):
+    """Smallest free VRAM across observed devices, in GiB; None when unknown."""
+    free = []
+    for fields in (samples or {}).values():
+        used = (fields or {}).get("mem_info_vram_used")
+        total = (fields or {}).get("mem_info_vram_total")
+        if isinstance(used, int) and isinstance(total, int) and total > used >= 0:
+            free.append((total - used) / 2 ** 30)
+    return min(free) if free else None
+
+
 def load_reviews(out, rows):
     path = Path(out) / "reviews.json"
     if not path.exists():
@@ -446,6 +457,12 @@ def main(argv=None):
     if args.phase == "preflight":
         print("Provider tool round trip passed; no benchmark executed.")
         return
+    vram = vram_samples()
+    vram_headroom = free_vram_gib(vram)
+    minimum_free = config.get("min_free_vram_gib")
+    if minimum_free is not None and vram_headroom is not None and vram_headroom < minimum_free:
+        raise SystemExit(f"Free VRAM {vram_headroom:.2f} GiB is below min_free_vram_gib={minimum_free}; "
+                         "unload or shrink the served model before running this experiment")
     all_tasks = {task.id: task for task in load_prompts(args.prompts)}
     selected = ([config["smoke_prompt_id"]] if args.phase == "smoke" else
                 config["pilot_tasks"] if args.phase == "pilot" else list(config["tasks"]))
@@ -473,7 +490,8 @@ def main(argv=None):
                 "embedding_configuration": embedding, "preflight": preflight,
                 "environment": {"declared": config["declared_environment"],
                                 "observed_client_cpu": _detect_cpu(), "observed_client_ram_gb": _detect_ram_gb(),
-                                "initial_gpu_vram": vram_samples(), "model": preflight["model"],
+                                "initial_gpu_vram": vram, "vram_headroom_gib": vram_headroom,
+                                "model": preflight["model"],
                                 "server": observed_server(args.base_url, config["model"], key),
                                 "server_config_change_monitoring": "unavailable"}}
     if args.phase == "pilot":

@@ -36,6 +36,17 @@ def test_skill_isolation_and_legacy_prompt_override(tmp_path):
     assert {t["function"]["name"] for t in captured[0]["tools"]} == {"read_file", "grep_search", "list_directory"}
 
 
+def test_free_vram_headroom_uses_the_tightest_device():
+    from bench.harness.experiments.navigation_skill import DEFAULT_CONFIG, free_vram_gib
+    samples = {'card0': {'mem_info_vram_used': 1 * 2**30, 'mem_info_vram_total': 8 * 2**30},
+               'card1': {'mem_info_vram_used': int(19.84 * 2**30), 'mem_info_vram_total': int(23.98 * 2**30)}}
+    assert 4.0 < free_vram_gib(samples) < 4.2
+    assert free_vram_gib({'card0': {'mem_info_vram_used': None, 'mem_info_vram_total': None}}) is None
+    assert free_vram_gib(None) is None
+    # A too-tight profile must be refusable before any task run.
+    assert json.loads(DEFAULT_CONFIG.read_text())['min_free_vram_gib'] >= 2
+
+
 def test_cumulative_provider_usage_missing_and_reasoning_subset():
     backend = CompatibleProvider("unused", "model", "secret")
     backend.parse(response(usage={"prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18,

@@ -5,7 +5,7 @@ from pathlib import Path
 CONTROL_FIELDS = ("configurations", "model", "quantization", "context_window", "temperature",
                   "max_output_tokens", "request_options", "reasoning_configuration", "completion_guidance",
                   "max_iterations", "reserve_final_turn", "timeout_seconds", "setup_timeout_seconds",
-                  "verify_reported_context")
+                  "verify_reported_context", "min_free_vram_gib")
 EXECUTION_SOURCES = ("framework/agentic_loop.py", "framework/executors.py", "framework/backends.py",
                      "framework/mcp_executor.py", "experiments/tools.py", "experiments/provider.py",
                      "experiments/navigation_skill.py", "experiments/completion_guidance.py")

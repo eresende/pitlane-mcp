@@ -6,10 +6,11 @@
     "B": {"name": "mcp-only", "mcp": true, "skill": false},
     "C": {"name": "mcp-skill", "mcp": true, "skill": true}
   },
-  "model": "qwen38-27b-q4km",
-  "quantization": "Q4_K_M",
+  "model": "qwen38-27b-iq3xxs",
+  "quantization": "IQ3_XXS",
   "context_window": 131072,
   "verify_reported_context": false,
+  "min_free_vram_gib": 2.5,
   "temperature": 0.0,
   "max_output_tokens": 4096,
   "request_options": {},
@@ -37,10 +38,10 @@
   },
   "declared_environment": {
     "engine": "LM Studio 0.4.4",
-    "gpu": "AMD Radeon RX 7900 XTX 24 GB (LM Studio reports AMD Radeon; 23.3 GiB in use at 131072 context)",
+    "gpu": "AMD Radeon RX 7900 XTX 24 GB (LM Studio reports AMD Radeon; 19.84 GiB in use and 4.15 GiB free at 131072 context)",
     "cpu": "Ryzen 9 9950X",
     "system_ram_gb": 32,
     "kv_cache_bits": 4,
-    "provenance": "engine version from the local LM Studio install; model identifier, Q4_K_M quantization, 131072 loaded context, single parallel slot and tool capability observed from /api/v0/models and lms ps at load; k/v cache quantization q4_0 comes from the saved per-model LM Studio load config and is not echoed by the API; cpu is a user declaration"
+    "provenance": "engine version from the local LM Studio install; model identifier, IQ3_XXS quantization, 131072 loaded context, single parallel slot and tool capability observed from /api/v0/models and lms ps after load; k=q8_0 and v=q4_0 cache quantization come from the saved per-model LM Studio load config and are not echoed by the API; VRAM headroom is measured from sysfs and re-checked at startup against min_free_vram_gib; cpu is a user declaration"
   }
 }
