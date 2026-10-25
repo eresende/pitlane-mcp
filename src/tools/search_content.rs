@@ -48,7 +48,11 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
 
     let limit = params.limit.unwrap_or(DEFAULT_LIMIT);
     let offset = params.offset.unwrap_or(0);
-    let regex = params.regex.unwrap_or(false);
+    // An unset `regex` flag used to force a literal interpretation, so a query
+    // such as `flag.*parse|ParseFlags` could never match anything and the caller
+    // had no signal that a pattern was searched as text. Only an explicit
+    // `regex: false` keeps literal semantics now.
+    let mut regex = params.regex.unwrap_or_else(|| auto_regex(&params.query));
     let case_sensitive = params.case_sensitive.unwrap_or(false);
     let before_context = params.before_context.unwrap_or(0).min(MAX_CONTEXT_LINES);
     let after_context = params.after_context.unwrap_or(0).min(MAX_CONTEXT_LINES);
@@ -67,7 +71,7 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
     let extra_excluded_dirs = extra_excluded_dir_names();
 
     let matcher = if regex {
-        if params.query.len() > MAX_REGEX_PATTERN_LEN {
+        if params.regex.is_some() && params.query.len() > MAX_REGEX_PATTERN_LEN {
             return Err(ToolError::InvalidArgument {
                 param: "query".to_string(),
                 message: format!(
@@ -76,16 +80,32 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
             }
             .into());
         }
-        ContentMatcher::Regex(
-            RegexBuilder::new(&params.query)
-                .case_insensitive(!case_sensitive)
-                .size_limit(MAX_REGEX_COMPILE_SIZE)
-                .build()
-                .map_err(|e| ToolError::InvalidArgument {
+        let compiled = RegexBuilder::new(&params.query)
+            .case_insensitive(!case_sensitive)
+            .size_limit(MAX_REGEX_COMPILE_SIZE)
+            .build();
+        match compiled {
+            Ok(re) => ContentMatcher::Regex(re),
+            // The caller never asked for a regex, so degrade to a literal search
+            // instead of rejecting a query we only guessed was a pattern. Record
+            // the effective mode so the response never claims regex semantics it
+            // did not use.
+            Err(_) if params.regex.is_none() => {
+                regex = false;
+                ContentMatcher::Literal {
+                    needle: params.query.clone(),
+                    needle_folded: params.query.to_lowercase(),
+                    case_sensitive,
+                }
+            }
+            Err(e) => {
+                return Err(ToolError::InvalidArgument {
                     param: "query".to_string(),
                     message: format!("invalid regex: {e}"),
-                })?,
-        )
+                }
+                .into())
+            }
+        }
     } else {
         ContentMatcher::Literal {
             needle: params.query.clone(),
@@ -173,18 +193,30 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
     }
     response["guidance"] = json!({
         "next_step": if matches.is_empty() {
-            "If this text search did not find the right code, try a nearby literal/regex snippet or switch to search_symbols for behavior-based discovery."
+            if !regex && looks_like_regex(&params.query) {
+                "The query contains regular-expression syntax but was searched as a literal string. Retry with regex: true, or use locate_code/investigate to find the subsystem by behavior instead of by name."
+            } else {
+                "A text search only matches literal snippets. Use locate_code or investigate to find a subsystem by behavior or intent instead of guessing the symbol names this revision uses."
+            }
         } else {
-            "Use the matched file paths to pivot back to get_file_outline, search_symbols, or get_symbol instead of repeating nearby text searches."
+            "Use the matched file paths to pivot to read_code_unit, locate_code, or trace_path instead of repeating nearby text searches."
         },
         "avoid": "Avoid shell grep when search_content can search the indexed source files directly."
     });
     let steering = if matches.is_empty() {
+        // Never recommend this tool with the same target again: a zero-result
+        // search is the moment to change strategy, not to repeat it. The
+        // recommendation must also name a tool that is always exposed, because
+        // advanced primitive tools are hidden unless the host opts in.
         build_steering(
             0.2,
-            "No direct text match was found, so this is a weak content search result.".to_string(),
-            "search_content",
-            json!({ "query": params.query, "regex": regex }),
+            if !regex && looks_like_regex(&params.query) {
+                "No literal match; the query looks like a regular expression but was searched as text."
+            } else {
+                "No direct text match was found, so this is a weak content search result."
+            },
+            "locate_code",
+            json!({ "project": params.project, "query": params.query }),
             take_fallback_candidates(&steering_matches),
         )
     } else {
@@ -203,17 +235,15 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
         build_steering(
             0.86,
             "The matched line provides direct evidence for the requested text snippet.".to_string(),
-            if document {
-                "read_code_unit"
-            } else {
-                "get_file_outline"
-            },
+            // `read_code_unit` is exposed at every tier; `get_file_outline` and
+            // `search_symbols` are not, so steering must not depend on them.
+            "read_code_unit",
             if document {
                 json!({"file_path": top["file"], "line_start": top["line"], "line_end": top["line"]})
             } else {
                 json!({
-                    "file": top["file"],
-                    "line": top["line"],
+                    "file_path": top["file"],
+                    "line_start": top["line"],
                 })
             },
             take_fallback_candidates(&steering_matches),
@@ -221,6 +251,32 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
     };
     attach_steering(&mut response, steering);
     Ok(response)
+}
+
+/// Regex syntax that suggests the caller meant a pattern rather than a literal.
+///
+/// A query such as `flag.*parse|ParseFlags|command.*line` is a common way to
+/// guess at a renamed symbol. Searched literally it can never match, so a zero
+/// result then looks like "this code does not exist" instead of "wrong strategy".
+const REGEX_SYNTAX_MARKERS: [&str; 5] = [".*", "|", "\\b", "^", "["];
+
+/// Markers strong enough to change how an unset `regex` flag is interpreted.
+///
+/// Deliberately narrower than the hint markers: `[`, `^` and `$` occur in
+/// ordinary code snippets such as `arr[0]`, and silently switching those to a
+/// regex would change results the caller did not ask to change.
+const REGEX_AUTODETECT_MARKERS: [&str; 4] = [".*", "|", "\\b", "(?:"];
+
+fn looks_like_regex(query: &str) -> bool {
+    REGEX_SYNTAX_MARKERS
+        .iter()
+        .any(|marker| query.contains(marker))
+}
+
+fn auto_regex(query: &str) -> bool {
+    REGEX_AUTODETECT_MARKERS
+        .iter()
+        .any(|marker| query.contains(marker))
 }
 
 pub(crate) fn build_file_filter(root: &Path, filter: &str) -> anyhow::Result<globset::GlobMatcher> {
@@ -532,7 +588,12 @@ mod tests {
         assert_eq!(result["matches"][0]["line_text"], json!("fn beta() {}"));
         assert_eq!(
             result["guidance"]["next_step"],
-            json!("Use the matched file paths to pivot back to get_file_outline, search_symbols, or get_symbol instead of repeating nearby text searches.")
+            json!("Use the matched file paths to pivot to read_code_unit, locate_code, or trace_path instead of repeating nearby text searches.")
+        );
+        assert_eq!(
+            result["steering"]["recommended_next_tool"],
+            json!("read_code_unit"),
+            "steering must only name tools that are exposed at every tier"
         );
     }
 
@@ -565,5 +626,177 @@ mod tests {
         assert_eq!(result["count"], json!(0));
 
         std::env::remove_var(EXCLUDE_DIRS_ENV_VAR);
+    }
+
+    /// Tools that are exposed regardless of `PITLANE_MCP_TOOL_TIER`.
+    const ALWAYS_EXPOSED: [&str; 14] = [
+        "ensure_project_ready",
+        "investigate",
+        "locate_code",
+        "read_code_unit",
+        "trace_path",
+        "analyze_impact",
+        "analyze_changes",
+        "get_index_changes",
+        "get_index_stats",
+        "doctor",
+        "server_info",
+        "search_content",
+        "search_knowledge",
+        "read_knowledge_document",
+    ];
+
+    async fn search(dir: &TempDir, query: &str, regex: Option<bool>) -> Value {
+        let project = setup_indexed_project(dir);
+        search_content(SearchContentParams {
+            project,
+            query: query.to_string(),
+            regex,
+            case_sensitive: None,
+            language: Some("rust".to_string()),
+            file: None,
+            limit: None,
+            offset: None,
+            before_context: None,
+            after_context: None,
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_zero_result_steering_escalates_to_another_exposed_tool() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn parse_flags() {}\n").unwrap();
+
+        let result = search(&dir, "ParseCliArguments", None).await;
+
+        assert_eq!(result["count"], json!(0));
+        let recommended = result["steering"]["recommended_next_tool"]
+            .as_str()
+            .unwrap();
+        assert_ne!(
+            recommended, "search_content",
+            "a zero-result search must not recommend repeating itself"
+        );
+        assert!(
+            ALWAYS_EXPOSED.contains(&recommended),
+            "{recommended} is not exposed at the default tier"
+        );
+        assert_eq!(
+            result["steering"]["recommended_target"]["query"],
+            json!("ParseCliArguments")
+        );
+        assert!(
+            !result["guidance"]["next_step"]
+                .as_str()
+                .unwrap()
+                .contains("search_symbols"),
+            "guidance must not name a tool the host may not expose"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_regex_syntax_searched_as_literal_is_reported() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn parse_flags() {}\n").unwrap();
+
+        // Only an explicit `regex: false` can force the literal interpretation.
+        let result = search(&dir, "flag.*parse|ParseFlags", Some(false)).await;
+
+        assert_eq!(result["count"], json!(0));
+        assert!(
+            result["guidance"]["next_step"]
+                .as_str()
+                .unwrap()
+                .contains("literal string"),
+            "the caller must learn the pattern text was not interpreted"
+        );
+        assert!(result["steering"]["why_this_matched"]
+            .as_str()
+            .unwrap()
+            .contains("regular expression"));
+    }
+
+    #[tokio::test]
+    async fn test_regex_syntax_is_interpreted_when_flag_is_unset() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("parse.rs"),
+            "use crate::flags::parse;\nfn parse_low() {}\n",
+        )
+        .unwrap();
+
+        // The literal string `flags.*parse` cannot appear in source, so the old
+        // behaviour guaranteed a zero result for this common guess.
+        let auto = search(&dir, "flags.*parse", None).await;
+        assert_eq!(auto["count"], json!(1));
+        assert_eq!(auto["regex"], json!(true));
+        assert_eq!(auto["matches"][0]["file"], json!("parse.rs"));
+
+        // An explicit `regex: false` still means literal.
+        let literal = search(&dir, "flags.*parse", Some(false)).await;
+        assert_eq!(literal["count"], json!(0));
+        assert_eq!(literal["regex"], json!(false));
+    }
+
+    #[tokio::test]
+    async fn test_auto_detected_regex_degrades_instead_of_failing() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "fn keep() {}\n").unwrap();
+
+        // `.*` triggers auto-detection, but the pattern is invalid as a regex.
+        let result = search(&dir, "keep.*(", None).await;
+        assert_eq!(result["regex"], json!(false));
+        assert_eq!(result["count"], json!(0));
+
+        // An explicit regex request still reports the error.
+        let project = setup_indexed_project(&dir);
+        let error = search_content(SearchContentParams {
+            project,
+            query: "keep.*(".to_string(),
+            regex: Some(true),
+            case_sensitive: None,
+            language: None,
+            file: None,
+            limit: None,
+            offset: None,
+            before_context: None,
+            after_context: None,
+        })
+        .await;
+        assert!(
+            error.is_err(),
+            "an explicit regex must not be silently downgraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_successful_match_recommends_an_always_exposed_tool() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("lib.rs"),
+            "fn parse_flags() {\n    println!(\"parsed\");\n}\n",
+        )
+        .unwrap();
+
+        let result = search(&dir, "println!", Some(true)).await;
+
+        assert_eq!(result["count"], json!(1));
+        let recommended = result["steering"]["recommended_next_tool"]
+            .as_str()
+            .unwrap();
+        assert!(
+            ALWAYS_EXPOSED.contains(&recommended),
+            "{recommended} is not exposed at the default tier"
+        );
+        assert_eq!(
+            result["steering"]["recommended_target"]["file_path"],
+            json!("lib.rs")
+        );
+        assert_eq!(
+            result["steering"]["recommended_target"]["line_start"],
+            json!(2)
+        );
     }
 }
