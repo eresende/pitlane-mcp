@@ -144,6 +144,34 @@ reviewed successes. `budget_exhaustion_rate` is reported separately, because a r
 cut off by the iteration budget answers under a forced synthesis turn and must not be
 compared with one that stopped by itself.
 
+## Evidence recall
+
+`evidence_anchors.py` preregisters, per task and per rubric component, the exact
+repository facts a complete answer must reference: specific file paths and
+distinctive symbols. Reporting counts a component as covered when the answer
+references at least one of its anchors, and records every match in
+`evidence_details`. Anchors are checked against the snapshot before scoring, and
+anchored plus review-only components must equal the rubric's component list, so a
+renamed symbol, a moved file, or a rubric edit fails the report instead of quietly
+lowering recall.
+
+This closes the gap that reference precision left open. A previous baseline row
+scored grounding 1.0 while asserting the CLI flag parser did not exist: every file
+it cited was real, so precision could not see the missing subsystem. Recall reports
+that row as zero covered components.
+
+It is coverage, not correctness. An answer that names a file without explaining it
+still counts, relationship direction is not inferred, and components that cannot be
+anchored objectively (for example `source_owners` on `graph_nav_call_chain`) stay
+review-only and are excluded from the denominator; each row records them in
+`evidence_review_only`. Anchors never enter a model request, so the metric can be
+recomputed from a frozen artifact:
+
+```sh
+.venv/bin/python -m bench.harness.experiments.navigation_skill \
+  --phase report --out results/skill-pilot
+```
+
 ## Artifacts and interpretation
 
 Use an ignored `results/` directory; never commit raw answers or artifacts. The

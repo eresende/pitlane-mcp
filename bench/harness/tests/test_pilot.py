@@ -121,7 +121,50 @@ def test_grounding_v2_does_not_credit_ambiguous_bare_names(tmp_path):
     assert record.ambiguous_references_count==1
 
 
-def test_wire_audit_requires_evidence_in_the_synthesis_turn(tmp_path):
+def test_evidence_recall_measures_component_coverage_not_precision(tmp_path):
+    import unittest.mock as mock
+    from bench.harness.experiments import evidence_anchors
+    (tmp_path/'src').mkdir()
+    (tmp_path/'src/parse.rs').write_text('struct Parser;\nfn parse_low() {}\n')
+    (tmp_path/'src/walk.rs').write_text('struct WalkBuilder;\n')
+    fake={'task_x': {'parsing': {'files':['src/parse.rs'], 'symbols':['Parser']},
+                     'traversal': {'files':['src/walk.rs'], 'symbols':['WalkBuilder']}}}
+    with mock.patch.object(evidence_anchors, 'ANCHORS', fake):
+        partial=evidence_anchors.assess('task_x','The flags are handled in src/parse.rs.',str(tmp_path))
+        full=evidence_anchors.assess('task_x','src/parse.rs defines Parser; src/walk.rs defines WalkBuilder.',str(tmp_path))
+        none=evidence_anchors.assess('task_x','I did not look at the parser.',str(tmp_path))
+        unknown=evidence_anchors.assess('task_y','src/parse.rs',str(tmp_path))
+    assert partial['evidence_component_matched']==1 and partial['evidence_component_count']==2
+    assert partial['evidence_component_recall']==0.5
+    assert partial['evidence_anchor_matched']==1 and partial['evidence_anchor_count']==4
+    assert partial['evidence_details']['parsing']['covered'] and not partial['evidence_details']['traversal']['covered']
+    assert full['evidence_component_recall']==1.0
+    assert none['evidence_component_recall']==0.0
+    assert unknown['evidence_component_recall'] is None
+
+
+def test_evidence_anchors_fail_closed_on_stale_definitions(tmp_path):
+    import unittest.mock as mock
+    from bench.harness.experiments import evidence_anchors
+    (tmp_path/'a.rs').write_text('struct Real;\n')
+    rubric={'t': {'components': ['c'], 'relationships': []}}
+    missing_file={'t': {'c': {'files':['missing.rs'], 'symbols':[]}}}
+    missing_symbol={'t': {'c': {'files':[], 'symbols':['AbsentSymbol']}}}
+    for broken in (missing_file, missing_symbol):
+        with mock.patch.object(evidence_anchors, 'ANCHORS', broken), \
+             mock.patch('bench.harness.experiments.task_quality.TASKS', rubric):
+            with pytest.raises(ValueError, match='do not match the snapshot'):
+                evidence_anchors.verify(str(tmp_path))
+    with mock.patch.object(evidence_anchors, 'ANCHORS', {'t': {'c': {'files':['a.rs'], 'symbols':[]}}}), \
+         mock.patch('bench.harness.experiments.task_quality.TASKS', rubric):
+        with pytest.raises(ValueError, match='No evidence anchors'):
+            evidence_anchors.verify(str(tmp_path), ['other'])
+        assert evidence_anchors.verify(str(tmp_path))['verified'] is True
+        # Anchors and rubric must describe the same components.
+        with mock.patch('bench.harness.experiments.task_quality.TASKS',
+                        {'t': {'components': ['c', 'not_anchored'], 'relationships': []}}):
+            with pytest.raises(ValueError, match='anchors and rubric disagree'):
+                evidence_anchors.verify(str(tmp_path))
     from bench.harness.experiments.completion_guidance import CAUSAL_GUIDANCE
     config={'model':'m','temperature':0,'max_output_tokens':4096,'request_options':{},'max_iterations':2}
     tool={'type':'function','function':{'name':'read_file'}}

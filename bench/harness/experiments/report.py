@@ -12,6 +12,9 @@ METRICS = ("quality_score", "correctness_score", "prompt_tokens", "completion_to
            "native_tool_calls", "mcp_tool_calls", "failed_tool_calls", "invalid_tool_arguments",
            "tool_retries", "task_component_score", "task_relationship_score", "task_quality_score",
            "task_error_count", "incidental_error_count", "unsupported_symbol_count",
+           "evidence_component_recall", "evidence_anchor_recall",
+           "evidence_component_matched", "evidence_component_count",
+           "evidence_anchor_matched", "evidence_anchor_count",
            "tool_calls", "exact_redundant_successful_calls", "native_fallback_calls")
 
 
@@ -59,8 +62,17 @@ def summaries(rows):
     return result
 
 
-def write_report(out, manifest, rows, validation):
+def write_report(out, manifest, rows, validation, snapshot=None):
     out = Path(out)
+    snapshot = Path(snapshot) if snapshot else out / "repository"
+    evidence = None
+    if rows and snapshot.is_dir():
+        from bench.harness.experiments import evidence_anchors
+        anchored = sorted({r["task_id"] for r in rows} & set(evidence_anchors.ANCHORS))
+        if anchored:
+            # Evaluator-side only: anchors never reach a model request, so this
+            # is recomputable from a frozen artifact without new inference.
+            evidence = evidence_anchors.apply(rows, snapshot, anchored)
     summary = summaries(rows)
     per_task = {task: summaries([r for r in rows if r["task_id"] == task]) for task in sorted({r["task_id"] for r in rows})}
     comparisons = {}
@@ -79,6 +91,7 @@ def write_report(out, manifest, rows, validation):
             for k in ("quality_score", "total_tokens", "execution_seconds")}
     data = {"schema_version": 1, "arms": summary, "per_task": per_task,
             "comparisons": comparisons, "comparisons_converged_only": comparisons_converged,
+            "evidence_recall": evidence,
             "smoke_validation": validation,
             "execution_validation": validation,
             "correctness_evaluation": {"strict_reviewed": sum(r.get("correctness_score") is not None for r in rows),
@@ -87,7 +100,7 @@ def write_report(out, manifest, rows, validation):
     (out / "summary.json").write_text(json.dumps(data, indent=2) + "\n")
     (out / "results.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
     if rows:
-        columns = [k for k in rows[0] if k not in {"tool_events", "usage_per_request", "response_metadata", "final_answer"}]
+        columns = [k for k in rows[0] if k not in {"tool_events", "usage_per_request", "response_metadata", "final_answer", "evidence_details"}]
         with (out / "results.csv").open("w", newline="") as handle:
             writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
             writer.writeheader()
@@ -102,6 +115,7 @@ def write_report(out, manifest, rows, validation):
              "A: native tools; B: native + MCP; C: native + MCP + exact skill text. Fresh conversations and MCP sessions; identical task prompts, sampling, limits, and tracked-file snapshot. Index setup and preflight are excluded from navigation time. Server-provided tool descriptions are present in B and C. No host agent configuration is loaded.", "",
              "The legacy score is repository-reference grounding (score grounding-v2): distinct cited files and symbols that exist in the snapshot, divided by all extracted references, then scaled by a citation floor so that fewer than four grounded citations cannot score 1.0. It does not establish completeness, correct relationships, or task success. Correctness and success stay unavailable until repository-backed manual review. Review rubric: cover every requested component, verify cited files/symbols and relationships, and distinguish inference. Scores: 1 complete/correct, 0.5 partial, 0 incorrect; only 1 with completed execution counts as successful.", "",
              "Technical readiness is an execution gate; correctness is a post-execution outcome. Imperfect completed answers remain benchmark observations. Strict success is unchanged. Task-oriented quality, when reviewed under the pinned task-quality-v1 rubric, separately records components, relationships, task errors, incidental errors and unsupported symbols. Historical annotations are not silently replaced.", "",
+             "Evidence recall is anchored coverage computed from the answer text: a component counts when an anchored file or symbol appears in the answer, so listing a file without explaining it still counts. Relationship direction, correct descriptions and task success remain unreviewed until reviews.json is filled. Anchors are verified against the snapshot before scoring and their module hash is recorded, so a stale anchor fails the report instead of lowering recall silently.", "",
              "## Raw summaries", "",
              "| Arm | Runs | Completed | Grounding mean / median | Tokens mean / median | Time mean / median (s) | Native / MCP calls | Failed / calls |",
              "|---|---:|---:|---|---|---|---|---|"]
@@ -126,6 +140,18 @@ def write_report(out, manifest, rows, validation):
         lines.append(f"| {arm} | {info['converged_runs']} / {info['runs']} | {info['budget_exhausted_runs']} ({fmt(info['budget_exhaustion_rate'])}) | "
                      f"{fmt(converged_metrics['quality_score']['mean'])} | {fmt(converged_metrics['total_tokens']['mean'])} | "
                      f"{fmt(converged_metrics['execution_seconds']['mean'])} |")
+    lines += ["", "## Evidence recall (evaluator-side anchors)", "",
+              "Each component is a preregistered set of exact repository facts, verified against the snapshot before scoring. A row counts a component when the answer references at least one of its anchored files or symbols. This measures coverage of required parts, which reference precision cannot show; it does not measure correctness, whether a component was described rather than named, or the direction of any relationship. Components that objective anchors cannot capture stay review-only and are excluded from these denominators; each row records them in `evidence_review_only`.", "",
+              "| Arm | Components covered / preregistered | Anchor recall | Components covered (converged only) |",
+              "|---|---|---|---|"]
+    for arm, info in summary.items():
+        m = info["metrics"]
+        c = info["converged_only"]
+        lines.append(f"| {arm} | {fmt(m['evidence_component_matched']['mean'])} / {fmt(m['evidence_component_count']['mean'])} | "
+                     f"{fmt(m['evidence_anchor_recall']['mean'])} | {fmt(c['evidence_component_matched']['mean'])} |")
+    if evidence:
+        lines += ["", f"Anchors `{evidence['version']}` (module sha256 `{evidence['module_sha256'][:16]}`): "
+                      f"{evidence['files_checked']} file and {evidence['symbols_checked']} symbol anchors verified against the snapshot."]
     index_path = out / "index_setup.json"
     if index_path.exists():
         index = json.loads(index_path.read_text())
