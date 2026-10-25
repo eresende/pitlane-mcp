@@ -178,12 +178,40 @@ class CompatibleProvider:
         final = self.chat(messages, tools).message
         if final.tool_calls or nonce not in final.content:
             raise ProviderError("preflight_tool_result_not_consumed")
+        self._probe_synthesis_evidence(nonce)
         fields = ("prompt_tokens", "completion_tokens", "total_tokens")
         if not all(all(type(u.get(k)) is int for k in fields) and
                    u["total_tokens"] == u["prompt_tokens"] + u["completion_tokens"] for u in self.usages):
             raise ProviderError("preflight_token_accounting_invalid")
         return {"passed": True, "model": available, "usage": self.usages,
-                "scope": "One synthetic structured tool round trip; reliability assessed separately in task runs."}
+                "scope": "One synthetic structured tool round trip plus one tool-free synthesis probe; reliability assessed separately in task runs."}
+
+    def _probe_synthesis_evidence(self, nonce):
+        """Verify a tool-free synthesis request still reaches the model with evidence.
+
+        Some hosted gateways silently drop ``role: "tool"`` messages when a
+        request declares no tools, so a final synthesis that reuses the raw
+        history can answer from nothing. The experiment therefore transmits a
+        flattened transcript. This probe proves that shape is delivered and
+        counted, instead of discovering the problem after a full pilot.
+        """
+        from bench.harness.framework.agentic_loop import _synthesis_messages
+
+        evidence = "repository evidence line about traversal and matching.\n" * 400
+        conversation = [
+            Message("system", "Probe system."),
+            Message("user", "Probe task."),
+            Message("assistant", None,
+                    [ToolCall(id="probe-1", name="benchmark_echo", arguments={"nonce": nonce})]),
+            Message("tool", f"{evidence}ACCESS {nonce}", tool_call_id="probe-1"),
+        ]
+        messages = _synthesis_messages("Answer only from the collected evidence.", "Report the ACCESS value.",
+                                       conversation, "Do not request tools.")
+        reply = self.chat(messages, []).message
+        if reply.tool_calls or nonce not in reply.content:
+            raise ProviderError("preflight_synthesis_evidence_missing")
+        if (self.usages[-1].get("prompt_tokens") or 0) < 500:
+            raise ProviderError("preflight_synthesis_usage_implausible")
 
 
 def _write_trace_json(path, value):

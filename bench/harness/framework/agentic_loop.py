@@ -7,6 +7,7 @@ or wall-clock timeout.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import TYPE_CHECKING
@@ -30,6 +31,50 @@ FINAL_TURN_PROMPT = (
     "already collected. State missing evidence and incomplete parts explicitly. "
     "Do not invent facts or claim completeness that the evidence does not support."
 )
+
+# Upper bound for the flattened evidence block, in characters. Observed sessions
+# reach roughly 270k characters; the cap only guards a runaway transcript.
+MAX_FINAL_TURN_EVIDENCE_CHARS = 600_000
+
+
+def _render_evidence(conversation: list[Message]) -> str:
+    """Render collected tool evidence as plain text.
+
+    Some OpenAI-compatible gateways silently drop ``role: "tool"`` messages when
+    a request declares no tools (verified against a hosted gateway: an identical
+    history cost ~7.5k prompt tokens with tools declared and 32 without, and the
+    model then hallucinated the answer). Flattening the transcript into ordinary
+    user text keeps the evidence intact regardless of that behaviour.
+    """
+    parts: list[str] = []
+    for message in conversation[2:]:
+        if message.role == "assistant":
+            if message.content and message.content.strip():
+                parts.append(message.content.strip())
+            for call in message.tool_calls or []:
+                arguments = json.dumps(call.arguments, sort_keys=True, default=str)
+                parts.append(f"[tool call] {call.name}({arguments})")
+        elif message.role == "tool":
+            label = f" [{message.tool_call_id}]" if message.tool_call_id else ""
+            parts.append(f"[tool result{label}]\n{message.content or ''}")
+        elif message.role == "user" and message.content and message.content.strip():
+            parts.append(message.content.strip())
+    return "\n\n".join(parts)
+
+
+def _synthesis_messages(system_prompt: str, prompt: str, conversation: list[Message],
+                        final_turn_prompt: str,
+                        max_evidence_chars: int = MAX_FINAL_TURN_EVIDENCE_CHARS) -> list[Message]:
+    """Build a tool-free synthesis request that still carries the evidence."""
+    evidence = _render_evidence(conversation)
+    if len(evidence) > max_evidence_chars:
+        head = int(max_evidence_chars * 0.4)
+        evidence = (evidence[:head] + "\n\n[... evidence truncated in the middle ...]\n\n"
+                    + evidence[-(max_evidence_chars - head):])
+    content = (f"{prompt}\n\n## Evidence collected during the session\n\n"
+               f"{evidence or '(no tool evidence was collected)'}\n\n{final_turn_prompt}")
+    return [Message(role="system", content=system_prompt),
+            Message(role="user", content=content)]
 
 _SYSTEM_PROMPT = (
     "You are a code analysis assistant running inside a benchmark harness. "
@@ -195,6 +240,7 @@ class AgenticLoop:
         system_prompt: str | None = None,
         reserve_final_turn: bool = False,
         final_turn_prompt: str = FINAL_TURN_PROMPT,
+        max_final_turn_chars: int = MAX_FINAL_TURN_EVIDENCE_CHARS,
     ) -> RunResult:
         """Run the agentic loop and return a RunResult.
 
@@ -216,6 +262,8 @@ class AgenticLoop:
                 legacy runs keep their existing behavior.
             final_turn_prompt: Optional common synthesis instruction for that
                 reserved request. The legacy default remains unchanged.
+            max_final_turn_chars: Cap, in characters, for the flattened evidence
+                block transmitted on that reserved request.
 
         Returns:
             RunResult with full conversation, tool call log, final answer,
@@ -253,9 +301,18 @@ class AgenticLoop:
                 log.debug("    [iter %d] calling LLM...", iteration)
                 t_llm = time.perf_counter()
                 final_turn = reserve_final_turn and iteration == max_iterations
+                request_messages = conversation
                 if final_turn:
+                    # Transmit a flattened transcript rather than the raw
+                    # tool-role history: gateways may drop `tool` messages when
+                    # no tools are declared, which would answer from no evidence.
+                    request_messages = _synthesis_messages(
+                        system_prompt, prompt, conversation, final_turn_prompt,
+                        max_final_turn_chars)
+                    # The marker stays in the local conversation so termination
+                    # classification and wire audits can identify this turn.
                     conversation.append(Message(role="user", content=final_turn_prompt))
-                response = backend.chat(conversation, [] if final_turn else tools)
+                response = backend.chat(request_messages, [] if final_turn else tools)
                 log.debug("    [iter %d] LLM responded in %.1fs  tokens=%d",
                           iteration, time.perf_counter() - t_llm, response.usage.total_tokens)
 

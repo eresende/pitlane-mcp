@@ -116,20 +116,36 @@ def audit_wire(wire, task_text, system, config, baseline_schema):
     for i, file in enumerate(files):
         payload = json.loads(file.read_text())
         messages = payload["messages"]
-        if messages[:2] != [{"role":"system", "content":system}, {"role":"user", "content":task_text}]:
-            return False
-        if [m for m in messages if m["role"] == "system"] != messages[:1]:
-            return False
-        if [m["content"] for m in messages if m["role"] == "user"] not in ([task_text], [task_text, CAUSAL_GUIDANCE]):
-            return False
+        synthesis_turn = "tools" not in payload
+        if synthesis_turn:
+            # The reserved synthesis turn carries the collected evidence as a
+            # single flattened user message, because gateways may drop `tool`
+            # messages from tool-free requests. It must be the only tool-free
+            # request, it must be the budgeted final turn, and it must contain
+            # more than the task text and the instruction.
+            if i + 1 != config["max_iterations"] or len(messages) != 2:
+                return False
+            if messages[0] != {"role":"system", "content":system} or messages[1].get("role") != "user":
+                return False
+            content = messages[1].get("content") or ""
+            if not content.startswith(task_text) or not content.endswith(CAUSAL_GUIDANCE):
+                return False
+            if "(no tool evidence was collected)" in content:
+                return False
+            if len(content) <= len(task_text) + len(CAUSAL_GUIDANCE) + len("## Evidence collected during the session"):
+                return False
+        else:
+            if messages[:2] != [{"role":"system", "content":system}, {"role":"user", "content":task_text}]:
+                return False
+            if [m for m in messages if m["role"] == "system"] != messages[:1]:
+                return False
+            if [m["content"] for m in messages if m["role"] == "user"] != [task_text]:
+                return False
         if any(payload.get(k) != v for k, v in {"model":config["model"], "temperature":config["temperature"], "max_tokens":config["max_output_tokens"], "stream":False, **config["request_options"]}.items()):
             return False
         if set(payload) != {"model", "messages", "temperature", "max_tokens", "stream", *config["request_options"], *({"tools"} if "tools" in payload else set())}:
             return False
-        if "tools" not in payload:
-            if i + 1 != config["max_iterations"] or messages[-1] != {"role":"user", "content":CAUSAL_GUIDANCE}:
-                return False
-        else:
+        if not synthesis_turn:
             # Schema was already compared to the historical smoke at the row
             # level; verify every wire request retains the same definitions.
             if digest(payload["tools"]) != baseline_schema:

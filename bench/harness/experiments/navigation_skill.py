@@ -291,6 +291,8 @@ def main(argv=None):
     parser.add_argument("--out", required=True)
     parser.add_argument("--capture-traces", action="store_true", help="Save private wire bodies/responses and parsed conversations under the ignored artifact directory")
     parser.add_argument("--validated-smoke", help="Technically validated smoke artifact directory; required for pilot/full")
+    parser.add_argument("--repetitions", type=int, default=3,
+                        help="Attempts per task and arm for pilot/full (default 3); smoke always runs one")
     args = parser.parse_args(argv)
     out = Path(args.out).resolve()
     config = json.loads(Path(args.config).read_text())
@@ -386,12 +388,16 @@ def main(argv=None):
                 config["pilot_tasks"] if args.phase == "pilot" else list(config["tasks"]))
     if not set(selected).issubset(all_tasks):
         parser.error("Configured task IDs missing from the existing prompt suite")
+    if args.repetitions < 1 or args.repetitions > 10:
+        parser.error("--repetitions must be between 1 and 10")
     snapshot = out / "repository"
     snapshot_info = make_snapshot(repo, snapshot)
     home = out / "mcp-state"
     home.mkdir()
-    order = schedule(selected, 1 if args.phase in {"smoke", "pilot"} else 3, config["seed"])
+    order = schedule(selected, 1 if args.phase == "smoke" else args.repetitions, config["seed"])
+    repetitions = 1 if args.phase == "smoke" else args.repetitions
     manifest = {"schema_version": 1, "phase": args.phase, "identity": identity,
+                "repetitions": repetitions,
                 "created_at": datetime.now(timezone.utc).isoformat(), "repo": before,
                 "config": config, "schedule": order, "snapshot": snapshot_info,
                 "prompt_templates": {"neutral_sha256": digest(NEUTRAL.encode()),

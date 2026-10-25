@@ -124,13 +124,22 @@ def test_actual_tool_round_trip_serialization():
         if route == "/models":
             return {"data": [{"id": "model"}]}
         captures.append(payload)
+        # Mimic a provider that reports usage proportional to the request body,
+        # so the tool-free synthesis probe can check for dropped evidence.
+        prompt = max(1, len(json.dumps(payload)) // 4)
+        usage = {"prompt_tokens": prompt, "completion_tokens": 5, "total_tokens": prompt + 5}
         if len(captures) == 1:
-            return response(None, [{"id": "call-id", "type": "function", "function": {"name": "benchmark_echo", "arguments": '{"nonce":"pitlane-probe-7381"}'}}], usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
-        return response("pitlane-probe-7381", usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+            return response(None, [{"id": "call-id", "type": "function", "function": {"name": "benchmark_echo", "arguments": '{"nonce":"pitlane-probe-7381"}'}}], usage=usage)
+        return response("pitlane-probe-7381", usage=usage)
     backend.request = request
     assert backend.preflight()["passed"]
     assert captures[1]["messages"][-1] == {"role": "tool", "content": "pitlane-probe-7381", "tool_call_id": "call-id"}
     assert captures[1]["messages"][-2]["tool_calls"][0]["id"] == "call-id"
+    # The synthesis probe must transmit evidence as user text and no tool roles.
+    probe = captures[2]
+    assert "tools" not in probe
+    assert not any(m["role"] == "tool" for m in probe["messages"])
+    assert "pitlane-probe-7381" in probe["messages"][-1]["content"]
     assert "private thought" not in json.dumps(captures)
 
 
@@ -284,9 +293,17 @@ def test_reserved_final_turn_within_budget_and_no_extra_tools(tmp_path, request_
     assert len(captures) == request_budget
     assert len(tools.events) == request_budget - 1
     assert "tools" in captures[0] and "tools" not in captures[-1]
-    assert captures[-1]["messages"][-1] == {"role": "user", "content": FINAL_TURN_PROMPT}
-    assert captures[-1]["messages"][-2]["role"] == "tool"
-    assert captures[-1]["messages"][0] == {"role": "system", "content": "neutral"}
+    # The synthesis request must not rely on tool-role messages: some gateways
+    # drop them from tool-free requests, so the evidence travels as user text.
+    final = captures[-1]["messages"]
+    assert len(final) == 2
+    assert final[0] == {"role": "system", "content": "neutral"}
+    assert final[1]["role"] == "user"
+    assert not any(m["role"] == "tool" for m in final)
+    assert final[1]["content"].startswith("task")
+    assert final[1]["content"].endswith(FINAL_TURN_PROMPT)
+    assert "[tool result" in final[1]["content"]
+    assert "read_file" in final[1]["content"]
 
 
 def test_tool_request_during_reserved_final_turn_is_failure(tmp_path):

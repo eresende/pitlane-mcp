@@ -37,6 +37,8 @@ def test_preflight_requires_authoritative_consistent_usage():
         {"choices": [{"message": {"tool_calls": [{"id": "probe", "type": "function",
           "function": {"name": "benchmark_echo", "arguments": '{"nonce":"pitlane-probe-7381"}'}}]}, "finish_reason": "tool_calls"}]},
         {"choices": [{"message": {"content": "pitlane-probe-7381"}, "finish_reason": "stop"}]},
+        {"choices": [{"message": {"content": "pitlane-probe-7381"}, "finish_reason": "stop"}],
+         "usage": {"prompt_tokens": 900, "completion_tokens": 10, "total_tokens": 910}},
     ])
     provider.request = lambda route, payload=None: {"data": [{"id": "model"}]} if route == "/models" else next(responses)
     with pytest.raises(ProviderError, match="token_accounting"):

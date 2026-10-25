@@ -69,6 +69,78 @@ def test_pilot_has_fifteen_fresh_rotating_instances():
     assert set(firsts.values())==set('ABC')
 
 
+def test_schedule_supports_repeated_attempts_per_cell():
+    order=schedule(TASKS,3,20261018)
+    assert len(order)==len(set(order))==45
+    assert {x[2] for x in order}=={1,2,3}
+    for task in TASKS:
+        for run in (1,2,3):
+            assert {arm for t,arm,r in order if t==task and r==run}==set('ABC')
+
+
+def test_summaries_report_convergence_separately_from_exhaustion():
+    def row(termination,score,status='completed'):
+        return {'configuration':'A','status':status,'task_success':None,'task_quality_success':None,
+                'termination_kind':termination,'tool_calls':1,'failed_tool_calls':0,'quality_score':score}
+    stats=summaries([row('natural',0.8),row('budget_synthesis',0.0),row('natural',1.0)])['A']
+    assert stats['converged_runs']==2 and stats['budget_exhausted_runs']==1
+    assert abs(stats['budget_exhaustion_rate']-1/3)<1e-9
+    assert abs(stats['converged_only']['quality_score']['mean']-0.9)<1e-9
+    assert abs(stats['metrics']['quality_score']['mean']-0.6)<1e-9
+
+
+def test_grounding_v2_resolves_bare_names_without_double_counting(tmp_path):
+    from bench.harness.framework.quality_scorer import MIN_GROUNDED_CITATIONS, QualityScorer
+    source=tmp_path/'crates/ignore/src'
+    source.mkdir(parents=True)
+    (source/'dir.rs').write_text('struct WalkBuilder;\n\nfn matched() {}\n')
+    (source/'walk.rs').write_text('fn walk_parallel() {}\n')
+    scorer=QualityScorer()
+    terse=scorer.score('See crates/ignore/src/dir.rs.',str(tmp_path),'symbol_grounding')
+    assert terse.grounded_files_count==1 and terse.citation_count==1
+    assert terse.quality_score<1.0,"one citation must not reach a perfect score"
+    assert terse.quality_score==terse.grounding_precision/MIN_GROUNDED_CITATIONS
+    bare=scorer.score('The logic lives in dir.rs.',str(tmp_path),'symbol_grounding')
+    assert bare.grounded_files_count==1 and bare.ambiguous_references_count==0
+    both=scorer.score('crates/ignore/src/dir.rs and dir.rs both exist.',str(tmp_path),'symbol_grounding')
+    assert both.grounded_files_count==1,"a path and its basename must not count twice"
+    rich=scorer.score('crates/ignore/src/dir.rs defines WalkBuilder; walk.rs walks in parallel.',
+                      str(tmp_path),'symbol_grounding')
+    assert rich.citation_count>=3 and rich.grounding_precision==1.0
+    assert rich.score_version=='grounding-v2'
+
+
+def test_grounding_v2_does_not_credit_ambiguous_bare_names(tmp_path):
+    for name in ('a/dir.rs','b/dir.rs'):
+        path=tmp_path/name
+        path.parent.mkdir(parents=True,exist_ok=True)
+        path.write_text('fn same() {}\n')
+    from bench.harness.framework.quality_scorer import QualityScorer
+    record=QualityScorer().score('The implementation is in dir.rs.',str(tmp_path),'symbol_grounding')
+    assert record.grounded_files_count==0,"an ambiguous basename must not be credited"
+    assert record.ambiguous_references_count==1
+
+
+def test_wire_audit_requires_evidence_in_the_synthesis_turn(tmp_path):
+    from bench.harness.experiments.completion_guidance import CAUSAL_GUIDANCE
+    config={'model':'m','temperature':0,'max_output_tokens':4096,'request_options':{},'max_iterations':2}
+    tool={'type':'function','function':{'name':'read_file'}}
+    base={'model':'m','temperature':0,'max_tokens':4096,'stream':False}
+    (tmp_path/'request_01.json').write_text(json.dumps(
+        {**base,'messages':[{'role':'system','content':'neutral'},{'role':'user','content':'task'}],'tools':[tool]}))
+    synthesis=tmp_path/'request_02.json'
+    with_evidence='task\n\n## Evidence collected during the session\n\n[tool result]\nfn matched() {}\n\n'+CAUSAL_GUIDANCE
+    synthesis.write_text(json.dumps({**base,'messages':[{'role':'system','content':'neutral'},
+                                                        {'role':'user','content':with_evidence}]}))
+    assert audit_wire(tmp_path,'task','neutral',config,digest([tool]))
+    for content in ('task\n\n'+CAUSAL_GUIDANCE,
+                    'task\n\n## Evidence collected during the session\n\n(no tool evidence was collected)\n\n'+CAUSAL_GUIDANCE,
+                    with_evidence.replace(CAUSAL_GUIDANCE,'')):
+        synthesis.write_text(json.dumps({**base,'messages':[{'role':'system','content':'neutral'},
+                                                            {'role':'user','content':content}]}))
+        assert not audit_wire(tmp_path,'task','neutral',config,digest([tool])),(content[:60],)
+
+
 def test_accounting_inconsistency_is_technical_failure():
     row={'prompt_tokens':10,'completion_tokens':3,'total_tokens':13,'usage_per_request':[{'prompt_tokens':10,'completion_tokens':3,'total_tokens':13}]}
     assert accounting_valid(row)

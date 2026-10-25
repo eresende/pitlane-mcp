@@ -46,6 +46,13 @@ documented ceiling rather than an observed one. It still gates every request thr
 produces stay far below it: the largest prompt observed is 116,857 tokens. The output
 allowance is 16,384 because a synthesis turn was observed to truncate at 8,192.
 
+A hosted gateway may silently drop `role: "tool"` messages from requests that declare
+no tools. Measured: an identical history cost about 7,500 prompt tokens with tools
+declared and 32 without, and the model then invented an answer. Declaring
+`tool_choice: "none"` did not preserve them either. The reserved synthesis turn
+therefore sends the collected evidence as a flattened transcript in one user message,
+never as tool-role history, and the preflight below proves that shape is delivered.
+
 ## Setup and preflight
 
 ```sh
@@ -57,8 +64,11 @@ export CLINEPASS_API_KEY=...      # or pass --env-file pointing at a private fil
 `--api-key-env` and `--env-file` select where the key comes from; the dotenv reader
 reads one literal value, never executes the file and never logs the key. Preflight
 checks model discovery plus an actual structured call with JSON arguments and a
-follow-up request that consumes the tool result. Passing once is necessary but
-insufficient evidence of reliable task tool calling.
+follow-up request that consumes the tool result. A third probe sends a tool-free
+synthesis request and requires the reply to repeat a nonce carried only in tool
+output and the reported prompt size to stay plausible, so a gateway that drops
+evidence fails before any task run instead of after a full pilot. Passing once is
+necessary but insufficient evidence of reliable task tool calling.
 
 Model, temperature, output allowance, context declaration, reasoning policy,
 iteration budget, deadline and environment declarations live in the JSON config.
@@ -104,16 +114,18 @@ without model calls:
   --phase report --out results/skill-smoke
 ```
 
-## Fifteen-run pilot
+## Pilot (three attempts per cell by default)
 
 ```sh
 .venv/bin/python -m bench.harness.experiments.navigation_skill \
   --phase pilot --validated-smoke results/skill-smoke \
-  --capture-traces --out results/skill-pilot
+  --repetitions 3 --capture-traces --out results/skill-pilot
 ```
 
-The pilot uses exactly five `pilot_tasks`, once each under A/B/C, with fresh
-sessions and a seeded rotating arm order. Admission reads a prior smoke's technical
+The pilot uses exactly five `pilot_tasks`, once each under A/B/C per repetition, with
+fresh sessions and a seeded rotating arm order. The default is `--repetitions 3`,
+giving 45 runs; a single attempt cannot distinguish a real change from run-to-run
+variation. Admission reads a prior smoke's technical
 checks and pinned controls: model, repository, prompts, skill, endpoint, embeddings,
 MCP binary, execution sources (including the prompt-building controller) and tool
 schemas must still match, and `--capture-traces` is required for the wire audit.
@@ -126,9 +138,11 @@ no historical result is silently rescored.
 
 The pilot stops on a failed final termination, provider/protocol or tool transport
 failure, changed source/model/controls/schema, isolation or accounting failure. It
-does not stop because a completed answer is partial or wrong. One attempt per
-task/arm supports descriptive paired comparisons, not repeatability or statistical
-significance.
+does not stop because a completed answer is partial or wrong. `summary.json` reports
+every arm three ways: all runs, converged runs only (natural termination) and
+reviewed successes. `budget_exhaustion_rate` is reported separately, because a run
+cut off by the iteration budget answers under a forced synthesis turn and must not be
+compared with one that stopped by itself.
 
 ## Artifacts and interpretation
 
@@ -156,9 +170,14 @@ measured as UTF-8 bytes. Provider cached-token fields are retained per request a
 summarised when every request reports them, because consecutive same-task arms can
 otherwise differ through prompt caching rather than navigation behavior.
 
-Grounding is a reference-precision proxy, not correctness. Efficiency differences
-are not improvements when quality decreases, and a one-attempt-per-task pilot cannot
-establish repeatability or significance.
+Grounding is `grounding-v2`: distinct cited files and symbols that exist in the
+snapshot, divided by every extracted reference, then scaled by a citation floor so
+fewer than four grounded citations cannot reach 1.0. Bare file names resolve to a
+repository file only when that basename is unique; an ambiguous basename is counted
+in `ambiguous_references_count` and never credited. `grounding_precision` keeps the
+unmodified precision. It remains a reference proxy, not correctness: efficiency
+differences are not improvements when quality decreases, and no significance claim
+follows from any number of runs in one artifact.
 
 ## Validation
 
