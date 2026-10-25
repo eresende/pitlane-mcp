@@ -135,8 +135,8 @@ def require_smoke(path, identity):
         raise ValueError("Experiment requires matching smoke inputs and passing technical checks; correctness is measured separately")
 
 
-def prepare_index(snapshot, home, timeout):
-    mcp = IsolatedMCP(home, tier="all")
+def prepare_index(snapshot, home, timeout, guidance="full"):
+    mcp = IsolatedMCP(home, tier="all", guidance=guidance)
     start = time.perf_counter()
     try:
         with deadline(timeout):
@@ -194,7 +194,7 @@ def run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill,
 
 def _run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill, before, repo, trace_dir=None):
     tools = None
-    mcp = IsolatedMCP(home) if arm != "A" else None
+    mcp = IsolatedMCP(home, guidance=config.get("tool_guidance", "full")) if arm != "A" else None
     backend_type = TracedProvider if trace_dir else CompatibleProvider
     backend = backend_type(base_url, config["model"], key, temperature=config["temperature"],
                                  max_tokens=config["max_output_tokens"], request_options=config["request_options"],
@@ -278,7 +278,7 @@ def _run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill
             mcp.shutdown()
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase", choices=["smoke", "pilot", "full", "preflight", "report"], default="smoke")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
@@ -291,8 +291,13 @@ def main(argv=None):
     parser.add_argument("--out", required=True)
     parser.add_argument("--capture-traces", action="store_true", help="Save private wire bodies/responses and parsed conversations under the ignored artifact directory")
     parser.add_argument("--validated-smoke", help="Technically validated smoke artifact directory; required for pilot/full")
-    parser.add_argument("--repetitions", type=int, default=3,
-                        help="Attempts per task and arm for pilot/full (default 3); smoke always runs one")
+    parser.add_argument("--repetitions", type=int, default=5,
+                        help="Attempts per task and arm for pilot/full (default 5); smoke always runs one")
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     out = Path(args.out).resolve()
     config = json.loads(Path(args.config).read_text())
@@ -424,7 +429,7 @@ def main(argv=None):
         (out / rubric_path.name).write_bytes(rubric_path.read_bytes())
     dump(out / "run_manifest.json", manifest)
     try:
-        index = prepare_index(snapshot, home, config["setup_timeout_seconds"])
+        index = prepare_index(snapshot, home, config["setup_timeout_seconds"], config.get("tool_guidance", "full"))
     except DeadlineExceeded:
         dump(out / "index_setup.json", {"error": "setup_timeout"})
         raise SystemExit("Index preparation timed out; no task runs started")

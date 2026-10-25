@@ -106,10 +106,11 @@ def tree_digest(root):
 
 
 class IsolatedMCP(MCPExecutor):
-    def __init__(self, home, tier="default"):
+    def __init__(self, home, tier="default", guidance="full"):
         super().__init__()
         self.home = str(home)
         self.tier = tier
+        self.guidance = guidance
         self.ready = None
 
     def _build_env(self):
@@ -117,7 +118,8 @@ class IsolatedMCP(MCPExecutor):
         # MCP receives only explicit embedding settings and its own cache/config home.
         env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.home,
                "XDG_CACHE_HOME": str(Path(self.home) / ".cache"),
-               "PITLANE_MCP_TOOL_TIER": self.tier}
+               "PITLANE_MCP_TOOL_TIER": self.tier,
+               "PITLANE_MCP_TOOL_GUIDANCE": self.guidance}
         env.update({k: v for k, v in os.environ.items() if k.startswith("PITLANE_EMBED_")})
         return env
 

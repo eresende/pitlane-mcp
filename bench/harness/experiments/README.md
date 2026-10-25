@@ -114,21 +114,30 @@ without model calls:
   --phase report --out results/skill-smoke
 ```
 
-## Pilot (three attempts per cell by default)
+## Pilot (five attempts per cell by default)
 
 ```sh
 .venv/bin/python -m bench.harness.experiments.navigation_skill \
   --phase pilot --validated-smoke results/skill-smoke \
-  --repetitions 3 --capture-traces --out results/skill-pilot
+  --repetitions 5 --capture-traces --out results/skill-pilot
 ```
 
 The pilot uses exactly five `pilot_tasks`, once each under A/B/C per repetition, with
-fresh sessions and a seeded rotating arm order. The default is `--repetitions 3`,
-giving 45 runs; a single attempt cannot distinguish a real change from run-to-run
-variation. Admission reads a prior smoke's technical
+fresh sessions and a seeded rotating arm order. The default is `--repetitions 5`,
+giving 75 runs. Three attempts per cell still left within-cell spread (components
+standard deviation 1.1-1.8) larger than the between-run differences this suite is
+asked to detect, so five is the default; smoke ignores it and always runs one.
+Admission reads a prior smoke's technical
 checks and pinned controls: model, repository, prompts, skill, endpoint, embeddings,
-MCP binary, execution sources (including the prompt-building controller) and tool
-schemas must still match, and `--capture-traces` is required for the wire audit.
+MCP binary, execution sources (including the prompt-building controller), tool
+guidance mode and tool schemas must still match, and `--capture-traces` is required
+for the wire audit.
+
+`tool_guidance` in the config (`full` or `none`) controls whether the MCP server may
+attach its own `steering` hints to responses (`PITLANE_MCP_TOOL_GUIDANCE`). Setting
+`none` tests whether guidance belongs in the agent-side skill instead of in every
+tool response. It is a control field, so a smoke produced under one mode cannot
+admit a pilot run under the other.
 
 The evaluator-only [task-quality-v1 rubric](TASK_QUALITY_RUBRIC_V1.md) is frozen and
 copied/hashed before inference. It separates required components, essential

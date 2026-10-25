@@ -1,5 +1,6 @@
 """Regression tests for experimental controls, accounting and failure capture."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -7,7 +8,7 @@ import time
 import pytest
 
 from bench.harness.experiments.navigation_skill import (
-    system_prompt, schedule, validate_smoke, require_smoke, load_reviews,
+    system_prompt, schedule, validate_smoke, require_smoke, load_reviews, build_parser,
 )
 from bench.harness.experiments.provider import CompatibleProvider, ProviderError, usage_summary, read_key
 from bench.harness.experiments.tools import ExperimentTools, DeadlineExceeded, deadline, make_snapshot, tree_digest
@@ -374,3 +375,25 @@ def test_trace_capture_preserves_wire_without_headers_or_key(tmp_path, monkeypat
     assert backend.observations[0]["reasoning_content"] == "private diagnostic reasoning"
     assert "credential-sentinel-913" not in "".join(p.read_text() for p in (tmp_path / "wire").iterdir())
     assert "Authorization" not in (tmp_path / "wire/request_01.json").read_text()
+
+
+def test_isolated_mcp_forwards_tool_guidance_without_leaking_host_env(tmp_path):
+    from bench.harness.experiments.tools import IsolatedMCP
+
+    assert IsolatedMCP(tmp_path)._build_env()["PITLANE_MCP_TOOL_GUIDANCE"] == "full"
+    suppressed = IsolatedMCP(tmp_path, guidance="none")._build_env()
+    assert suppressed["PITLANE_MCP_TOOL_GUIDANCE"] == "none"
+    # The guidance switch must not become an opening for host credentials.
+    assert "CLINEPASS_API_KEY" not in suppressed
+    assert set(suppressed) <= {"PATH", "HOME", "XDG_CACHE_HOME", "PITLANE_MCP_TOOL_TIER",
+                               "PITLANE_MCP_TOOL_GUIDANCE"} | {
+        k for k in os.environ if k.startswith("PITLANE_EMBED_")}
+
+
+def test_repetitions_default_to_five_and_smoke_stays_single():
+    assert build_parser().parse_args(["--out", "x"]).repetitions == 5
+    # Smoke ignores the default so a gate run stays cheap.
+    order = schedule(["t1", "t2"], 1, 7)
+    assert len(order) == 6 and len({(t, a, r) for t, a, r in order}) == 6
+    assert sorted(r for _, _, r in order) == [1] * 6
+
