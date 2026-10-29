@@ -85,7 +85,7 @@ class BaselineExecutor:
                         "path": {
                             "type": "string",
                             "description": (
-                                "Directory path relative to repo root to search in. "
+                                "File or directory path relative to repo root to search in. "
                                 "Defaults to the repository root."
                             ),
                         },
@@ -169,42 +169,47 @@ class BaselineExecutor:
         return content
 
     def _grep_search(self, arguments: dict) -> str:
-        """Regex search across files, returning matching lines."""
+        """Regex search in a file or directory, returning matching lines."""
         pattern = arguments["pattern"]
         search_path = arguments.get("path", "")
-        if search_path:
-            # Resolve and jail to repo root — prevent escaping to / or arbitrary paths
-            candidate = (self._repo_path / search_path).resolve()  # type: ignore[operator]
-            repo_resolved = self._repo_path.resolve()  # type: ignore[union-attr]
-            try:
-                candidate.relative_to(repo_resolved)
-                base = candidate
-            except ValueError:
-                # Path escapes repo root — fall back to repo root
-                base = repo_resolved
-        else:
-            base = self._repo_path  # type: ignore[assignment]
+        repo_resolved = self._repo_path.resolve()  # type: ignore[union-attr]
+        base = (repo_resolved / search_path).resolve()
+        if not base.is_relative_to(repo_resolved):
+            raise ValueError("Search path is outside the repository")
+        # stat raises for missing paths and invalid intermediate components. Neither
+        # should be silently reported as a successful search with no matches.
+        base.stat()
+        single_file = base.is_file()
+        if not single_file and not base.is_dir():
+            raise ValueError("Search path must be a regular file or directory")
 
         compiled = re.compile(pattern)
         matches: list[str] = []
         _MAX_FILE_BYTES = 512 * 1024  # skip files larger than 512 KB
         _MAX_MATCHES = 200  # cap results to keep context window manageable
 
-        for root, _dirs, files in os.walk(base):
-            for fname in sorted(files):
-                fpath = Path(root) / fname
-                try:
-                    if fpath.stat().st_size > _MAX_FILE_BYTES:
-                        continue
-                    text = fpath.read_text(encoding="utf-8", errors="replace")
-                except (OSError, UnicodeDecodeError):
+        paths = (base,) if single_file else (
+            Path(root) / fname
+            for root, _dirs, files in os.walk(base)
+            for fname in sorted(files)
+        )
+        for fpath in paths:
+            try:
+                if fpath.stat().st_size > _MAX_FILE_BYTES:
+                    if single_file:
+                        raise ValueError("Search file exceeds the 512 KiB size limit")
                     continue
-                for line_no, line in enumerate(text.splitlines(), start=1):
-                    if compiled.search(line):
-                        rel = fpath.relative_to(self._repo_path)  # type: ignore[arg-type]
-                        matches.append(f"{rel}:{line_no}:{line}")
-                        if len(matches) >= _MAX_MATCHES:
-                            return "\n".join(matches) + f"\n[truncated: more than {_MAX_MATCHES} matches]"
+                text = fpath.read_text(encoding="utf-8", errors="replace")
+            except (OSError, UnicodeDecodeError):
+                if single_file:
+                    raise
+                continue
+            for line_no, line in enumerate(text.splitlines(), start=1):
+                if compiled.search(line):
+                    rel = fpath.relative_to(repo_resolved)
+                    matches.append(f"{rel}:{line_no}:{line}")
+                    if len(matches) >= _MAX_MATCHES:
+                        return "\n".join(matches) + f"\n[truncated: more than {_MAX_MATCHES} matches]"
 
         return "\n".join(matches) if matches else "No matches found."
 
