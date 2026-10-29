@@ -279,7 +279,10 @@ pub struct SearchContentRequest {
     pub project: String,
     /// Literal text or regex pattern to search for inside source, Markdown, JSON, YAML, or TOML files
     pub query: String,
-    /// Treat query as a regular expression (default: false)
+    /// Treat the query as a regular expression.
+    /// `true` forces regex mode and rejects patterns longer than 512 characters.
+    /// `false` forces a literal search.
+    /// When omitted, queries containing `.*` or `(?:` are searched as regular expressions unless the pattern is longer than 512 characters, is invalid, or can match the empty string — those fall back to a literal search. `|` and `\b` do not turn regex mode on by themselves (`a|b`, `|x|`, `C:\bin`).
     pub regex: Option<bool>,
     /// Case-sensitive match (default: false)
     pub case_sensitive: Option<bool>,
