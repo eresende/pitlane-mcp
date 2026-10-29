@@ -13,7 +13,9 @@ use crate::indexer::{
 };
 use crate::path_policy::{read_regular_file, regular_file_metadata, resolve_project_path};
 use crate::tools::index_project::load_project_index;
-use crate::tools::steering::{attach_steering, build_steering, take_fallback_candidates};
+use crate::tools::steering::{
+    attach_steering, build_steering, guidance_enabled, take_fallback_candidates,
+};
 
 const DEFAULT_LIMIT: usize = 8;
 const MAX_CONTEXT_LINES: usize = 5;
@@ -199,7 +201,7 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
         ));
     }
     let (zero_next_step, zero_why) = zero_result_copy(regex, &params.query, auto_regex_over_length);
-    response["guidance"] = json!({
+    let mut guidance = json!({
         "next_step": if matches.is_empty() {
             zero_next_step
         } else {
@@ -208,7 +210,7 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
         "avoid": "Avoid shell grep when search_content can search the indexed source files directly."
     });
     if auto_regex_over_length {
-        response["guidance"]["regex_fallback"] = json!(format!(
+        guidance["regex_fallback"] = json!(format!(
             "Auto-detected regular expressions longer than {MAX_REGEX_PATTERN_LEN} characters are searched as literal text. Narrow the pattern and pass regex: true to force regex mode."
         ));
     }
@@ -235,7 +237,7 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
             )
         });
         if document {
-            response["guidance"]["next_step"] = json!("Use read_code_unit with file_path and line_start/line_end to inspect the match, or omit the line bounds for a heading/key outline.");
+            guidance["next_step"] = json!("Use read_code_unit with file_path and line_start/line_end to inspect the match, or omit the line bounds for a heading/key outline.");
         }
         build_steering(
             0.86,
@@ -255,6 +257,9 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
         )
     };
     attach_steering(&mut response, steering);
+    if guidance_enabled() {
+        response["guidance"] = guidance;
+    }
     Ok(response)
 }
 
