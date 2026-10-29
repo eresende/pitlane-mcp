@@ -93,3 +93,17 @@ Follow the branch, commit, and pull request naming rules in `docs/development.md
 # Destructive actions
 
 Ask the user for confirmation before any destructive or hard-to-reverse action, even when it was part of an approved plan. Examples include deleting branches (local or remote), deleting files or issues, force-pushes, and closing issues or PRs. Read-only checks and ordinary commits/pushes of approved work do not need confirmation.
+
+# Cursor Cloud specific instructions
+
+Rust stable, including rustfmt and clippy, is installed with rustup under `/usr/local/cargo`. Login shells load `CARGO_HOME=/usr/local/cargo` and `RUSTUP_HOME=/usr/local/rustup` from `/etc/profile.d/rust.sh`. Refresh dependencies with `cargo fetch --locked`.
+
+`pitlane` and `pitlane-mcp` are local binaries. Nothing needs to stay running for development. Semantic search runs only when both `PITLANE_EMBED_URL` and `PITLANE_EMBED_MODEL` are set; the default lexical index and MCP server do not need an embedding service.
+
+Canonical checks, also listed in `docs/development.md` and CI:
+
+- `cargo fmt --check`
+- `cargo test`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+
+`cargo test --test analyze_impact_baseline -- --ignored` needs the corpora from `bash bench/setup.sh`. A normal `cargo test` compiles that test and skips it.
