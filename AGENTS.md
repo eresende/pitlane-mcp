@@ -93,3 +93,15 @@ Follow the branch, commit, and pull request naming rules in `docs/development.md
 # Destructive actions
 
 Ask the user for confirmation before any destructive or hard-to-reverse action, even when it was part of an approved plan. Examples include deleting branches (local or remote), deleting files or issues, force-pushes, and closing issues or PRs. Read-only checks and ordinary commits/pushes of approved work do not need confirmation.
+
+# Cursor Cloud specific instructions
+
+`rust-toolchain.toml` pins `channel = "stable"` with the rustfmt and clippy components. Older defaults such as rustc 1.83 cannot build this lockfile (`time-macros` 0.2.27 needs edition 2024). CI installs that same channel with `dtolnay/rust-toolchain@stable`; the workflow in `.github/workflows/ci.yml` is unchanged.
+
+`/usr/local/cargo`, `CARGO_HOME`, `RUSTUP_HOME`, and `/etc/profile.d/rust.sh` describe the Cursor Cloud VM image, not this project. On that image, Rust is installed with rustup under `/usr/local/cargo`, and login shells load `CARGO_HOME=/usr/local/cargo` and `RUSTUP_HOME=/usr/local/rustup` from `/etc/profile.d/rust.sh`. Refresh dependencies with `cargo fetch --locked`.
+
+`pitlane` and `pitlane-mcp` are local binaries. Nothing needs to stay running for development.
+
+Semantic search runs only when both `PITLANE_EMBED_URL` and `PITLANE_EMBED_MODEL` are set; see `docs/configuration.md` and `SEMANTIC_SEARCH.md`.
+
+Checks are defined in `.github/workflows/ci.yml`. Three tests are `#[ignore]`d: the `analyze_impact_baseline` test (see `docs/development.md` and `tests/baselines/README.md`) plus two env-var tests in `src/main.rs` ignored because env mutation races with parallel tests.
