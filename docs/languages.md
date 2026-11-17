@@ -29,7 +29,8 @@ This page describes the language coverage exposed by `pitlane-mcp`.
 ## Notes
 
 - TypeScript declaration files (`.d.ts`, `.d.mts`, `.d.cts`) are skipped automatically.
-- C/C++ headers: `.h` is language-neutral. It is classified as C++ when the project contains C++ sources (`.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.hh`, `.ipp`, `.tpp`, `.inl`) and as C otherwise; with no evidence it stays C. The `language` filter follows the same rule, so `language=cpp` includes `.h` in a C++ project and `language=c` includes it in a C project. Pure C projects keep C header classification.
+- C/C++ headers: `.h` is language-neutral. It is classified as C++ when the project contains C++ sources (`.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.hh`, `.ipp`, `.tpp`, `.inl`, `.cu`, `.cuh`) anywhere in the tree, and as C otherwise; with no evidence it stays C. Excluded directories (`vendor/`, `target/`, gitignored paths) do not count as evidence. The `language` filter follows the same rule, so `language=cpp` includes `.h` in a C++ project and `language=c` includes it in a C project. Pure C projects keep C header classification.
+- The rule is applied consistently by indexing, incremental re-indexing (adding the first or removing the last C++ source reclassifies existing headers), and the `language` filters. Persisted indexes record the rule version and are invalidated when it changes.
 - CUDA: `.cu`/`.cuh` are indexed syntactically as C++ only. This is not CUDA semantic support — no device/host distinction, kernel launch syntax or CUDA headers are understood.
 - Svelte indexing covers embedded `<script>` and `<script lang="ts">` blocks only. Template and style sections are not indexed.
 - Coverage is intentionally symbol-oriented rather than full semantic compilation. The goal is practical navigation for agents, not a full compiler front-end.

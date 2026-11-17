@@ -46,6 +46,11 @@ pub struct IndexMeta {
     /// predates revision tracking; the next write assigns revision 1.
     #[serde(default)]
     pub revision: u64,
+    /// Version of the C/C++ header classification rules used when indexing
+    /// (see `indexer::HEADER_CLASSIFICATION_VERSION`). A mismatch invalidates
+    /// the index: `.h` can produce different symbols under different rules.
+    #[serde(default)]
+    pub header_classification: u32,
     /// Bounded per-revision change log backing `get_index_changes` (issue #82).
     /// Oldest entries are dropped as new revisions are recorded.
     #[serde(default)]
@@ -127,6 +132,7 @@ impl IndexMeta {
             source_file_count: 0,
             effective_excludes: Vec::new(),
             revision: 0,
+            header_classification: crate::indexer::HEADER_CLASSIFICATION_VERSION,
             change_log: Vec::new(),
             repo_profile: RepoProfile::default(),
         }

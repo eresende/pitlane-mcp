@@ -398,3 +398,37 @@ fn symlinks_are_not_followed() {
         .iter()
         .any(|o| o["file"] == "link.rs"));
 }
+
+#[test]
+fn untracked_cpp_in_checkout_does_not_reclassify_historical_headers() {
+    // Review finding 4: evidence for a revision must come from that
+    // revision's snapshot, not from the working tree.
+    let dir = TempDir::new().unwrap();
+    git(dir.path(), &["init", "-q"]).unwrap();
+    write(&dir, "legacy.c", "int legacy(void) { return 1; }\n");
+    write(&dir, "shared.h", "struct P { int x; };\n");
+    commit(&dir);
+    write(&dir, "lib.c", "int more(void) { return 2; }\n");
+    commit(&dir);
+
+    let clean = run(&dir, "HEAD~1", false);
+
+    // An untracked C++ source appears in the checkout only.
+    write(&dir, "untracked.cpp", "struct Q { int y; };\n");
+    let polluted = run(&dir, "HEAD~1", false);
+
+    let header_symbols = |v: &Value| -> Vec<String> {
+        v["changed_symbols"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["file"].as_str().unwrap_or("").ends_with("shared.h"))
+            .map(|s| s["language"].as_str().unwrap_or("").to_string())
+            .collect()
+    };
+    assert_eq!(
+        header_symbols(&clean),
+        header_symbols(&polluted),
+        "an untracked .cpp must not change how committed revisions are parsed"
+    );
+}

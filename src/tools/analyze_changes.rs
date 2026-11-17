@@ -193,18 +193,26 @@ fn snapshot_index(
     excludes: &globset::GlobSet,
 ) -> Result<SymbolIndex> {
     let registry = build_default_registry();
+    // Evidence must come from this revision's snapshot, never the checkout:
+    // an untracked `.cpp` in the working tree must not change how headers in a
+    // committed C-only revision are parsed. Exclusions are applied so a
+    // vendored file cannot flip the classification either.
     let extra = indexer::extra_excluded_dir_names();
     let present_extensions: Vec<String> = {
-        let mut exts: Vec<String> = indexer::project_extensions(root);
+        let mut exts: Vec<String> = Vec::new();
         for relative in snapshot.files.keys() {
+            if indexer::path_is_excluded(&root.join(relative), root, excludes, &extra) {
+                continue;
+            }
             if let Some(ext) = relative.extension().and_then(|e| e.to_str()) {
-                if !exts.iter().any(|known| known == ext) {
-                    exts.push(ext.to_string());
-                }
+                exts.push(ext.to_string());
             }
         }
+        exts.sort();
+        exts.dedup();
         exts
     };
+    let extra = indexer::extra_excluded_dir_names();
     let mut index = SymbolIndex::new();
     for (relative, source) in &snapshot.files {
         let absolute = root.join(relative);

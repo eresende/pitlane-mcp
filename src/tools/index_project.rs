@@ -612,6 +612,12 @@ pub(crate) fn is_index_up_to_date(
     if meta.version != 6 {
         return false;
     }
+    // Indexes built before the header classifier (or under a different one)
+    // can hold C symbols for files that now parse as C++. The mtime check
+    // cannot see that, so invalidate on the rule version instead.
+    if meta.header_classification != crate::indexer::HEADER_CLASSIFICATION_VERSION {
+        return false;
+    }
 
     for (path_str, stored_mtime) in &meta.file_mtimes {
         let path = Path::new(path_str);
