@@ -194,6 +194,17 @@ fn snapshot_index(
 ) -> Result<SymbolIndex> {
     let registry = build_default_registry();
     let extra = indexer::extra_excluded_dir_names();
+    let present_extensions: Vec<String> = {
+        let mut exts: Vec<String> = indexer::project_extensions(root);
+        for relative in snapshot.files.keys() {
+            if let Some(ext) = relative.extension().and_then(|e| e.to_str()) {
+                if !exts.iter().any(|known| known == ext) {
+                    exts.push(ext.to_string());
+                }
+            }
+        }
+        exts
+    };
     let mut index = SymbolIndex::new();
     for (relative, source) in &snapshot.files {
         let absolute = root.join(relative);
@@ -204,10 +215,21 @@ fn snapshot_index(
         {
             continue;
         }
-        let Some(parser) = registry.iter().find(|p| p.extensions().contains(&ext)) else {
+        // Headers are language-neutral: pick the C/C++ parser and grammar
+        // from project evidence instead of letting `.h` always mean C.
+        let c_family = indexer::c_family_is_cpp(ext, &present_extensions);
+        let lookup_ext = match c_family {
+            Some(true) => "cpp",
+            Some(false) => "c",
+            None => ext,
+        };
+        let Some(parser) = registry
+            .iter()
+            .find(|p| p.extensions().contains(&lookup_ext) || p.extensions().contains(&ext))
+        else {
             continue;
         };
-        let Some(language) = indexer::tree_sitter_language_for_extension(ext) else {
+        let Some(language) = indexer::tree_sitter_language_for_extension(lookup_ext) else {
             continue;
         };
         let mut ts = tree_sitter::Parser::new();

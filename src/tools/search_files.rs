@@ -9,6 +9,7 @@ use walkdir::{DirEntry, WalkDir};
 use crate::error::ToolError;
 use crate::index::format::load_project_meta;
 use crate::index::repo_profile::{archetype_label, role_boost_for_path, role_by_path, role_label};
+use crate::indexer::c_family_extensions;
 use crate::indexer::{
     default_exclude_patterns, extra_excluded_dir_names, is_excluded_dir_name_with_custom,
     load_gitignore_patterns,
@@ -51,7 +52,10 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
     let language_filter = params
         .language
         .as_deref()
-        .map(parse_language_filter)
+        .map(|language| {
+            let present = crate::indexer::project_extensions(&canonical);
+            parse_language_filter(language, &present)
+        })
         .transpose()?;
     let scope_glob = params
         .file
@@ -74,7 +78,7 @@ pub async fn search_files(params: SearchFilesParams) -> anyhow::Result<Value> {
         &canonical,
         &exclusions,
         scope_glob.as_ref(),
-        language_filter,
+        language_filter.as_deref(),
         &matcher,
         profile.as_ref(),
         &params.query,
@@ -338,30 +342,33 @@ fn collect_files(
     Ok(files)
 }
 
-fn parse_language_filter(language: &str) -> anyhow::Result<&'static [&'static str]> {
+fn parse_language_filter(
+    language: &str,
+    present_extensions: &[String],
+) -> anyhow::Result<Vec<&'static str>> {
     if super::documents::is_document_language(Some(language)) {
-        return super::search_content::parse_language_filter(language);
+        return super::search_content::parse_language_filter(language, present_extensions);
     }
     match language.to_lowercase().as_str() {
-        "rust" => Ok(&["rs"]),
-        "python" => Ok(&["py"]),
-        "javascript" | "js" => Ok(&["js", "jsx", "mjs", "cjs"]),
-        "typescript" | "ts" => Ok(&["ts", "tsx", "mts", "cts"]),
-        "svelte" => Ok(&["svelte"]),
-        "c" => Ok(&["c", "h"]),
-        "cpp" | "c++" => Ok(&["cpp", "cc", "cxx", "hpp", "hxx"]),
-        "go" => Ok(&["go"]),
-        "java" => Ok(&["java"]),
-        "bash" | "sh" => Ok(&["sh", "bash"]),
-        "csharp" | "c#" | "cs" => Ok(&["cs"]),
-        "ruby" | "rb" => Ok(&["rb"]),
-        "swift" => Ok(&["swift"]),
-        "objc" | "objective-c" | "objectivec" => Ok(&["m", "mm"]),
-        "php" => Ok(&["php"]),
-        "zig" => Ok(&["zig"]),
-        "kotlin" | "kt" => Ok(&["kt", "kts"]),
-        "luau" | "lua" => Ok(&["luau", "lua"]),
-        "solidity" | "sol" => Ok(&["sol"]),
+        "rust" => Ok(vec!["rs"]),
+        "python" => Ok(vec!["py"]),
+        "javascript" | "js" => Ok(vec!["js", "jsx", "mjs", "cjs"]),
+        "typescript" | "ts" => Ok(vec!["ts", "tsx", "mts", "cts"]),
+        "svelte" => Ok(vec!["svelte"]),
+        "c" => Ok(c_family_extensions(false, present_extensions)),
+        "cpp" | "c++" => Ok(c_family_extensions(true, present_extensions)),
+        "go" => Ok(vec!["go"]),
+        "java" => Ok(vec!["java"]),
+        "bash" | "sh" => Ok(vec!["sh", "bash"]),
+        "csharp" | "c#" | "cs" => Ok(vec!["cs"]),
+        "ruby" | "rb" => Ok(vec!["rb"]),
+        "swift" => Ok(vec!["swift"]),
+        "objc" | "objective-c" | "objectivec" => Ok(vec!["m", "mm"]),
+        "php" => Ok(vec!["php"]),
+        "zig" => Ok(vec!["zig"]),
+        "kotlin" | "kt" => Ok(vec!["kt", "kts"]),
+        "luau" | "lua" => Ok(vec!["luau", "lua"]),
+        "solidity" | "sol" => Ok(vec!["sol"]),
         other => Err(ToolError::InvalidArgument {
             param: "language".to_string(),
             message: format!(

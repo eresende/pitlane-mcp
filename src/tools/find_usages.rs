@@ -7,6 +7,7 @@ use walkdir::WalkDir;
 
 use crate::error::ToolError;
 use crate::indexer::svelte::{collect_script_blocks, ScriptBlockLanguage};
+use crate::indexer::{c_family_is_cpp, project_extensions};
 use crate::indexer::{
     is_supported_extension, tree_sitter_language_for_extension, warn_walkdir_error,
 };
@@ -37,6 +38,7 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
 
     let symbol_name = sym.name.clone();
     let project_path = resolve_project_path(&params.project)?;
+    let present_extensions = project_extensions(&project_path);
 
     // Build scope glob set if provided
     let scope_set: Option<GlobSet> = params.scope.as_deref().map(|scope| {
@@ -73,7 +75,13 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
 
     for path in indexed_files {
         searched_files.insert(path.clone());
-        append_usages_for_file(&path, &project_path, &symbol_name, &mut usages);
+        append_usages_for_file(
+            &path,
+            &project_path,
+            &symbol_name,
+            &present_extensions,
+            &mut usages,
+        );
         if usages.len() >= max_collect {
             break;
         }
@@ -99,7 +107,13 @@ pub async fn find_usages(params: FindUsagesParams) -> anyhow::Result<Value> {
             if searched_files.contains(path) {
                 continue;
             }
-            append_usages_for_file(path, &project_path, &symbol_name, &mut usages);
+            append_usages_for_file(
+                path,
+                &project_path,
+                &symbol_name,
+                &present_extensions,
+                &mut usages,
+            );
             if usages.len() >= max_collect {
                 break;
             }
@@ -149,9 +163,10 @@ fn append_usages_for_file(
     path: &Path,
     project_path: &Path,
     symbol_name: &str,
+    present_extensions: &[String],
     usages: &mut Vec<Value>,
 ) {
-    let hits = match search_file_ast(path, symbol_name) {
+    let hits = match search_file_ast_in(path, symbol_name, present_extensions) {
         Ok(hits) => hits,
         Err(_) => return,
     };
@@ -171,7 +186,18 @@ fn append_usages_for_file(
 /// Searches `path` for AST nodes whose text equals `name`. Only true identifier
 /// nodes are matched — string literals, comments, and substrings of longer
 /// identifiers are never returned.
+#[cfg(test)]
 fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize, String)>> {
+    search_file_ast_in(path, name, &[])
+}
+
+/// Like [`search_file_ast`], but classifies C/C++ headers with the project's
+/// extension evidence instead of defaulting `.h` to C.
+fn search_file_ast_in(
+    path: &Path,
+    name: &str,
+    present_extensions: &[String],
+) -> anyhow::Result<Vec<(usize, usize, String)>> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     // Skip oversized files (same guard as the indexer)
@@ -199,7 +225,15 @@ fn search_file_ast(path: &Path, name: &str) -> anyhow::Result<Vec<(usize, usize,
         return search_svelte_file_ast(&source, &lines, name);
     }
 
-    let ts_lang = match tree_sitter_language_for_extension(ext) {
+    // Headers are language-neutral: classify C/C++-family files from project
+    // evidence so a C++ header is not parsed with the C grammar. Every other
+    // extension keeps the grammar registered for it.
+    let lookup_ext = match c_family_is_cpp(ext, present_extensions) {
+        Some(true) => "cpp",
+        Some(false) => "c",
+        None => ext,
+    };
+    let ts_lang = match tree_sitter_language_for_extension(lookup_ext) {
         Some(lang) => lang,
         None => return Ok(vec![]),
     };

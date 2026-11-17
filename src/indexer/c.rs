@@ -12,7 +12,7 @@ impl LanguageParser for CParser {
     }
 
     fn extensions(&self) -> &[&str] {
-        &["c", "h"]
+        crate::indexer::C_SOURCE_EXTENSIONS
     }
 
     fn extract_symbols(&self, source: &[u8], tree: &Tree, path: &std::path::Path) -> Vec<Symbol> {
