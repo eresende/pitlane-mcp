@@ -20,8 +20,8 @@ pub mod swift;
 pub mod typescript;
 pub mod zig;
 
-use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -52,9 +52,22 @@ pub struct Indexer {
 impl Indexer {
     pub fn new(parsers: Vec<Box<dyn LanguageParser>>) -> Self {
         let mut ext_map = HashMap::new();
+        let mut c_parser_idx = None;
         for (i, parser) in parsers.iter().enumerate() {
+            if parser.language() == language::Language::C {
+                c_parser_idx = Some(i);
+            }
             for ext in parser.extensions() {
                 ext_map.insert(ext.to_string(), i);
+            }
+        }
+        // Ambiguous C/C++ headers are registered against the C parser as the
+        // historical default. The language for a given project is decided from
+        // project evidence at parse time (see `c_family_is_cpp`), so this entry
+        // only guarantees the file is eligible at all.
+        if let Some(idx) = c_parser_idx {
+            for ext in C_FAMILY_HEADER_EXTENSIONS {
+                ext_map.entry(ext.to_string()).or_insert(idx);
             }
         }
         Self { parsers, ext_map }
@@ -99,75 +112,11 @@ impl Indexer {
         on_phase3_progress: Option<&(dyn Fn(Phase3Progress) + Send + Sync)>,
     ) -> anyhow::Result<(SymbolIndex, usize)> {
         let exclude_set = Self::build_exclude_set(exclude_patterns)?;
-        let extra_excluded_dirs = extra_excluded_dir_names();
-
-        // Phase 1 — collect eligible file paths (sequential: WalkDir is not parallel).
-        let eligible: Vec<std::path::PathBuf> = WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                let path = e.path();
-                let rel = match path.strip_prefix(root) {
-                    Ok(r) => r,
-                    Err(_) => return true,
-                };
-                if rel == Path::new("") {
-                    return true;
-                }
-                let rel_str = rel.to_string_lossy();
-                if exclude_set.is_match(rel_str.as_ref()) {
-                    return false;
-                }
-                if e.file_type().is_dir() {
-                    if exclude_set.is_match(format!("{}/", rel_str).as_str()) {
-                        return false;
-                    }
-                    if rel.components().any(|c| {
-                        c.as_os_str().to_str().is_some_and(|name| {
-                            is_excluded_dir_name_with_custom(name, &extra_excluded_dirs)
-                        })
-                    }) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .filter_map(|entry| match entry {
-                Ok(entry) => Some(entry),
-                Err(err) => {
-                    warn_walkdir_error(root, &err, "index_project");
-                    None
-                }
-            })
-            .filter(|e| {
-                let path = e.path();
-                if !e.file_type().is_file() {
-                    return false;
-                }
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !self.ext_map.contains_key(ext) {
-                    return false;
-                }
-                if is_declaration_file(path) {
-                    return false;
-                }
-                let rel = path.strip_prefix(root).unwrap_or(path);
-                let rel_str = rel.to_string_lossy();
-                if exclude_set.is_match(rel_str.as_ref()) || exclude_set.is_match(path) {
-                    return false;
-                }
-                let Some(metadata) = regular_file_metadata(path).ok().flatten() else {
-                    return false;
-                };
-                if metadata.len() > MAX_FILE_BYTES {
-                    warn!(file = %rel_str, limit = MAX_FILE_BYTES, "skipping oversized file");
-                    return false;
-                }
-                true
-            })
-            .take(max_files.saturating_add(1))
-            .map(|e| e.into_path())
-            .collect();
+        let eligible: Vec<_> = eligible_files(root, &exclude_set, |ext| {
+            self.ext_map.contains_key(ext) || c_family_is_cpp(ext, [] as [&str; 0]).is_some()
+        })
+        .take(max_files.saturating_add(1))
+        .collect();
 
         if eligible.len() > max_files {
             return Err(crate::error::ToolError::FileLimitExceeded {
@@ -177,6 +126,7 @@ impl Indexer {
             .into());
         }
 
+        let present_extensions = file_extensions(&eligible);
         let total_files = eligible.len();
 
         // Notify: Phase 1 complete — we now know the total file count.
@@ -209,7 +159,9 @@ impl Indexer {
             eligible
                 .par_iter()
                 .filter_map(|path| {
-                    let result = self.parse_file(path, root).ok();
+                    let result = self
+                        .parse_file_with_extensions(path, root, &present_extensions)
+                        .ok();
                     if let Some(cb) = on_progress {
                         let prev = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let current = prev + 1;
@@ -276,6 +228,21 @@ impl Indexer {
         root: &Path,
         index: &mut SymbolIndex,
     ) -> anyhow::Result<()> {
+        let present_extensions = if file_path.extension().and_then(|e| e.to_str()) == Some("h") {
+            project_extensions(root)
+        } else {
+            Vec::new()
+        };
+        self.reindex_file_with_extensions(file_path, root, index, &present_extensions)
+    }
+
+    fn reindex_file_with_extensions(
+        &self,
+        file_path: &Path,
+        root: &Path,
+        index: &mut SymbolIndex,
+        present_extensions: &[String],
+    ) -> anyhow::Result<()> {
         // Remove existing symbols for this file
         let abs_path = if file_path.is_absolute() {
             file_path.to_path_buf()
@@ -287,7 +254,7 @@ impl Indexer {
 
         // Re-parse and insert
         if abs_path.exists() {
-            let symbols = self.parse_file(&abs_path, root)?;
+            let symbols = self.parse_file_with_extensions(&abs_path, root, present_extensions)?;
             for symbol in symbols {
                 index.insert(symbol);
             }
@@ -306,15 +273,77 @@ impl Indexer {
         root: &Path,
         index: &mut SymbolIndex,
     ) {
+        let exclude_set = match Self::build_exclude_set(&default_index_exclude_patterns(root)) {
+            Ok(set) => set,
+            Err(err) => {
+                warn!(%err, "invalid exclusion patterns; using no header evidence");
+                return self.reindex_files_with_extensions(paths, root, index, &[]);
+            }
+        };
+        let mut paths = paths.clone();
+        let extensions =
+            Self::prepare_header_reclassification(&mut paths, root, &exclude_set, index);
+        self.reindex_files_with_extensions(&paths, root, index, &extensions);
+    }
+
+    /// Include every eligible header when a batch changes the project's C++
+    /// evidence. Headers that yielded zero symbols are absent from by_file.
+    pub(crate) fn prepare_header_reclassification(
+        paths: &mut HashSet<PathBuf>,
+        root: &Path,
+        exclude_set: &GlobSet,
+        index: &SymbolIndex,
+    ) -> Vec<String> {
+        let mut evidence_touched = false;
+        let mut header_touched = false;
+        for ext in paths.iter().filter_map(|path| path.extension()?.to_str()) {
+            evidence_touched |= CPP_EVIDENCE_EXTENSIONS.contains(&ext);
+            header_touched |= C_FAMILY_HEADER_EXTENSIONS.contains(&ext);
+        }
+        if !evidence_touched && !header_touched {
+            return Vec::new();
+        }
+
+        let files: Vec<_> = eligible_files(root, exclude_set, |ext| {
+            CPP_EVIDENCE_EXTENSIONS.contains(&ext) || C_FAMILY_HEADER_EXTENSIONS.contains(&ext)
+        })
+        .collect();
+        let extensions = file_extensions(&files);
+        if evidence_touched
+            && header_classification_is_cpp(index) != Some(has_cpp_evidence(&extensions))
+        {
+            paths.extend(
+                files
+                    .into_iter()
+                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("h")),
+            );
+        }
+        extensions
+    }
+
+    pub(crate) fn reindex_files_with_extensions(
+        &self,
+        paths: &HashSet<PathBuf>,
+        root: &Path,
+        index: &mut SymbolIndex,
+        extensions: &[String],
+    ) {
         for path in paths {
-            if let Err(e) = self.reindex_file(path, root, index) {
+            if let Err(e) = self.reindex_file_with_extensions(path, root, index, extensions) {
                 tracing::warn!(file = %path.display(), error = %e, "reindex_file failed");
             }
         }
         index.rebuild_navigation_graph();
     }
 
-    fn parse_file(&self, path: &Path, root: &Path) -> anyhow::Result<Vec<language::Symbol>> {
+    /// Parses one file, using `present_extensions` as project evidence for the
+    /// C/C++ header classification (see [`c_family_is_cpp`]).
+    fn parse_file_with_extensions(
+        &self,
+        path: &Path,
+        root: &Path,
+        present_extensions: &[String],
+    ) -> anyhow::Result<Vec<language::Symbol>> {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         // Skip TypeScript declaration files (*.d.ts, *.d.mts, *.d.cts).
@@ -324,9 +353,22 @@ impl Indexer {
             return Ok(vec![]);
         }
 
-        let parser_idx = match self.ext_map.get(ext) {
+        // Headers belong to the C/C++ family but not to one language: resolve
+        // the effective extension from project evidence before picking both the
+        // symbol extractor and the tree-sitter grammar, so a `.h` in a C++
+        // project is parsed and extracted as C++.
+        let effective_ext = match c_family_is_cpp(ext, present_extensions) {
+            Some(true) => "cpp",
+            Some(false) => "c",
+            None => ext,
+        };
+
+        let parser_idx = match self.ext_map.get(effective_ext) {
             Some(idx) => *idx,
-            None => return Ok(vec![]),
+            None => match self.ext_map.get(ext) {
+                Some(idx) => *idx,
+                None => return Ok(vec![]),
+            },
         };
 
         // Guard against symlinks and oversized files (e.g. minified bundles).
@@ -344,7 +386,7 @@ impl Indexer {
         let lang_parser = &self.parsers[parser_idx];
 
         let mut ts_parser = tree_sitter::Parser::new();
-        let ts_lang = match tree_sitter_language_for_extension(ext) {
+        let ts_lang = match tree_sitter_language_for_extension(effective_ext) {
             Some(lang) => lang,
             None => return Ok(vec![]),
         };
@@ -443,9 +485,36 @@ pub fn is_declaration_file(path: &Path) -> bool {
             .is_some_and(|s| s.ends_with(".d"))
 }
 
+/// File extension sets shared by every consumer of C/C++ classification:
+/// the extension registry, the language filters, and the header heuristic.
+pub const CPP_SOURCE_EXTENSIONS: &[&str] =
+    &["cpp", "cc", "cxx", "hpp", "hxx", "hh", "ipp", "tpp", "inl"];
+pub const C_SOURCE_EXTENSIONS: &[&str] = &["c"];
+/// Header extensions whose language is genuinely ambiguous.
+pub const C_FAMILY_HEADER_EXTENSIONS: &[&str] = &["h"];
+/// CUDA. Indexed syntactically as C/C++, never as CUDA semantics.
+pub const CUDA_EXTENSIONS: &[&str] = &["cu", "cuh"];
+/// Extensions that count as C++ evidence for ambiguous headers.
+pub const CPP_EVIDENCE_EXTENSIONS: &[&str] = &[
+    "cpp", "cc", "cxx", "hpp", "hxx", "hh", "ipp", "tpp", "inl", "cu", "cuh",
+];
+
+fn has_cpp_evidence<S: AsRef<str>>(present_extensions: impl IntoIterator<Item = S>) -> bool {
+    present_extensions
+        .into_iter()
+        .any(|e| CPP_EVIDENCE_EXTENSIONS.contains(&e.as_ref()))
+}
+
 /// Returns true if `ext` is a file extension supported by the indexer.
 /// Single source of truth — update this when adding a new language.
 pub fn is_supported_extension(ext: &str) -> bool {
+    if CPP_SOURCE_EXTENSIONS.contains(&ext)
+        || C_SOURCE_EXTENSIONS.contains(&ext)
+        || C_FAMILY_HEADER_EXTENSIONS.contains(&ext)
+        || CUDA_EXTENSIONS.contains(&ext)
+    {
+        return true;
+    }
     matches!(
         ext,
         "rs" | "py"
@@ -458,13 +527,6 @@ pub fn is_supported_extension(ext: &str) -> bool {
             | "mts"
             | "cts"
             | "svelte"
-            | "c"
-            | "h"
-            | "cpp"
-            | "cc"
-            | "cxx"
-            | "hpp"
-            | "hxx"
             | "go"
             | "java"
             | "sh"
@@ -494,6 +556,215 @@ pub(crate) fn warn_walkdir_error(root: &Path, err: &walkdir::Error, context: &'s
     );
 }
 
+/// Classifies a C/C++-family file into the tree-sitter language to use.
+///
+/// The project supplies the language for ambiguous headers:
+///
+/// - `h` is a C header when the project has no C++ sources, and a C++ header
+///   otherwise (the ordinary `.cpp` + `.h` layout lives in a C++ project).
+/// - CUDA sources and headers (`cu` and `cuh`) are always parsed as C++.
+///
+/// Evidence comes from project source extensions in `present_extensions`.
+/// When it is empty (single-file lookups, unknown roots) `h` stays C, which is
+/// the historical behavior.
+pub fn c_family_is_cpp<S: AsRef<str>>(
+    ext: &str,
+    present_extensions: impl IntoIterator<Item = S>,
+) -> Option<bool> {
+    match ext {
+        // Derived from the same evidence the filters use, so indexing and
+        // `language=` search can never disagree for a given project.
+        "h" => Some(has_cpp_evidence(present_extensions)),
+        "cuh" => Some(true),
+        "cu" => Some(true),
+        _ if CPP_SOURCE_EXTENSIONS.contains(&ext) => {
+            let _ = present_extensions;
+            Some(true)
+        }
+        _ if C_SOURCE_EXTENSIONS.contains(&ext) => {
+            let _ = present_extensions;
+            Some(false)
+        }
+        _ => None,
+    }
+}
+
+/// Extension list for a C/C++ language filter, sharing the classification
+/// above so `language=cpp` includes `.h` in C++ projects and `language=c`
+/// includes `.h` in C projects.
+pub fn c_family_extensions<S: AsRef<str>>(
+    cpp: bool,
+    present_extensions: impl IntoIterator<Item = S>,
+) -> Vec<&'static str> {
+    // Membership is generated from the per-extension classifier rather than
+    // from hand-maintained tables, so `.h`/`.cuh` follow the same rule as
+    // indexing: a header is listed under exactly the language it will parse as.
+    let present: Vec<String> = present_extensions
+        .into_iter()
+        .map(|e| e.as_ref().to_string())
+        .collect();
+    let mut candidates: Vec<&'static str> = CPP_SOURCE_EXTENSIONS.to_vec();
+    candidates.extend(C_SOURCE_EXTENSIONS.iter().copied());
+    candidates.extend(C_FAMILY_HEADER_EXTENSIONS.iter().copied());
+    candidates.extend(CUDA_EXTENSIONS.iter().copied());
+    candidates.sort_unstable();
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .filter(|ext| c_family_is_cpp(ext, present.iter().map(String::as_str)) == Some(cpp))
+        .collect()
+}
+
+/// Walk indexable files with the same pruning, file-type and size rules for
+/// initial indexing, header reclassification and language filters.
+fn eligible_files<'a>(
+    root: &'a Path,
+    exclude_set: &'a GlobSet,
+    accept_extension: impl Fn(&str) -> bool + 'a,
+) -> impl Iterator<Item = PathBuf> + 'a {
+    let extra_excluded_dirs = extra_excluded_dir_names();
+    WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(move |e| {
+            let path = e.path();
+            let rel = match path.strip_prefix(root) {
+                Ok(r) => r,
+                Err(_) => return true,
+            };
+            if rel == Path::new("") {
+                return true;
+            }
+            let rel_str = rel.to_string_lossy();
+            if exclude_set.is_match(rel_str.as_ref()) {
+                return false;
+            }
+            if e.file_type().is_dir() {
+                if exclude_set.is_match(format!("{}/", rel_str).as_str()) {
+                    return false;
+                }
+                if rel.components().any(|c| {
+                    c.as_os_str().to_str().is_some_and(|name| {
+                        is_excluded_dir_name_with_custom(name, &extra_excluded_dirs)
+                    })
+                }) {
+                    return false;
+                }
+            }
+            true
+        })
+        .filter_map(move |entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                warn_walkdir_error(root, &err, "index_project");
+                None
+            }
+        })
+        .filter(move |e| {
+            let path = e.path();
+            if !e.file_type().is_file() {
+                return false;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !accept_extension(ext) {
+                return false;
+            }
+            if is_declaration_file(path) {
+                return false;
+            }
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let rel_str = rel.to_string_lossy();
+            if exclude_set.is_match(rel_str.as_ref()) || exclude_set.is_match(path) {
+                return false;
+            }
+            let Some(metadata) = regular_file_metadata(path).ok().flatten() else {
+                return false;
+            };
+            if metadata.len() > MAX_FILE_BYTES {
+                warn!(file = %rel_str, limit = MAX_FILE_BYTES, "skipping oversized file");
+                return false;
+            }
+            true
+        })
+        .map(|e| e.into_path())
+}
+
+fn file_extensions<'a>(files: impl IntoIterator<Item = &'a PathBuf>) -> Vec<String> {
+    files
+        .into_iter()
+        .filter_map(|path| path.extension()?.to_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Extensions present in a project tree, collected recursively while
+/// honoring the same exclusions as indexing (`vendor/`, `target/`,
+/// `.gitignore`, ...). Skipping excluded trees matters: a vendored `.cpp`
+/// must not make every `.h` in a C project look like a C++ header.
+pub fn project_extensions_with_excludes(root: &Path, exclude_set: &GlobSet) -> Vec<String> {
+    eligible_files(root, exclude_set, is_supported_extension)
+        .filter_map(|path| Some(path.extension()?.to_str()?.to_owned()))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+/// The exclusion patterns indexing applies by default for `root`:
+/// built-in defaults plus `.gitignore`, plus `PITLANE_EXCLUDE_DIRS` names.
+pub fn default_index_exclude_patterns(root: &Path) -> Vec<String> {
+    let mut patterns = default_exclude_patterns();
+    patterns.extend(load_gitignore_patterns(root));
+    patterns
+}
+
+/// Use the exclusions of the last index run, falling back to project defaults.
+/// Returns an empty list when the exclusions cannot be resolved, which keeps
+/// `.h` classified as C — the historical, conservative default.
+pub fn project_extensions(root: &Path) -> Vec<String> {
+    let patterns = crate::index::format::load_project_meta(root)
+        .ok()
+        .map(|meta| meta.effective_excludes)
+        .filter(|patterns| !patterns.is_empty())
+        .unwrap_or_else(|| default_index_exclude_patterns(root));
+    match Indexer::build_exclude_set(&patterns) {
+        Ok(exclude_set) => project_extensions_with_excludes(root, &exclude_set),
+        Err(e) => {
+            warn!(root = %root.display(), error = %e, "project_extensions: invalid exclude patterns; using no evidence");
+            Vec::new()
+        }
+    }
+}
+
+/// Version of the C/C++ header classification rules. Persisted indexes built
+/// under a different version are stale even when every file mtime matches,
+/// because the same file can yield different symbols for `.h`.
+///
+/// Bump this whenever header classification changes.
+pub const HEADER_CLASSIFICATION_VERSION: u32 = 2;
+
+/// The C/C++ header classification an index was built with, inferred from the
+/// language its indexed `.h` symbols carry. `None` means the index has no
+/// header evidence to compare against.
+pub fn header_classification_is_cpp(index: &SymbolIndex) -> Option<bool> {
+    let mut saw_header = false;
+    for symbol in index.symbols.values() {
+        if symbol.file.extension().and_then(|e| e.to_str()) != Some("h") {
+            continue;
+        }
+        saw_header = true;
+        if symbol.language == language::Language::Cpp {
+            return Some(true);
+        }
+    }
+    if saw_header {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// Returns the tree-sitter language for a supported extension.
 /// Keep this in sync with `is_supported_extension` so indexing and usage search
 /// agree on which parser to use for each file type.
@@ -505,8 +776,11 @@ pub fn tree_sitter_language_for_extension(ext: &str) -> Option<tree_sitter::Lang
         "ts" | "mts" | "cts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         "svelte" => tree_sitter_svelte_ng::LANGUAGE.into(),
-        "c" | "h" => tree_sitter_c::LANGUAGE.into(),
-        "cpp" | "cc" | "cxx" | "hpp" | "hxx" => tree_sitter_cpp::LANGUAGE.into(),
+        "c" => tree_sitter_c::LANGUAGE.into(),
+        "h" => tree_sitter_c::LANGUAGE.into(),
+        "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" | "ipp" | "tpp" | "inl" | "cu" | "cuh" => {
+            tree_sitter_cpp::LANGUAGE.into()
+        }
         "go" => tree_sitter_go::LANGUAGE.into(),
         "java" => tree_sitter_java::LANGUAGE.into(),
         "sh" | "bash" => tree_sitter_bash::LANGUAGE.into(),
@@ -978,6 +1252,355 @@ mod tests {
         let names: Vec<_> = index.symbols.values().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"uint32"));
         assert!(names.contains(&"Config"));
+    }
+
+    #[test]
+    fn test_cpp_header_in_cpp_project_uses_cpp_parser() {
+        // The ordinary `.cpp` + `.h` layout: the header holds C++ only syntax
+        // (a class with a method), so parsing it as C would drop the method.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("widget.h"),
+            b"class Widget {\npublic:\n    void render();\n};\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("widget.cpp"),
+            b"#include \"widget.h\"\nvoid Widget::render() {}\n",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 2);
+        let header_symbols: Vec<_> = index
+            .symbols
+            .values()
+            .filter(|s| s.file.ends_with("widget.h"))
+            .map(|s| (s.name.as_str(), s.language.clone()))
+            .collect();
+        assert!(
+            header_symbols.iter().any(|(name, _)| *name == "Widget"),
+            "class in header should be indexed: {header_symbols:?}"
+        );
+        // `class` is invalid C, so the C parser would yield nothing for this
+        // header: a C++-classified header is what makes the class visible.
+        // Declaration-only members are covered by the declaration issues.
+        assert!(
+            header_symbols
+                .iter()
+                .all(|(_, lang)| *lang == language::Language::Cpp),
+            "C++ header must be parsed and extracted as C++, got {header_symbols:?}"
+        );
+    }
+
+    #[test]
+    fn test_c_header_in_c_project_stays_c() {
+        // Pure C projects keep C header classification.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("main.c"), b"int main(void) { return 0; }").unwrap();
+        std::fs::write(
+            dir.path().join("util.h"),
+            b"struct Point { int x; int y; };\nvoid move(struct Point *p);\n",
+        )
+        .unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 2);
+        let header_langs: Vec<_> = index
+            .symbols
+            .values()
+            .filter(|s| s.file.ends_with("util.h"))
+            .map(|s| s.language.clone())
+            .collect();
+        assert!(!header_langs.is_empty());
+        assert!(
+            header_langs
+                .iter()
+                .all(|lang| *lang == language::Language::C),
+            "C header in a C project must stay C, got {header_langs:?}"
+        );
+    }
+
+    #[test]
+    fn test_mixed_project_header_follows_cpp_evidence() {
+        // Mixed project: a `.cpp` file anywhere makes `.h` a C++ header.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("legacy.c"),
+            b"int legacy(void) { return 1; }",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("modern.cpp"),
+            b"namespace app { int modern() { return 2; } }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("shared.h"),
+            b"namespace app { class Shared { public: void go(); }; }\n",
+        )
+        .unwrap();
+
+        let (index, _) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        let shared_langs: Vec<_> = index
+            .symbols
+            .values()
+            .filter(|s| s.file.ends_with("shared.h"))
+            .map(|s| (s.name.clone(), s.language.clone()))
+            .collect();
+        assert!(
+            shared_langs
+                .iter()
+                .all(|(_, lang)| *lang == language::Language::Cpp),
+            "mixed project header should be C++, got {shared_langs:?}"
+        );
+        assert!(
+            shared_langs.iter().any(|(name, _)| name == "Shared"),
+            "namespace + class from header should be extracted: {shared_langs:?}"
+        );
+    }
+
+    #[test]
+    fn test_nested_cpp_source_counts_as_evidence() {
+        // Review finding 1: `src/example.cpp` + `include/example.h` must not
+        // classify the header as C just because the `.cpp` is in a subdirectory.
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("include")).unwrap();
+        std::fs::write(
+            dir.path().join("src/example.cpp"),
+            b"struct Widget { int x; };",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("include/example.h"),
+            b"struct Widget { int y; };\n",
+        )
+        .unwrap();
+
+        let exts = project_extensions(dir.path());
+        assert!(exts.contains(&"cpp".to_string()), "exts={exts:?}");
+        assert_eq!(c_family_is_cpp("h", &exts), Some(true));
+
+        let (index, _) = create_indexer().index_project(dir.path(), &[]).unwrap();
+        let header_langs: Vec<_> = index
+            .symbols
+            .values()
+            .filter(|s| s.file.ends_with("example.h"))
+            .map(|s| s.language.clone())
+            .collect();
+        assert_eq!(header_langs, vec![language::Language::Cpp]);
+    }
+
+    #[test]
+    fn test_vendored_cpp_does_not_count_as_evidence() {
+        // A `.cpp` under an excluded directory must not flip a C project.
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
+        // `vendor/` is excluded because it is gitignored, like a real checkout.
+        std::fs::write(dir.path().join(".gitignore"), b"vendor/\n").unwrap();
+        std::fs::write(dir.path().join("main.c"), b"int main(void) { return 0; }").unwrap();
+        std::fs::write(
+            dir.path().join("vendor/dep.cpp"),
+            b"int dep() { return 1; }",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("util.h"), b"struct P { int x; };\n").unwrap();
+
+        let exts = project_extensions(dir.path());
+        assert!(!exts.contains(&"cpp".to_string()), "exts={exts:?}");
+        assert_eq!(c_family_is_cpp("h", &exts), Some(false));
+    }
+
+    #[test]
+    fn test_cuda_files_reach_the_cpp_parser() {
+        // Review finding 2: `.cu`/`.cuh` are supported and parsed as C++.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("kernel.cu"),
+            b"__global__ void addOne(int *x) { *x += 1; }\nstruct Vec { int a; };\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("types.cuh"), b"struct Thing { int b; };\n").unwrap();
+
+        let (index, file_count) = create_indexer().index_project(dir.path(), &[]).unwrap();
+
+        assert_eq!(file_count, 2, "both CUDA files must be indexed");
+        let cu_symbols: Vec<_> = index
+            .symbols
+            .values()
+            .filter(|s| s.file.ends_with("kernel.cu"))
+            .map(|s| (s.name.clone(), s.language.clone()))
+            .collect();
+        assert!(cu_symbols.iter().any(|(n, _)| n == "Vec"), "{cu_symbols:?}");
+        assert!(
+            cu_symbols.iter().any(|(n, _)| n == "addOne"),
+            "{cu_symbols:?}"
+        );
+        assert!(cu_symbols
+            .iter()
+            .all(|(_, l)| *l == language::Language::Cpp));
+        assert!(index
+            .symbols
+            .values()
+            .any(|s| s.file.ends_with("types.cuh") && s.name == "Thing"));
+    }
+
+    #[test]
+    fn test_incremental_reindex_reclassifies_headers() {
+        // Review finding 3: adding the first `.cpp` must reclassify existing
+        // `.h` files, matching what a fresh index of the same tree yields.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("shared.h"),
+            b"class Shared { void go(); };\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("legacy.c"),
+            b"int legacy(void) { return 1; }",
+        )
+        .unwrap();
+
+        let indexer = create_indexer();
+        let (mut index, _) = indexer.index_project(dir.path(), &[]).unwrap();
+        let before: Vec<_> = index
+            .symbols
+            .values()
+            .filter(|s| s.file.ends_with("shared.h"))
+            .map(|s| s.language.clone())
+            .collect();
+        assert!(
+            before.iter().all(|l| *l == language::Language::C),
+            "{before:?}"
+        );
+
+        std::fs::write(
+            dir.path().join("modern.cpp"),
+            b"int modern() { return 2; }\n",
+        )
+        .unwrap();
+        let changed: HashSet<_> = [dir.path().join("modern.cpp")].into_iter().collect();
+        indexer.reindex_files(&changed, dir.path(), &mut index);
+
+        let after: Vec<_> = index
+            .symbols
+            .values()
+            .filter(|s| s.file.ends_with("shared.h"))
+            .map(|s| s.language.clone())
+            .collect();
+        assert!(
+            !after.is_empty() && after.iter().all(|l| *l == language::Language::Cpp),
+            "header must be reclassified to C++ after the first C++ source: {after:?}"
+        );
+
+        // Same tree from scratch must agree with the incremental result.
+        let (fresh, _) = create_indexer().index_project(dir.path(), &[]).unwrap();
+        let fresh_cpp = fresh
+            .symbols
+            .values()
+            .filter(|s| s.file.ends_with("shared.h"))
+            .all(|s| s.language == language::Language::Cpp);
+        assert!(fresh_cpp);
+    }
+
+    #[test]
+    fn test_cuda_only_project_language_filters_agree() {
+        // Review finding 6: filter membership must follow the same rule as
+        // classification, so `.cuh` is never classified C++ but omitted.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("kernel.cuh"), b"struct K { int a; };\n").unwrap();
+        std::fs::write(dir.path().join("types.h"), b"struct T { int b; };\n").unwrap();
+
+        let exts = project_extensions(dir.path());
+        for ext in ["cuh", "h"] {
+            let expected = c_family_is_cpp(ext, &exts).unwrap();
+            let cpp_filter = c_family_extensions(true, &exts);
+            let c_filter = c_family_extensions(false, &exts);
+            assert_eq!(
+                cpp_filter.contains(&ext),
+                expected,
+                "{ext} cpp filter membership must match classification"
+            );
+            assert_eq!(c_filter.contains(&ext), !expected, "{ext}");
+        }
+        assert_eq!(c_family_is_cpp("cuh", &exts), Some(true));
+        assert!(c_family_extensions(true, &exts).contains(&"cuh"));
+        assert!(!c_family_extensions(false, &exts).contains(&"cuh"));
+    }
+
+    #[test]
+    fn test_header_classification_version_invalidates_index() {
+        // Review finding 5: an index built under different classification
+        // rules must not be reused just because mtimes match.
+        assert_eq!(
+            crate::index::format::IndexMeta::new(Path::new("/tmp/x")).header_classification,
+            HEADER_CLASSIFICATION_VERSION
+        );
+        let mut meta = crate::index::format::IndexMeta::new(Path::new("/tmp/x"));
+        meta.header_classification = HEADER_CLASSIFICATION_VERSION.wrapping_sub(1);
+        let dir = TempDir::new().unwrap();
+        assert!(!crate::tools::index_project::is_index_up_to_date(
+            dir.path(),
+            &meta,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn test_c_family_is_cpp_rule() {
+        // No evidence: `.h` keeps the historical C behavior.
+        assert_eq!(c_family_is_cpp("h", [] as [&str; 0]), Some(false));
+        // C++ source present: `.h` is C++.
+        assert_eq!(c_family_is_cpp("h", ["cpp"]), Some(true));
+        assert_eq!(c_family_is_cpp("h", ["c", "hpp"]), Some(true));
+        // C-only project.
+        assert_eq!(c_family_is_cpp("h", ["c"]), Some(false));
+        // Unambiguous extensions ignore the evidence.
+        assert_eq!(c_family_is_cpp("c", ["cpp"]), Some(false));
+        assert_eq!(c_family_is_cpp("cpp", ["c"]), Some(true));
+        assert_eq!(c_family_is_cpp("hh", [] as [&str; 0]), Some(true));
+        assert_eq!(c_family_is_cpp("ipp", [] as [&str; 0]), Some(true));
+        assert_eq!(c_family_is_cpp("tpp", [] as [&str; 0]), Some(true));
+        assert_eq!(c_family_is_cpp("inl", [] as [&str; 0]), Some(true));
+        assert_eq!(c_family_is_cpp("cu", [] as [&str; 0]), Some(true));
+        assert_eq!(c_family_is_cpp("cuh", [] as [&str; 0]), Some(true));
+        // Not a C/C++-family file.
+        assert_eq!(c_family_is_cpp("rs", ["cpp"]), None);
+    }
+
+    #[test]
+    fn test_c_family_extensions_share_classification() {
+        // C++ project: `.h` is included in the cpp filter, not the c filter.
+        let cpp_project = ["cpp", "h"];
+        assert!(c_family_extensions(true, cpp_project).contains(&"h"));
+        assert!(!c_family_extensions(false, cpp_project).contains(&"h"));
+        // C project: `.h` is included in the c filter.
+        let c_project = ["c", "h"];
+        assert!(c_family_extensions(false, c_project).contains(&"h"));
+        assert!(!c_family_extensions(true, c_project).contains(&"h"));
+        // Shared extension sets are always present.
+        for ext in CPP_SOURCE_EXTENSIONS {
+            assert!(c_family_extensions(true, cpp_project).contains(ext));
+        }
+        assert!(c_family_extensions(false, c_project).contains(&"c"));
+        // CUDA is exposed as C++ but never as C.
+        assert!(c_family_extensions(true, cpp_project).contains(&"cu"));
+        assert!(!c_family_extensions(false, c_project).contains(&"cu"));
+    }
+
+    #[test]
+    fn test_upper_case_extensions_are_distinct() {
+        // `.C` is a C++ source, `.c` is C: case-sensitive meaning is preserved.
+        assert_eq!(c_family_is_cpp("C", [] as [&str; 0]), None);
+        assert_eq!(c_family_is_cpp("H", [] as [&str; 0]), None);
+        assert!(is_supported_extension("hh"));
+        assert!(is_supported_extension("ipp"));
+        assert!(is_supported_extension("cuh"));
+        assert!(tree_sitter_language_for_extension("hh").is_some());
     }
 
     #[test]

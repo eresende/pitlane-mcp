@@ -12,7 +12,11 @@ impl LanguageParser for CppParser {
     }
 
     fn extensions(&self) -> &[&str] {
-        &["cpp", "cc", "cxx", "hpp", "hxx"]
+        // CUDA sources are parsed with the C++ grammar: `.cu`/`.cuh` are
+        // syntactic C++ only, never CUDA semantics.
+        &[
+            "cpp", "cc", "cxx", "hpp", "hxx", "hh", "ipp", "tpp", "inl", "cu", "cuh",
+        ]
     }
 
     fn extract_symbols(&self, source: &[u8], tree: &Tree, path: &std::path::Path) -> Vec<Symbol> {

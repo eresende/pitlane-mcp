@@ -398,3 +398,32 @@ fn symlinks_are_not_followed() {
         .iter()
         .any(|o| o["file"] == "link.rs"));
 }
+
+#[test]
+fn untracked_cpp_in_checkout_does_not_reclassify_historical_headers() {
+    // Review finding 4: evidence for a revision must come from that
+    // revision's snapshot, not from the working tree.
+    let dir = TempDir::new().unwrap();
+    git(dir.path(), &["init", "-q"]).unwrap();
+    write(&dir, "legacy.c", "int legacy(void) { return 1; }\n");
+    write(&dir, "shared.h", "struct P { int x; };\n");
+    commit(&dir);
+    write(&dir, "untracked.cpp", "struct Q { int y; };\n");
+
+    let root = dir.path();
+    let excludes = Indexer::build_exclude_set(&[]).unwrap();
+    let mut committed = revision_snapshot(root, root, "HEAD").unwrap();
+    let mut working = working_snapshot(root).unwrap();
+    for (snapshot, language) in [
+        (&mut committed, indexer::language::Language::C),
+        (&mut working, indexer::language::Language::Cpp),
+    ] {
+        let index = snapshot_index(root, snapshot, &excludes).unwrap();
+        let symbol = index
+            .symbols
+            .values()
+            .find(|s| s.file.ends_with("shared.h") && s.name == "P")
+            .unwrap();
+        assert_eq!(symbol.language, language);
+    }
+}

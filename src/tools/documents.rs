@@ -279,19 +279,20 @@ fn as_result(unit: &Unit, file: &str, source: &str) -> Value {
 }
 
 pub(crate) fn discover(params: &LocateCodeParams, limit: usize) -> anyhow::Result<Vec<Value>> {
-    if params.language.as_deref().is_some_and(|lang| {
-        parse_language_filter(lang)
-            .is_ok_and(|exts| !exts.iter().any(|ext| is_document_extension(ext)))
-    }) {
+    // C/C++ header evidence only affects source extensions.
+    let language = params
+        .language
+        .as_deref()
+        .map(|lang| parse_language_filter(lang, &[]))
+        .transpose()?;
+    if language
+        .as_ref()
+        .is_some_and(|exts| !exts.iter().any(|ext| is_document_extension(ext)))
+    {
         return Ok(Vec::new());
     }
     let root = resolve_project_path(&params.project)?;
     let index = load_project_index(&params.project)?;
-    let language = params
-        .language
-        .as_deref()
-        .map(parse_language_filter)
-        .transpose()?;
     let scope = params
         .scope
         .as_deref()
@@ -310,7 +311,9 @@ pub(crate) fn discover(params: &LocateCodeParams, limit: usize) -> anyhow::Resul
     let mut found: Vec<(usize, Value, String)> = Vec::new();
     for file in files {
         let ext = file.extension().and_then(|e| e.to_str()).unwrap_or("");
-        if !is_document_extension(ext) || language.is_some_and(|exts| !exts.contains(&ext)) {
+        if !is_document_extension(ext)
+            || language.as_deref().is_some_and(|exts| !exts.contains(&ext))
+        {
             continue;
         }
         let markdown = matches!(ext, "md" | "markdown");

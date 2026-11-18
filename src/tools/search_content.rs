@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use walkdir::{DirEntry, WalkDir};
 
 use crate::error::ToolError;
+use crate::indexer::{c_family_extensions, project_extensions};
 use crate::indexer::{
     default_exclude_patterns, extra_excluded_dir_names, is_declaration_file,
     is_excluded_dir_name_with_custom, is_supported_extension, load_gitignore_patterns,
@@ -72,7 +73,10 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
     let language_filter = params
         .language
         .as_deref()
-        .map(parse_language_filter)
+        .map(|language| {
+            let present = project_extensions(&canonical);
+            parse_language_filter(language, &present)
+        })
         .transpose()?;
     let exclude_set = build_exclude_set(&canonical)?;
     let extra_excluded_dirs = extra_excluded_dir_names();
@@ -128,7 +132,7 @@ pub async fn search_content(params: SearchContentParams) -> anyhow::Result<Value
         &exclude_set,
         &extra_excluded_dirs,
         file_glob.as_ref(),
-        language_filter,
+        language_filter.as_deref(),
     )?;
     files.sort();
 
@@ -381,31 +385,34 @@ impl ContentMatcher {
     }
 }
 
-pub(crate) fn parse_language_filter(language: &str) -> anyhow::Result<&'static [&'static str]> {
+pub(crate) fn parse_language_filter(
+    language: &str,
+    present_extensions: &[String],
+) -> anyhow::Result<Vec<&'static str>> {
     match language.to_lowercase().as_str() {
-        "markdown" | "md" => Ok(&["md", "markdown"]),
-        "json" => Ok(&["json"]),
-        "yaml" | "yml" => Ok(&["yaml", "yml"]),
-        "toml" => Ok(&["toml"]),
-        "rust" => Ok(&["rs"]),
-        "python" => Ok(&["py"]),
-        "javascript" | "js" => Ok(&["js", "jsx", "mjs", "cjs"]),
-        "typescript" | "ts" => Ok(&["ts", "tsx", "mts", "cts"]),
-        "svelte" => Ok(&["svelte"]),
-        "c" => Ok(&["c", "h"]),
-        "cpp" | "c++" => Ok(&["cpp", "cc", "cxx", "hpp", "hxx"]),
-        "go" => Ok(&["go"]),
-        "java" => Ok(&["java"]),
-        "bash" | "sh" => Ok(&["sh", "bash"]),
-        "csharp" | "c#" | "cs" => Ok(&["cs"]),
-        "ruby" | "rb" => Ok(&["rb"]),
-        "swift" => Ok(&["swift"]),
-        "objc" | "objective-c" | "objectivec" => Ok(&["m", "mm"]),
-        "php" => Ok(&["php"]),
-        "zig" => Ok(&["zig"]),
-        "kotlin" | "kt" => Ok(&["kt", "kts"]),
-        "luau" | "lua" => Ok(&["luau", "lua"]),
-        "solidity" | "sol" => Ok(&["sol"]),
+        "markdown" | "md" => Ok(vec!["md", "markdown"]),
+        "json" => Ok(vec!["json"]),
+        "yaml" | "yml" => Ok(vec!["yaml", "yml"]),
+        "toml" => Ok(vec!["toml"]),
+        "rust" => Ok(vec!["rs"]),
+        "python" => Ok(vec!["py"]),
+        "javascript" | "js" => Ok(vec!["js", "jsx", "mjs", "cjs"]),
+        "typescript" | "ts" => Ok(vec!["ts", "tsx", "mts", "cts"]),
+        "svelte" => Ok(vec!["svelte"]),
+        "c" => Ok(c_family_extensions(false, present_extensions)),
+        "cpp" | "c++" => Ok(c_family_extensions(true, present_extensions)),
+        "go" => Ok(vec!["go"]),
+        "java" => Ok(vec!["java"]),
+        "bash" | "sh" => Ok(vec!["sh", "bash"]),
+        "csharp" | "c#" | "cs" => Ok(vec!["cs"]),
+        "ruby" | "rb" => Ok(vec!["rb"]),
+        "swift" => Ok(vec!["swift"]),
+        "objc" | "objective-c" | "objectivec" => Ok(vec!["m", "mm"]),
+        "php" => Ok(vec!["php"]),
+        "zig" => Ok(vec!["zig"]),
+        "kotlin" | "kt" => Ok(vec!["kt", "kts"]),
+        "luau" | "lua" => Ok(vec!["luau", "lua"]),
+        "solidity" | "sol" => Ok(vec!["sol"]),
         other => Err(ToolError::InvalidArgument {
             param: "language".to_string(),
             message: format!(

@@ -193,6 +193,25 @@ fn snapshot_index(
     excludes: &globset::GlobSet,
 ) -> Result<SymbolIndex> {
     let registry = build_default_registry();
+    // Evidence must come from this revision's snapshot, never the checkout:
+    // an untracked `.cpp` in the working tree must not change how headers in a
+    // committed C-only revision are parsed. Exclusions are applied so a
+    // vendored file cannot flip the classification either.
+    let extra = indexer::extra_excluded_dir_names();
+    let present_extensions: Vec<String> = {
+        let mut exts: Vec<String> = Vec::new();
+        for relative in snapshot.files.keys() {
+            if indexer::path_is_excluded(&root.join(relative), root, excludes, &extra) {
+                continue;
+            }
+            if let Some(ext) = relative.extension().and_then(|e| e.to_str()) {
+                exts.push(ext.to_string());
+            }
+        }
+        exts.sort();
+        exts.dedup();
+        exts
+    };
     let extra = indexer::extra_excluded_dir_names();
     let mut index = SymbolIndex::new();
     for (relative, source) in &snapshot.files {
@@ -204,10 +223,21 @@ fn snapshot_index(
         {
             continue;
         }
-        let Some(parser) = registry.iter().find(|p| p.extensions().contains(&ext)) else {
+        // Headers are language-neutral: pick the C/C++ parser and grammar
+        // from project evidence instead of letting `.h` always mean C.
+        let c_family = indexer::c_family_is_cpp(ext, &present_extensions);
+        let lookup_ext = match c_family {
+            Some(true) => "cpp",
+            Some(false) => "c",
+            None => ext,
+        };
+        let Some(parser) = registry
+            .iter()
+            .find(|p| p.extensions().contains(&lookup_ext) || p.extensions().contains(&ext))
+        else {
             continue;
         };
-        let Some(language) = indexer::tree_sitter_language_for_extension(ext) else {
+        let Some(language) = indexer::tree_sitter_language_for_extension(lookup_ext) else {
             continue;
         };
         let mut ts = tree_sitter::Parser::new();
