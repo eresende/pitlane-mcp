@@ -279,20 +279,20 @@ fn as_result(unit: &Unit, file: &str, source: &str) -> Value {
 }
 
 pub(crate) fn discover(params: &LocateCodeParams, limit: usize) -> anyhow::Result<Vec<Value>> {
-    let root = resolve_project_path(&params.project)?;
-    let present_extensions = crate::indexer::project_extensions(&root);
-    if params.language.as_deref().is_some_and(|lang| {
-        parse_language_filter(lang, &present_extensions)
-            .is_ok_and(|exts| !exts.iter().any(|ext| is_document_extension(ext)))
-    }) {
-        return Ok(Vec::new());
-    }
-    let index = load_project_index(&params.project)?;
+    // C/C++ header evidence only affects source extensions.
     let language = params
         .language
         .as_deref()
-        .map(|lang| parse_language_filter(lang, &present_extensions))
+        .map(|lang| parse_language_filter(lang, &[]))
         .transpose()?;
+    if language
+        .as_ref()
+        .is_some_and(|exts| !exts.iter().any(|ext| is_document_extension(ext)))
+    {
+        return Ok(Vec::new());
+    }
+    let root = resolve_project_path(&params.project)?;
+    let index = load_project_index(&params.project)?;
     let scope = params
         .scope
         .as_deref()

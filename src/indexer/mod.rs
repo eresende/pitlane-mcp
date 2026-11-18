@@ -21,7 +21,7 @@ pub mod typescript;
 pub mod zig;
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -112,78 +112,11 @@ impl Indexer {
         on_phase3_progress: Option<&(dyn Fn(Phase3Progress) + Send + Sync)>,
     ) -> anyhow::Result<(SymbolIndex, usize)> {
         let exclude_set = Self::build_exclude_set(exclude_patterns)?;
-        let extra_excluded_dirs = extra_excluded_dir_names();
-        let present_extensions = project_extensions(root);
-
-        // Phase 1 — collect eligible file paths (sequential: WalkDir is not parallel).
-        let eligible: Vec<std::path::PathBuf> = WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|e| {
-                let path = e.path();
-                let rel = match path.strip_prefix(root) {
-                    Ok(r) => r,
-                    Err(_) => return true,
-                };
-                if rel == Path::new("") {
-                    return true;
-                }
-                let rel_str = rel.to_string_lossy();
-                if exclude_set.is_match(rel_str.as_ref()) {
-                    return false;
-                }
-                if e.file_type().is_dir() {
-                    if exclude_set.is_match(format!("{}/", rel_str).as_str()) {
-                        return false;
-                    }
-                    if rel.components().any(|c| {
-                        c.as_os_str().to_str().is_some_and(|name| {
-                            is_excluded_dir_name_with_custom(name, &extra_excluded_dirs)
-                        })
-                    }) {
-                        return false;
-                    }
-                }
-                true
-            })
-            .filter_map(|entry| match entry {
-                Ok(entry) => Some(entry),
-                Err(err) => {
-                    warn_walkdir_error(root, &err, "index_project");
-                    None
-                }
-            })
-            .filter(|e| {
-                let path = e.path();
-                if !e.file_type().is_file() {
-                    return false;
-                }
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !self.ext_map.contains_key(ext)
-                    && c_family_is_cpp(ext, [] as [&str; 0]).is_none()
-                {
-                    return false;
-                }
-                if is_declaration_file(path) {
-                    return false;
-                }
-                let rel = path.strip_prefix(root).unwrap_or(path);
-                let rel_str = rel.to_string_lossy();
-                if exclude_set.is_match(rel_str.as_ref()) || exclude_set.is_match(path) {
-                    return false;
-                }
-                let Some(metadata) = regular_file_metadata(path).ok().flatten() else {
-                    return false;
-                };
-                if metadata.len() > MAX_FILE_BYTES {
-                    warn!(file = %rel_str, limit = MAX_FILE_BYTES, "skipping oversized file");
-                    return false;
-                }
-                true
-            })
-            .take(max_files.saturating_add(1))
-            .map(|e| e.into_path())
-            .collect();
+        let eligible: Vec<_> = eligible_files(root, &exclude_set, |ext| {
+            self.ext_map.contains_key(ext) || c_family_is_cpp(ext, [] as [&str; 0]).is_some()
+        })
+        .take(max_files.saturating_add(1))
+        .collect();
 
         if eligible.len() > max_files {
             return Err(crate::error::ToolError::FileLimitExceeded {
@@ -193,6 +126,7 @@ impl Indexer {
             .into());
         }
 
+        let present_extensions = file_extensions(&eligible);
         let total_files = eligible.len();
 
         // Notify: Phase 1 complete — we now know the total file count.
@@ -294,6 +228,21 @@ impl Indexer {
         root: &Path,
         index: &mut SymbolIndex,
     ) -> anyhow::Result<()> {
+        let present_extensions = if file_path.extension().and_then(|e| e.to_str()) == Some("h") {
+            project_extensions(root)
+        } else {
+            Vec::new()
+        };
+        self.reindex_file_with_extensions(file_path, root, index, &present_extensions)
+    }
+
+    fn reindex_file_with_extensions(
+        &self,
+        file_path: &Path,
+        root: &Path,
+        index: &mut SymbolIndex,
+        present_extensions: &[String],
+    ) -> anyhow::Result<()> {
         // Remove existing symbols for this file
         let abs_path = if file_path.is_absolute() {
             file_path.to_path_buf()
@@ -305,8 +254,7 @@ impl Indexer {
 
         // Re-parse and insert
         if abs_path.exists() {
-            let present_extensions = project_extensions(root);
-            let symbols = self.parse_file_with_extensions(&abs_path, root, &present_extensions)?;
+            let symbols = self.parse_file_with_extensions(&abs_path, root, present_extensions)?;
             for symbol in symbols {
                 index.insert(symbol);
             }
@@ -325,62 +273,67 @@ impl Indexer {
         root: &Path,
         index: &mut SymbolIndex,
     ) {
-        // Adding the first (or removing the last) C++ source flips every
-        // `.h` in the project between C and C++. Re-parsing only the changed
-        // paths would leave existing headers in the old language, so detect a
-        // classification change and reindex all C/C++-family headers too.
-        let paths = &self.expand_for_header_reclassification(paths, root, index);
+        let exclude_set = match Self::build_exclude_set(&default_index_exclude_patterns(root)) {
+            Ok(set) => set,
+            Err(err) => {
+                warn!(%err, "invalid exclusion patterns; using no header evidence");
+                return self.reindex_files_with_extensions(paths, root, index, &[]);
+            }
+        };
+        let mut paths = paths.clone();
+        let extensions =
+            Self::prepare_header_reclassification(&mut paths, root, &exclude_set, index);
+        self.reindex_files_with_extensions(&paths, root, index, &extensions);
+    }
+
+    /// Include every eligible header when a batch changes the project's C++
+    /// evidence. Headers that yielded zero symbols are absent from by_file.
+    pub(crate) fn prepare_header_reclassification(
+        paths: &mut HashSet<PathBuf>,
+        root: &Path,
+        exclude_set: &GlobSet,
+        index: &SymbolIndex,
+    ) -> Vec<String> {
+        let mut evidence_touched = false;
+        let mut header_touched = false;
+        for ext in paths.iter().filter_map(|path| path.extension()?.to_str()) {
+            evidence_touched |= CPP_EVIDENCE_EXTENSIONS.contains(&ext);
+            header_touched |= C_FAMILY_HEADER_EXTENSIONS.contains(&ext);
+        }
+        if !evidence_touched && !header_touched {
+            return Vec::new();
+        }
+
+        let files: Vec<_> = eligible_files(root, exclude_set, |ext| {
+            CPP_EVIDENCE_EXTENSIONS.contains(&ext) || C_FAMILY_HEADER_EXTENSIONS.contains(&ext)
+        })
+        .collect();
+        let extensions = file_extensions(&files);
+        if evidence_touched
+            && header_classification_is_cpp(index) != Some(has_cpp_evidence(&extensions))
+        {
+            paths.extend(
+                files
+                    .into_iter()
+                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("h")),
+            );
+        }
+        extensions
+    }
+
+    pub(crate) fn reindex_files_with_extensions(
+        &self,
+        paths: &HashSet<PathBuf>,
+        root: &Path,
+        index: &mut SymbolIndex,
+        extensions: &[String],
+    ) {
         for path in paths {
-            if let Err(e) = self.reindex_file(path, root, index) {
+            if let Err(e) = self.reindex_file_with_extensions(path, root, index, extensions) {
                 tracing::warn!(file = %path.display(), error = %e, "reindex_file failed");
             }
         }
         index.rebuild_navigation_graph();
-    }
-
-    /// Extends `paths` with every indexed C/C++ header when the project's C++
-    /// evidence changed, so incremental updates agree with a fresh index.
-    fn expand_for_header_reclassification(
-        &self,
-        paths: &HashSet<std::path::PathBuf>,
-        root: &Path,
-        index: &SymbolIndex,
-    ) -> HashSet<std::path::PathBuf> {
-        let mut touched = paths.clone();
-        // Evidence of the tree as it will be after this batch: indexed C/C++
-        // sources that survive, plus the extensions of the changed paths.
-        let surviving = index
-            .by_file
-            .keys()
-            .filter(|path| !paths.contains(*path))
-            .filter_map(|path| path.extension().and_then(|e| e.to_str()))
-            .chain(
-                paths
-                    .iter()
-                    .filter_map(|path| path.extension().and_then(|e| e.to_str())),
-            );
-        let next_is_cpp = has_cpp_evidence(surviving);
-        let previous_is_cpp = header_classification_is_cpp(index);
-        // Unknown previous classification means an old index: reclassify.
-        if previous_is_cpp == Some(next_is_cpp) {
-            return touched;
-        }
-        let extra = extra_excluded_dir_names();
-        let patterns = default_index_exclude_patterns(root);
-        let exclude_set = match Indexer::build_exclude_set(&patterns) {
-            Ok(set) => set,
-            Err(_) => return touched,
-        };
-        for path in index.by_file.keys() {
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if !C_FAMILY_HEADER_EXTENSIONS.contains(&ext) && !CUDA_EXTENSIONS.contains(&ext) {
-                continue;
-            }
-            if !path_is_excluded(path, root, &exclude_set, &extra) {
-                touched.insert(path.clone());
-            }
-        }
-        touched
     }
 
     /// Parses one file, using `present_extensions` as project evidence for the
@@ -605,17 +558,15 @@ pub(crate) fn warn_walkdir_error(root: &Path, err: &walkdir::Error, context: &'s
 
 /// Classifies a C/C++-family file into the tree-sitter language to use.
 ///
-/// Header extensions are language-neutral in practice, so the header extension
-/// is itself the only signal. The rule is deterministic and documented:
+/// The project supplies the language for ambiguous headers:
 ///
 /// - `h` is a C header when the project has no C++ sources, and a C++ header
 ///   otherwise (the ordinary `.cpp` + `.h` layout lives in a C++ project).
-/// - `cuh` follows `h`; `cu` is a CUDA source and is parsed as C++.
+/// - CUDA sources and headers (`cu` and `cuh`) are always parsed as C++.
 ///
 /// Evidence comes from project source extensions in `present_extensions`.
 /// When it is empty (single-file lookups, unknown roots) `h` stays C, which is
-/// the historical behavior. Overriding header language explicitly is still
-/// possible through the `language` filter.
+/// the historical behavior.
 pub fn c_family_is_cpp<S: AsRef<str>>(
     ext: &str,
     present_extensions: impl IntoIterator<Item = S>,
@@ -664,32 +615,100 @@ pub fn c_family_extensions<S: AsRef<str>>(
         .collect()
 }
 
+/// Walk indexable files with the same pruning, file-type and size rules for
+/// initial indexing, header reclassification and language filters.
+fn eligible_files<'a>(
+    root: &'a Path,
+    exclude_set: &'a GlobSet,
+    accept_extension: impl Fn(&str) -> bool + 'a,
+) -> impl Iterator<Item = PathBuf> + 'a {
+    let extra_excluded_dirs = extra_excluded_dir_names();
+    WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(move |e| {
+            let path = e.path();
+            let rel = match path.strip_prefix(root) {
+                Ok(r) => r,
+                Err(_) => return true,
+            };
+            if rel == Path::new("") {
+                return true;
+            }
+            let rel_str = rel.to_string_lossy();
+            if exclude_set.is_match(rel_str.as_ref()) {
+                return false;
+            }
+            if e.file_type().is_dir() {
+                if exclude_set.is_match(format!("{}/", rel_str).as_str()) {
+                    return false;
+                }
+                if rel.components().any(|c| {
+                    c.as_os_str().to_str().is_some_and(|name| {
+                        is_excluded_dir_name_with_custom(name, &extra_excluded_dirs)
+                    })
+                }) {
+                    return false;
+                }
+            }
+            true
+        })
+        .filter_map(move |entry| match entry {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                warn_walkdir_error(root, &err, "index_project");
+                None
+            }
+        })
+        .filter(move |e| {
+            let path = e.path();
+            if !e.file_type().is_file() {
+                return false;
+            }
+            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            if !accept_extension(ext) {
+                return false;
+            }
+            if is_declaration_file(path) {
+                return false;
+            }
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            let rel_str = rel.to_string_lossy();
+            if exclude_set.is_match(rel_str.as_ref()) || exclude_set.is_match(path) {
+                return false;
+            }
+            let Some(metadata) = regular_file_metadata(path).ok().flatten() else {
+                return false;
+            };
+            if metadata.len() > MAX_FILE_BYTES {
+                warn!(file = %rel_str, limit = MAX_FILE_BYTES, "skipping oversized file");
+                return false;
+            }
+            true
+        })
+        .map(|e| e.into_path())
+}
+
+fn file_extensions<'a>(files: impl IntoIterator<Item = &'a PathBuf>) -> Vec<String> {
+    files
+        .into_iter()
+        .filter_map(|path| path.extension()?.to_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Extensions present in a project tree, collected recursively while
 /// honoring the same exclusions as indexing (`vendor/`, `target/`,
 /// `.gitignore`, ...). Skipping excluded trees matters: a vendored `.cpp`
 /// must not make every `.h` in a C project look like a C++ header.
 pub fn project_extensions_with_excludes(root: &Path, exclude_set: &GlobSet) -> Vec<String> {
-    let extra_excluded_dirs = extra_excluded_dir_names();
-    let mut found: BTreeSet<String> = BTreeSet::new();
-    for entry in WalkDir::new(root)
-        .follow_links(false)
+    eligible_files(root, exclude_set, is_supported_extension)
+        .filter_map(|path| Some(path.extension()?.to_str()?.to_owned()))
+        .collect::<BTreeSet<_>>()
         .into_iter()
-        // The root itself is never "excluded": `path_is_excluded` reports it as
-        // excluded so callers can reject it, but pruning it here would stop the
-        // walk before the first entry.
-        .filter_entry(|e| {
-            e.path() == root || !path_is_excluded(e.path(), root, exclude_set, &extra_excluded_dirs)
-        })
-        .flatten()
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-            found.insert(ext.to_string());
-        }
-    }
-    found.into_iter().collect()
+        .collect()
 }
 
 /// The exclusion patterns indexing applies by default for `root`:
@@ -700,11 +719,15 @@ pub fn default_index_exclude_patterns(root: &Path) -> Vec<String> {
     patterns
 }
 
-/// Convenience wrapper that builds the default exclusion set for `root`.
+/// Use the exclusions of the last index run, falling back to project defaults.
 /// Returns an empty list when the exclusions cannot be resolved, which keeps
 /// `.h` classified as C — the historical, conservative default.
 pub fn project_extensions(root: &Path) -> Vec<String> {
-    let patterns = default_index_exclude_patterns(root);
+    let patterns = crate::index::format::load_project_meta(root)
+        .ok()
+        .map(|meta| meta.effective_excludes)
+        .filter(|patterns| !patterns.is_empty())
+        .unwrap_or_else(|| default_index_exclude_patterns(root));
     match Indexer::build_exclude_set(&patterns) {
         Ok(exclude_set) => project_extensions_with_excludes(root, &exclude_set),
         Err(e) => {
@@ -719,7 +742,7 @@ pub fn project_extensions(root: &Path) -> Vec<String> {
 /// because the same file can yield different symbols for `.h`.
 ///
 /// Bump this whenever header classification changes.
-pub const HEADER_CLASSIFICATION_VERSION: u32 = 1;
+pub const HEADER_CLASSIFICATION_VERSION: u32 = 2;
 
 /// The C/C++ header classification an index was built with, inferred from the
 /// language its indexed `.h` symbols carry. `None` means the index has no

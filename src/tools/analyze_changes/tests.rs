@@ -408,27 +408,22 @@ fn untracked_cpp_in_checkout_does_not_reclassify_historical_headers() {
     write(&dir, "legacy.c", "int legacy(void) { return 1; }\n");
     write(&dir, "shared.h", "struct P { int x; };\n");
     commit(&dir);
-    write(&dir, "lib.c", "int more(void) { return 2; }\n");
-    commit(&dir);
-
-    let clean = run(&dir, "HEAD~1", false);
-
-    // An untracked C++ source appears in the checkout only.
     write(&dir, "untracked.cpp", "struct Q { int y; };\n");
-    let polluted = run(&dir, "HEAD~1", false);
 
-    let header_symbols = |v: &Value| -> Vec<String> {
-        v["changed_symbols"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|s| s["file"].as_str().unwrap_or("").ends_with("shared.h"))
-            .map(|s| s["language"].as_str().unwrap_or("").to_string())
-            .collect()
-    };
-    assert_eq!(
-        header_symbols(&clean),
-        header_symbols(&polluted),
-        "an untracked .cpp must not change how committed revisions are parsed"
-    );
+    let root = dir.path();
+    let excludes = Indexer::build_exclude_set(&[]).unwrap();
+    let mut committed = revision_snapshot(root, root, "HEAD").unwrap();
+    let mut working = working_snapshot(root).unwrap();
+    for (snapshot, language) in [
+        (&mut committed, indexer::language::Language::C),
+        (&mut working, indexer::language::Language::Cpp),
+    ] {
+        let index = snapshot_index(root, snapshot, &excludes).unwrap();
+        let symbol = index
+            .symbols
+            .values()
+            .find(|s| s.file.ends_with("shared.h") && s.name == "P")
+            .unwrap();
+        assert_eq!(symbol.language, language);
+    }
 }

@@ -388,14 +388,9 @@ async fn reindex_batch(
     embed_config: Option<Arc<EmbedConfig>>,
 ) {
     let removed_ids: Vec<crate::indexer::language::SymbolId>;
+    let affected: HashSet<PathBuf>;
     {
         let mut idx = index.write().await;
-        // Capture symbol IDs for changed files BEFORE reindex mutates by_file
-        removed_ids = paths
-            .iter()
-            .flat_map(|p| idx.by_file.get(p).cloned().unwrap_or_default())
-            .collect();
-
         // Apply the same exclusion policy as initial indexing (issue #74):
         // edits or new files inside excluded directories must not re-enter
         // the index, and previously indexed files that are now excluded are
@@ -406,17 +401,21 @@ async fn reindex_batch(
             globset::GlobSetBuilder::new().build().unwrap()
         });
         let extra_excluded_dirs = crate::indexer::extra_excluded_dir_names();
-        let mut accepted: HashSet<PathBuf> = HashSet::new();
-        for path in paths {
-            if path_is_excluded(path, root, &exclude_set, &extra_excluded_dirs) {
-                idx.remove_file(path);
-                continue;
-            }
-            accepted.insert(path.clone());
+        let (mut accepted, excluded): (HashSet<_>, HashSet<_>) = paths
+            .iter()
+            .cloned()
+            .partition(|path| !path_is_excluded(path, root, &exclude_set, &extra_excluded_dirs));
+        let extensions =
+            Indexer::prepare_header_reclassification(&mut accepted, root, &exclude_set, &idx);
+        affected = accepted.union(&excluded).cloned().collect();
+        removed_ids = affected
+            .iter()
+            .flat_map(|path| idx.by_file.get(path).into_iter().flatten().cloned())
+            .collect();
+        for path in excluded {
+            idx.remove_file(&path);
         }
-
-        // One graph rebuild for the whole batch, not one per changed file.
-        indexer.reindex_files(&accepted, root, &mut idx);
+        indexer.reindex_files_with_extensions(&accepted, root, &mut idx, &extensions);
 
         // Flush updated index to disk while holding the write lock for consistency.
         if let Err(e) = save_index(&idx, index_path) {
@@ -479,7 +478,7 @@ async fn reindex_batch(
         };
         crate::embed::update_embeddings_for_files(
             &*index.read().await,
-            paths,
+            &affected,
             &removed_ids,
             cfg,
             &store_path,
@@ -594,6 +593,77 @@ mod tests {
         let names: Vec<_> = idx.symbols.values().map(|s| s.name.as_str()).collect();
         assert!(names.contains(&"updated"), "expected 'updated' in index");
         assert!(!names.contains(&"original"), "expected 'original' removed");
+    }
+
+    #[tokio::test]
+    async fn header_reclassification_reports_added_and_removed_symbols() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let header = root.join("shared.h");
+        let cpp = root.join("active.cpp");
+        let excluded = root.join("excluded.cpp");
+        let meta_path = root.join("meta.json");
+        let index_path = root.join("index.bin");
+        std::fs::write(&header, "template<class T> class Shared {};").unwrap();
+        std::fs::write(excluded, "void example() {}").unwrap();
+        let mut meta = IndexMeta::new(root);
+        meta.effective_excludes = vec!["excluded.cpp".into()];
+        save_meta(&meta, &meta_path).unwrap();
+        let indexer = Arc::new(Indexer::new(registry::build_default_registry()));
+        let (initial, count) = indexer
+            .index_project(root, &meta.effective_excludes)
+            .unwrap();
+        assert_eq!(count, 1);
+        assert!(!initial.by_file.contains_key(&header));
+        let index = Arc::new(RwLock::new(initial));
+
+        // An empty C++ file supplies evidence despite having no indexed symbols.
+        std::fs::write(&cpp, "").unwrap();
+        let changed = HashSet::from([cpp.clone()]);
+        reindex_batch(
+            &changed,
+            root,
+            &indexer,
+            &index,
+            &index_path,
+            &meta_path,
+            None,
+        )
+        .await;
+        let header_id = {
+            let idx = index.read().await;
+            let symbol = idx
+                .symbols
+                .values()
+                .find(|s| s.file.as_path() == header && s.name == "Shared")
+                .unwrap();
+            assert_eq!(symbol.language, crate::indexer::language::Language::Cpp);
+            symbol.id.clone()
+        };
+        let meta = load_meta(&meta_path).unwrap();
+        assert_eq!(
+            meta.change_log.last().unwrap().added,
+            vec![header_id.clone()]
+        );
+
+        std::fs::remove_file(cpp).unwrap();
+        reindex_batch(
+            &changed,
+            root,
+            &indexer,
+            &index,
+            &index_path,
+            &meta_path,
+            None,
+        )
+        .await;
+        let (fresh, _) = indexer
+            .index_project(root, &meta.effective_excludes)
+            .unwrap();
+        assert!(!fresh.by_file.contains_key(&header));
+        assert!(!index.read().await.by_file.contains_key(&header));
+        let meta = load_meta(&meta_path).unwrap();
+        assert_eq!(meta.change_log.last().unwrap().removed, vec![header_id]);
     }
 
     #[tokio::test]
