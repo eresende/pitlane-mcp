@@ -107,7 +107,11 @@ class QualityRecord:
     grounded_symbols_count: int
     ungrounded_references_count: int
     is_negative_correct: bool | None
-    quality_score: float  # 0.0 to 1.0
+    quality_score: float  # 0.0 to 1.0; precision scaled by the citation floor
+    grounding_precision: float = 0.0  # grounded / extracted, unmodified
+    citation_count: int = 0  # grounded files (distinct) + grounded symbols
+    ambiguous_references_count: int = 0  # bare names matching several files
+    score_version: str = "grounding-v2"
 
 
 @dataclass
