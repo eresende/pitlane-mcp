@@ -4,7 +4,10 @@ This opt-in experiment measures whether an indexed-tool MCP server, and a naviga
 skill on top of it, help an agent answer repository questions compared with plain
 file tools. It reuses `AgenticLoop`, `BaselineExecutor`, the MCP stdio transport, the
 existing ripgrep prompts and `QualityScorer`. Existing `bench.harness.run` commands
-and artifact schemas are unchanged.
+keep their options, but two shared changes reach every benchmark mode: the native
+`grep_search` returns an error for a missing path or one outside the repository
+instead of reporting no matches or searching the root, and `QualityScorer` reports
+`grounding-v3` (see Artifacts and interpretation).
 
 ## Treatments and isolation
 
@@ -137,7 +140,13 @@ for the wire audit.
 attach its own `steering` hints to responses (`PITLANE_MCP_TOOL_GUIDANCE`). Setting
 `none` tests whether guidance belongs in the agent-side skill instead of in every
 tool response. It is a control field, so a smoke produced under one mode cannot
-admit a pilot run under the other.
+admit a pilot or full run under the other. Any other value is rejected, because the
+server treats everything except `none` as `full`.
+
+The setting needs a server that implements the variable (added in #163). Index
+preparation calls `get_index_stats`, which always carries `steering` when allowed,
+and stops before the first task run unless the field's presence matches the declared
+mode. The result is recorded in `index_setup.json` under `tool_guidance`.
 
 The evaluator-only [task-quality-v1 rubric](TASK_QUALITY_RUBRIC_V1.md) is frozen and
 copied/hashed before inference. It separates required components, essential
@@ -152,6 +161,24 @@ every arm three ways: all runs, converged runs only (natural termination) and
 reviewed successes. `budget_exhaustion_rate` is reported separately, because a run
 cut off by the iteration budget answers under a forced synthesis turn and must not be
 compared with one that stopped by itself.
+
+When the pilot stops on a technical failure, the command exits with status 1.
+
+## Full run
+
+```sh
+.venv/bin/python -m bench.harness.experiments.navigation_skill \
+  --phase full --validated-smoke results/skill-smoke \
+  --capture-traces --out results/skill-full
+```
+
+The full run uses the configured `tasks` instead of `pilot_tasks` and is otherwise
+held to the pilot's controls. It requires `--capture-traces` and a validated smoke,
+is admitted by the same technical checks, and every attempt passes the wire audit
+and the isolation, schema, prompt and accounting checks before the next one starts.
+It additionally requires the smoke's whole input identity, so its config, repository,
+prompts, skill, harness sources, endpoint, embedding settings and server binary must
+match the smoke's.
 
 ## Evidence recall
 
@@ -196,9 +223,10 @@ resume that could silently mix experimental inputs.
 - `instances/<task>/<arm>/run_N/`: `result.json`, plus `wire/` and observations when
   `--capture-traces` is set.
 
-Wire files contain repository source and model reasoning; they are created with mode
-0600 inside 0700 directories under an ignored path, and authentication headers are
-never serialized. Keep the whole output tree private.
+Wire files, observations and the parsed conversation contain repository source and
+model reasoning; they are created with mode 0600 inside 0700 attempt directories
+under an ignored path, and authentication headers are never serialized. Keep the
+whole output tree private.
 
 Usage is cumulative provider-reported input/output across every model request,
 including repeated history. Reasoning tokens, if reported, are an output subset and
@@ -207,12 +235,13 @@ measured as UTF-8 bytes. Provider cached-token fields are retained per request a
 summarised when every request reports them, because consecutive same-task arms can
 otherwise differ through prompt caching rather than navigation behavior.
 
-Grounding is `grounding-v2`: distinct cited files and symbols that exist in the
-snapshot, divided by every extracted reference, then scaled by a citation floor so
-fewer than four grounded citations cannot reach 1.0. Bare file names resolve to a
+Grounding is `grounding-v3`: cited files and symbols that resolve to the snapshot,
+divided by every extracted reference, then scaled by a citation floor so fewer than
+four distinct grounded citations cannot reach 1.0. Bare file names resolve to a
 repository file only when that basename is unique; an ambiguous basename is counted
-in `ambiguous_references_count` and never credited. `grounding_precision` keeps the
-unmodified precision. It remains a reference proxy, not correctness: efficiency
+in `ambiguous_references_count` and never credited. Naming one file both ways
+(`dir.rs` and `crates/ignore/src/dir.rs`) counts as two grounded references and one
+distinct citation. `grounding_precision` keeps the unmodified precision. It remains a reference proxy, not correctness: efficiency
 differences are not improvements when quality decreases, and no significance claim
 follows from any number of runs in one artifact.
 

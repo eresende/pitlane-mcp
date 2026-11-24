@@ -11,7 +11,8 @@ pilot manifest before inference. Historical scores and reports are not rewritten
 0.5 means partial/incomplete or a substantive positive factual error, including an
 optional detail; 0 means incorrect or no usable task answer. Record repository
 evidence. Only a completed answer with strict 1 is a strict success. The legacy
-reference-grounding score remains a separate, unchanged lexical proxy.
+reference-grounding score remains a separate lexical proxy; this harness reports
+it as `grounding-v3`.
 
 **Task-oriented quality** measures requested work separately from incidental
 precision. Score each preregistered component and essential relationship:
