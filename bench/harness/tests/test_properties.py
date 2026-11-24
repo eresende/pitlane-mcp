@@ -434,7 +434,9 @@ def test_baseline_grep_search_correctness(
         executor.shutdown()
 
         if expected_matches:
-            actual_lines = set(result.content.strip().split("\n"))
+            # Only a trailing newline may be stripped: `.strip()` would also delete
+            # significant trailing whitespace from the last matched line.
+            actual_lines = set(result.content.rstrip("\n").split("\n"))
             expected_set = set(expected_matches)
             assert actual_lines == expected_set, (
                 f"Mismatch:\nExpected: {expected_set}\nActual: {actual_lines}"

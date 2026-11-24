@@ -245,3 +245,13 @@ The OpenCode config files live in `bench/harness/configs/`:
 - `configs/bedrock.sonnet45.no-mcp.json` — premium baseline
 
 If you need that flow, keep both targets pinned to the same provider/model settings and treat it as an experiment, not the official benchmark path.
+
+## Navigation skill A/B/C experiment
+
+For isolated native / MCP-only / MCP-plus-skill comparisons against a hosted
+OpenAI-compatible endpoint, see [the experiment instructions](experiments/README.md).
+This opt-in path separates technical readiness from correctness evaluation. It
+supports a three-run smoke, a pilot (five attempts per task and arm, 75 runs by
+default) and a separately authorized full run. Pilot and full admission require a
+matching technical smoke and captured wire traces. Existing benchmark modes retain
+their historical prompt guidance and are not used for the skill ablation.
