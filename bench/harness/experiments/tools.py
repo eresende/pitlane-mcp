@@ -146,6 +146,9 @@ class IsolatedMCP(MCPExecutor):
         if response.get("result", {}).get("isError"):
             raise RuntimeError("index_preparation_failed")
         self.ready = json.loads(self._extract_content(response))
+        # Some failures arrive as an error object in the content with isError unset.
+        if not isinstance(self.ready, dict) or "error" in self.ready:
+            raise RuntimeError("index_preparation_failed")
 
 
 class ExperimentTools:

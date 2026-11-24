@@ -180,7 +180,10 @@ def verify_guidance(mcp, snapshot, declared):
         payload = json.loads(mcp._extract_content(response))
     except ValueError:
         payload = None
-    observed = "steering" in payload if isinstance(payload, dict) else None
+    # The server reports some failures as an error object in the content with
+    # isError unset. That says nothing about steering, so it is not evidence.
+    readable = isinstance(payload, dict) and not response.get("result", {}).get("isError") and "error" not in payload
+    observed = "steering" in payload if readable else None
     if observed is None:
         raise GuidanceMismatch("get_index_stats returned no readable payload, so tool guidance could not be verified",
                                declared=declared, steering_observed=None)

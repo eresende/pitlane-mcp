@@ -240,6 +240,30 @@ def test_declared_tool_guidance_must_be_observed_on_the_server(tmp_path):
     with pytest.raises(GuidanceMismatch, match="could not be verified") as stopped:
         verify_guidance(_StatsServer("failed to deserialize parameters"), tmp_path, "none")
     assert stopped.value.detail["steering_observed"] is None
+    # The server reports some failures as an error object in the content with
+    # isError unset. Under `none` that must not pass as "steering omitted".
+    for declared in ("none", "full"):
+        with pytest.raises(GuidanceMismatch, match="could not be verified") as stopped:
+            verify_guidance(_StatsServer(json.dumps({"error": {"code": "INTERNAL_ERROR"}})), tmp_path, declared)
+        assert stopped.value.detail == {"declared": declared, "steering_observed": None}
+
+
+def test_index_preparation_rejects_an_error_reported_in_content(tmp_path):
+    from bench.harness.experiments.tools import IsolatedMCP
+
+    def server(payload):
+        class Server(IsolatedMCP):
+            def _call_tool(self, name, arguments):
+                text = json.dumps(payload)
+                return {"result": {"isError": False, "content": [{"type": "text", "text": text}]}}
+
+        return Server(tmp_path)
+
+    with pytest.raises(RuntimeError, match="index_preparation_failed"):
+        server({"error": {"code": "INTERNAL_ERROR", "message": "Cannot canonicalize path"}})._ensure_project_ready(str(tmp_path))
+    ready = server({"status": "ready", "index": {"status": "indexed"}})
+    ready._ensure_project_ready(str(tmp_path))
+    assert ready.ready["status"] == "ready"
 
 
 def test_index_preparation_records_verified_guidance_and_shuts_down_on_mismatch(tmp_path, monkeypatch):
@@ -263,10 +287,11 @@ def test_index_preparation_records_verified_guidance_and_shuts_down_on_mismatch(
                 "server_info": {"name": "pitlane-mcp", "version": "test"},
                 "get_index_stats": {"total_symbols": 1, **({"steering": {}} if self.steering else {})},
             }
-            return json.dumps(payloads[name])
+            self.text = json.dumps(payloads[name])
+            return {"result": {"content": []}}
 
         def _extract_content(self, raw):
-            return raw
+            return self.text
 
         def shutdown(self):
             self.closed = True
