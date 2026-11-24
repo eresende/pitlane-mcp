@@ -65,14 +65,19 @@ def make_snapshot(repo, destination):
     archive = git(repo, "archive", "HEAD")
     excluded = []
     links = []
-    blocked = {"AGENTS.md", "CLAUDE.md", "GEMINI.md", "SKILL.md", ".env"}
-    config_dirs = {".agents", ".codex", ".claude", ".gemini", ".kiro", ".opencode"}
+    # Instruction files an agent would otherwise read as guidance; directory
+    # names remove whole agent configuration trees.
+    blocked = {"AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", "GEMINI.md", "SKILL.md", ".env",
+               ".cursorrules", ".windsurfrules", ".clinerules", "copilot-instructions.md"}
+    config_dirs = {".agents", ".codex", ".claude", ".gemini", ".kiro", ".opencode",
+                   ".clinerules", ".cursor", ".windsurf", ".continue"}
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         for member in tar.getmembers():
             relative = Path(member.name)
             if relative.is_absolute() or ".." in relative.parts:
                 raise ValueError("Unsafe archive path")
-            if relative.name in blocked or relative.name.startswith(".env.") or config_dirs.intersection(relative.parts):
+            if (relative.name in blocked or relative.name.startswith(".env.")
+                    or relative.name.endswith(".instructions.md") or config_dirs.intersection(relative.parts)):
                 excluded.append(member.name)
                 continue
             target = destination / relative
@@ -105,11 +110,24 @@ def tree_digest(root):
     return digest.hexdigest()
 
 
+GUIDANCE_MODES = ("full", "none")
+
+
+def guidance_mode(config):
+    """The declared steering mode. The server treats anything but ``none`` as full, so a typo must not pass."""
+    mode = config.get("tool_guidance", "full")
+    if mode not in GUIDANCE_MODES:
+        raise ValueError("tool_guidance must be one of: " + ", ".join(GUIDANCE_MODES))
+    return mode
+
+
 class IsolatedMCP(MCPExecutor):
     def __init__(self, home, tier="default", guidance="full"):
         super().__init__()
         self.home = str(home)
         self.tier = tier
+        if guidance not in GUIDANCE_MODES:
+            raise ValueError("guidance must be one of: " + ", ".join(GUIDANCE_MODES))
         self.guidance = guidance
         self.ready = None
 

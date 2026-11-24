@@ -22,7 +22,7 @@ from bench.harness.framework.quality_scorer import QualityScorer
 from bench.harness.experiments.provider import CompatibleProvider, TracedProvider, read_key, usage_summary, ProviderError
 from bench.harness.experiments.tools import (
     DeadlineExceeded, ExperimentTools, IsolatedMCP, deadline, git,
-    make_snapshot, repo_identity, tree_digest,
+    guidance_mode, make_snapshot, repo_identity, tree_digest,
 )
 from bench.harness.experiments.report import write_report
 from bench.harness.experiments.completion_guidance import ANSWER_GUIDANCE, CAUSAL_GUIDANCE
@@ -50,6 +50,12 @@ def digest(value):
 
 def dump(path, value):
     Path(path).write_text(json.dumps(value, indent=2) + "\n")
+
+
+def dump_private(path, value):
+    """Write an evidence-bearing trace owner-only, like the wire files."""
+    with open(path, "w", opener=lambda name, flags: os.open(name, flags, 0o600)) as handle:
+        handle.write(json.dumps(value, indent=2) + "\n")
 
 
 def system_prompt(arm, root, skill):
@@ -126,6 +132,24 @@ def validate_smoke(rows, manifest):
             "full_benchmark_executed": manifest["phase"] == "full"}
 
 
+# Phases whose every attempt is audited against the wire and admitted by a prior smoke.
+CHECKED_PHASES = ("pilot", "full")
+
+
+def validate_phase(rows, manifest):
+    """Execution checks for a recorded phase; pilot and full share one audit."""
+    if manifest["phase"] == "smoke":
+        return validate_smoke(rows, manifest)
+    if manifest["phase"] in CHECKED_PHASES:
+        return validate_pilot(rows, manifest)
+    return {"phase": manifest["phase"]}
+
+
+def should_stop(row, config, validation, checked):
+    """True when the next attempt must not run: execution failed, or an audited phase broke isolation."""
+    return not session_valid(row, config) or (checked and not validation["continue_execution"])
+
+
 def require_smoke(path, identity):
     path = Path(path)
     manifest = json.loads((path / "run_manifest.json").read_text())
@@ -133,6 +157,39 @@ def require_smoke(path, identity):
     result = validate_smoke(rows, manifest)
     if manifest["phase"] != "smoke" or manifest["identity"] != identity or not result["technical_passed"]:
         raise ValueError("Experiment requires matching smoke inputs and passing technical checks; correctness is measured separately")
+
+
+class GuidanceMismatch(RuntimeError):
+    """The server did not apply, or could not confirm, the declared steering mode."""
+
+    def __init__(self, message, **detail):
+        super().__init__(message)
+        self.detail = detail
+
+
+def verify_guidance(mcp, snapshot, declared):
+    """Prove the declared steering mode before any task run.
+
+    ``get_index_stats`` takes no query and is the one default-tier tool that
+    always attaches ``steering`` when the server is allowed to. A server built
+    before ``PITLANE_MCP_TOOL_GUIDANCE`` existed ignores the variable, so the
+    manifest would otherwise declare a control that never took effect.
+    """
+    response = mcp._call_tool("get_index_stats", {"project": str(snapshot)})
+    try:
+        payload = json.loads(mcp._extract_content(response))
+    except ValueError:
+        payload = None
+    observed = "steering" in payload if isinstance(payload, dict) else None
+    if observed is None:
+        raise GuidanceMismatch("get_index_stats returned no readable payload, so tool guidance could not be verified",
+                               declared=declared, steering_observed=None)
+    if observed != (declared == "full"):
+        raise GuidanceMismatch(f"Tool guidance mismatch: config declares {declared!r} but get_index_stats "
+                               f"{'attached' if observed else 'omitted'} steering; "
+                               "use a server that implements PITLANE_MCP_TOOL_GUIDANCE",
+                               declared=declared, steering_observed=observed)
+    return {"declared": declared, "steering_observed": observed, "verified": True}
 
 
 def prepare_index(snapshot, home, timeout, guidance="full"):
@@ -156,7 +213,8 @@ def prepare_index(snapshot, home, timeout, guidance="full"):
                 raise ValueError("Embeddings must finish before navigation timing")
             return {"cold_setup_seconds": time.perf_counter() - start,
                     "initial_readiness": first, "final_readiness": mcp.ready,
-                    "server": json.loads(mcp._extract_content(mcp._call_tool("server_info", {})))}
+                    "server": json.loads(mcp._extract_content(mcp._call_tool("server_info", {}))),
+                    "tool_guidance": verify_guidance(mcp, snapshot, guidance)}
     finally:
         mcp.shutdown()
 
@@ -194,7 +252,7 @@ def run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill,
 
 def _run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill, before, repo, trace_dir=None):
     tools = None
-    mcp = IsolatedMCP(home, guidance=config.get("tool_guidance", "full")) if arm != "A" else None
+    mcp = IsolatedMCP(home, guidance=guidance_mode(config)) if arm != "A" else None
     backend_type = TracedProvider if trace_dir else CompatibleProvider
     backend = backend_type(base_url, config["model"], key, temperature=config["temperature"],
                                  max_tokens=config["max_output_tokens"], request_options=config["request_options"],
@@ -229,9 +287,9 @@ def _run_one(task, arm, repetition, config, snapshot, home, key, base_url, skill
             timeout = True
         elapsed = time.perf_counter() - start
         if trace_dir:
-            dump(Path(trace_dir).parent / "observations.json", backend.observations)
+            dump_private(Path(trace_dir).parent / "observations.json", backend.observations)
             if result:
-                dump(Path(trace_dir).parent / "parsed_result.json", asdict(result))
+                dump_private(Path(trace_dir).parent / "parsed_result.json", asdict(result))
         model_after = model_sample()
         status = "timeout" if timeout else result.status
         answer = "" if result is None else result.final_answer
@@ -307,8 +365,7 @@ def main(argv=None):
         manifest = json.loads((out / "run_manifest.json").read_text())
         rows = [json.loads(line) for line in (out / "results.jsonl").read_text().splitlines()]
         load_reviews(out, rows)
-        validation = (validate_pilot(rows, manifest) if manifest["phase"] == "pilot" else
-                      validate_smoke(rows, manifest) if manifest["phase"] == "smoke" else {"phase": "full"})
+        validation = validate_phase(rows, manifest)
         write_report(out, manifest, rows, validation)
         return
     if not args.base_url:
@@ -323,13 +380,20 @@ def main(argv=None):
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     ).returncode != 0:
         parser.error("Artifacts inside the harness repository must use an ignored directory such as results/")
-    if args.phase == "pilot" and (not args.capture_traces or not args.validated_smoke or
-                                  len(config.get("pilot_tasks", [])) != 5 or set(config["pilot_tasks"]) != set(TASKS)):
-        parser.error("Pilot requires --capture-traces, --validated-smoke and the five preregistered pilot_tasks")
+    # Pilot and full are audited on the wire and admitted by a prior technical smoke.
+    checked = args.phase in CHECKED_PHASES
+    if checked and not (args.capture_traces and args.validated_smoke):
+        parser.error(f"{args.phase} requires --capture-traces and --validated-smoke")
+    if args.phase == "pilot" and (len(config.get("pilot_tasks", [])) != 5 or set(config["pilot_tasks"]) != set(TASKS)):
+        parser.error("Pilot requires the five preregistered pilot_tasks")
     if config["configurations"] != {"A": {"name": "native", "mcp": False, "skill": False},
                                      "B": {"name": "mcp-only", "mcp": True, "skill": False},
                                      "C": {"name": "mcp-skill", "mcp": True, "skill": True}}:
         parser.error("Invalid A/B/C treatment definitions")
+    try:
+        guidance = guidance_mode(config)
+    except ValueError as exc:
+        parser.error(str(exc))
     key = read_key(args.api_key_env, args.env_file)
     skill = Path(args.skill).read_text()
     if not skill.strip():
@@ -363,15 +427,14 @@ def main(argv=None):
                        "capture_traces": args.capture_traces,
                        "mcp_binary_sha256": binary_sha})
     admission = None
-    if args.phase == "pilot":
+    if checked:
         admission = require_technical_smoke(args.validated_smoke, {
             "repo": before, "config": config, "prompt_set_sha256": digest(Path(args.prompts).read_bytes()),
             "skill_sha256": digest(skill.encode()), "provider_endpoint_sha256": digest(args.base_url.encode()),
             "embedding_configuration": embedding, "capture_traces": args.capture_traces, "harness_sources": sources,
             "mcp_binary_sha256": binary_sha})
     if args.phase == "full":
-        if not args.validated_smoke:
-            parser.error("Full execution requires --validated-smoke after review")
+        # The expansion additionally requires the smoke's whole input identity.
         require_smoke(args.validated_smoke, identity)
     out.mkdir(parents=True, exist_ok=True, mode=0o700)
     out.chmod(0o700)
@@ -420,7 +483,7 @@ def main(argv=None):
                 "environment": {"declared": config["declared_environment"],
                                 "model": preflight["model"],
                                 "server_config_change_monitoring": "unavailable"}}
-    if args.phase == "pilot":
+    if checked:
         rubric_path = ROOT / "bench/harness/experiments/TASK_QUALITY_RUBRIC_V1.md"
         manifest.update(technical_readiness=admission,
                         quality_rubric={"version": VERSION, "checks": TASKS, "document_sha256": digest(rubric_path.read_bytes())},
@@ -429,12 +492,16 @@ def main(argv=None):
         (out / rubric_path.name).write_bytes(rubric_path.read_bytes())
     dump(out / "run_manifest.json", manifest)
     try:
-        index = prepare_index(snapshot, home, config["setup_timeout_seconds"], config.get("tool_guidance", "full"))
+        index = prepare_index(snapshot, home, config["setup_timeout_seconds"], guidance)
     except DeadlineExceeded:
         dump(out / "index_setup.json", {"error": "setup_timeout"})
         raise SystemExit("Index preparation timed out; no task runs started")
+    except GuidanceMismatch as exc:
+        dump(out / "index_setup.json", {"error": "tool_guidance_mismatch", **exc.detail})
+        raise SystemExit(f"{exc}; no task runs started")
     dump(out / "index_setup.json", index)
     rows = []
+    failed = False
     for task_id, arm, repetition in order:
         if repo_identity(repo) != before or tree_digest(snapshot) != snapshot_info["sha256"]:
             raise RuntimeError("Repository state changed; stopping experiment")
@@ -442,29 +509,33 @@ def main(argv=None):
             raise RuntimeError("Experiment inputs changed; stopping before the next attempt")
         print(f"Running {task_id} {arm} repetition {repetition}", flush=True)
         instance = out / "instances" / task_id / arm / f"run_{repetition}"
+        # Traces hold source and reasoning; keep every attempt directory owner-only.
+        instance.mkdir(parents=True, exist_ok=True, mode=0o700)
         row = run_one(all_tasks[task_id], arm, repetition, config, snapshot, home, key,
                       args.base_url, skill, before, repo, instance / "wire" if args.capture_traces else None)
         row["repository_unchanged"] &= tree_digest(snapshot) == snapshot_info["sha256"]
         row["inputs_unchanged"] = inputs_unchanged()
-        if args.phase == "pilot":
+        if checked:
             task = all_tasks[task_id]
             row["wire_controls_verified"] = audit_wire(instance / "wire", task.prompt + ("\n\n" + task.prompt_suffix if task.prompt_suffix else ""),
                                                         system_prompt(arm, snapshot, skill), config, admission["wire_schema_sha256"][arm])
         rows.append(row)
-        instance.mkdir(parents=True, exist_ok=True)
         dump(instance / "result.json", row)
-        validation = (validate_pilot(rows, manifest) if args.phase == "pilot" else
-                      validate_smoke(rows, manifest) if args.phase == "smoke" else {"phase": "full"})
+        validation = validate_phase(rows, manifest)
         write_report(out, manifest, rows, validation)
         print(f"  {row['status']}; grounding={row['quality_score']}; tokens={row['total_tokens']}; seconds={row['execution_seconds']}", flush=True)
-        if not session_valid(row, config) or (args.phase == "pilot" and not validation["continue_execution"]):
+        if should_stop(row, config, validation, checked):
             print("Technical execution/isolation failed; remaining attempts will not run.", flush=True)
+            failed = True
             break
     dump(out / "reviews.json", {f"{r['task_id']}/{r['configuration']}/{r['run_number']}":
                                {"correctness_score": None, "evidence": "", "appropriate_mcp_selection": None,
                                 "unnecessary_mcp_calls": None, "redundant_repository_searches": None,
-                                **({"task_quality": review_template(r["task_id"])} if args.phase == "pilot" else {})} for r in rows})
+                                **({"task_quality": review_template(r["task_id"])}
+                                   if checked and r["task_id"] in TASKS else {})} for r in rows})
     print(f"Report: {out / 'report.md'}. Stopped after {len(rows)} runs.", flush=True)
+    if failed:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

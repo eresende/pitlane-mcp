@@ -27,7 +27,7 @@ def require_technical_smoke(path, current):
     old = json.loads((path / "run_manifest.json").read_text())
     rows = [json.loads(s) for s in (path / "results.jsonl").read_text().splitlines()]
     if old["phase"] != "smoke" or not validate_smoke(rows, old)["technical_passed"]:
-        raise ValueError("Pilot requires a technically passing smoke; quality is evaluated separately")
+        raise ValueError("Pilot and full runs require a technically passing smoke; quality is evaluated separately")
     if not old.get("mcp_binary_sha256") or old["mcp_binary_sha256"] != current.get("mcp_binary_sha256"):
         raise ValueError("Smoke control mismatch: mcp_binary_sha256; obtain a fresh smoke with the binary pinned")
     for key in ("repo", "prompt_set_sha256", "skill_sha256", "provider_endpoint_sha256", "embedding_configuration", "capture_traces"):
@@ -53,6 +53,7 @@ def require_technical_smoke(path, current):
 
 
 def validate_pilot(rows, manifest):
+    """Execution and isolation checks for every attempt of a pilot or full run."""
     baseline = {r["configuration"]: r for r in manifest["technical_readiness"]["baseline_rows"]}
     expected = manifest["schedule"]
     checks = {
@@ -78,14 +79,16 @@ def validate_pilot(rows, manifest):
     evaluated = {name: value for name, value in checks.items() if value is not None}
     prefix_passed = all(evaluated.values())
     complete = len(rows) == len(expected)
-    return {"phase": "pilot", "checks": checks,
+    # A manifest without a phase is a pilot; full runs record theirs.
+    phase = manifest.get("phase", "pilot")
+    return {"phase": phase, "checks": checks,
             "not_evaluated": sorted(name for name, value in checks.items() if value is None),
             "continue_execution": prefix_passed,
-            "pilot_complete": complete, "planned_runs": len(expected), "executed_runs": len(rows),
+            "pilot_complete": complete, "run_complete": complete, "planned_runs": len(expected), "executed_runs": len(rows),
             "technical_passed": prefix_passed and complete,
             "correctness_evaluation": {"strict_reviewed": sum(r.get("correctness_score") is not None for r in rows),
                                        "task_reviewed": sum(r.get("task_quality_score") is not None for r in rows)},
-            "full_benchmark_executed": False}
+            "full_benchmark_executed": phase == "full" and complete}
 
 
 def accounting_valid(row):
