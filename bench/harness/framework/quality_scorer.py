@@ -15,6 +15,11 @@ precision-only score:
    almost nothing. ``quality_score`` now applies a citation floor: precision is
    scaled by ``min(1, grounded_citations / MIN_GROUNDED_CITATIONS)``. The
    unmodified precision remains available as ``grounding_precision``.
+
+Score version 3 corrects a defect of version 2: citing one file two ways (``dir.rs``
+and ``crates/ignore/src/dir.rs``) counted as one grounded and one ungrounded
+reference. Precision now counts resolved references; the citation floor still
+counts distinct files.
 """
 
 from __future__ import annotations
@@ -28,7 +33,7 @@ from bench.harness.framework.models import QualityRecord
 # Regex patterns
 # ---------------------------------------------------------------------------
 
-SCORE_VERSION = "grounding-v2"
+SCORE_VERSION = "grounding-v3"
 
 # A perfect score requires at least this many grounded citations, so a one-file
 # answer is not automatically treated as complete.
@@ -95,13 +100,17 @@ class QualityScorer:
         # --- Extract file references and resolve them to repository files ---
         references = _extract_file_references(answer)
         grounded_files: set[str] = set()
+        resolved_references = 0
         ambiguous = 0
         for reference in references:
             resolved, is_ambiguous = _resolve_file(reference, repo, by_basename)
             if resolved is not None:
                 grounded_files.add(resolved)
+                resolved_references += 1
             ambiguous += is_ambiguous
-        unresolved_files = len(references) - len(grounded_files) - ambiguous
+        # Unresolved and ambiguous references are both ungrounded. Two spellings
+        # of one file are both resolved, so neither lowers precision.
+        ungrounded_files = len(references) - resolved_references
 
         # --- Extract symbols and check presence in source files ---
         symbols = _extract_symbols(answer)
@@ -109,8 +118,9 @@ class QualityScorer:
 
         # --- Ungrounded references ---
         total_extracted = len(references) + len(symbols)
-        total_grounded = len(grounded_files) + grounded_symbols
-        ungrounded = unresolved_files + ambiguous + (len(symbols) - grounded_symbols)
+        total_grounded = resolved_references + grounded_symbols
+        ungrounded = ungrounded_files + (len(symbols) - grounded_symbols)
+        distinct_grounded = len(grounded_files) + grounded_symbols
 
         # --- Negative control check ---
         is_negative_correct: bool | None = None
@@ -120,7 +130,7 @@ class QualityScorer:
 
         # --- Quality score: precision scaled by a citation floor ---
         precision = min(1.0, total_grounded / total_extracted) if total_extracted else 0.0
-        citation_factor = min(1.0, total_grounded / MIN_GROUNDED_CITATIONS)
+        citation_factor = min(1.0, distinct_grounded / MIN_GROUNDED_CITATIONS)
         quality_score = precision * citation_factor
 
         return QualityRecord(
@@ -130,7 +140,7 @@ class QualityScorer:
             is_negative_correct=is_negative_correct,
             quality_score=quality_score,
             grounding_precision=precision,
-            citation_count=total_grounded,
+            citation_count=distinct_grounded,
             ambiguous_references_count=ambiguous,
             score_version=SCORE_VERSION,
         )

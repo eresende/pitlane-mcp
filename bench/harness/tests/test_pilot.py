@@ -89,7 +89,7 @@ def test_summaries_report_convergence_separately_from_exhaustion():
     assert abs(stats['metrics']['quality_score']['mean']-0.6)<1e-9
 
 
-def test_grounding_v2_resolves_bare_names_without_double_counting(tmp_path):
+def test_grounding_v3_resolves_bare_names_without_double_counting(tmp_path):
     from bench.harness.framework.quality_scorer import MIN_GROUNDED_CITATIONS, QualityScorer
     source=tmp_path/'crates/ignore/src'
     source.mkdir(parents=True)
@@ -104,13 +104,20 @@ def test_grounding_v2_resolves_bare_names_without_double_counting(tmp_path):
     assert bare.grounded_files_count==1 and bare.ambiguous_references_count==0
     both=scorer.score('crates/ignore/src/dir.rs and dir.rs both exist.',str(tmp_path),'symbol_grounding')
     assert both.grounded_files_count==1,"a path and its basename must not count twice"
+    # Both spellings resolve, so neither is an ungrounded reference and the
+    # citation floor still sees one distinct file.
+    assert both.ungrounded_references_count==0 and both.grounding_precision==1.0
+    assert both.citation_count==1 and both.quality_score==terse.quality_score
+    restated=scorer.score('crates/ignore/src/dir.rs (dir.rs) defines WalkBuilder; walk.rs defines nothing.',
+                          str(tmp_path),'symbol_grounding')
+    assert restated.grounding_precision==1.0,"restating a grounded file must not lower precision"
     rich=scorer.score('crates/ignore/src/dir.rs defines WalkBuilder; walk.rs walks in parallel.',
                       str(tmp_path),'symbol_grounding')
     assert rich.citation_count>=3 and rich.grounding_precision==1.0
-    assert rich.score_version=='grounding-v2'
+    assert rich.score_version=='grounding-v3'
 
 
-def test_grounding_v2_does_not_credit_ambiguous_bare_names(tmp_path):
+def test_grounding_v3_does_not_credit_ambiguous_bare_names(tmp_path):
     for name in ('a/dir.rs','b/dir.rs'):
         path=tmp_path/name
         path.parent.mkdir(parents=True,exist_ok=True)
@@ -119,6 +126,7 @@ def test_grounding_v2_does_not_credit_ambiguous_bare_names(tmp_path):
     record=QualityScorer().score('The implementation is in dir.rs.',str(tmp_path),'symbol_grounding')
     assert record.grounded_files_count==0,"an ambiguous basename must not be credited"
     assert record.ambiguous_references_count==1
+    assert record.ungrounded_references_count==1 and record.grounding_precision==0.0
 
 
 def test_evidence_recall_measures_component_coverage_not_precision(tmp_path):

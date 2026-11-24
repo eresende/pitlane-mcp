@@ -111,7 +111,7 @@ class QualityRecord:
     grounding_precision: float = 0.0  # grounded / extracted, unmodified
     citation_count: int = 0  # grounded files (distinct) + grounded symbols
     ambiguous_references_count: int = 0  # bare names matching several files
-    score_version: str = "grounding-v2"
+    score_version: str = "grounding-v3"
 
 
 @dataclass
